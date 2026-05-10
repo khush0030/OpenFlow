@@ -250,37 +250,43 @@ class Daemon:
             self._chords = HotkeySet(chords)
             self._chords.start()
 
-        # Tray icon (optional — disable with OPENFLOW_NO_TRAY=1 in headless tests)
-        if not os.environ.get("OPENFLOW_NO_TRAY"):
-            self._tray = TrayApp(
-                on_quit=lambda: self._stop_evt.set(),
-                get_state=lambda: {
-                    "tone": self.state.mode_tone,
-                    "lang": self.state.mode_lang,
-                    "status": "idle",
-                },
-                set_tone=lambda t: setattr(self.state, "mode_tone", t),
-                set_lang=lambda l: setattr(self.state, "mode_lang", l),
-                tone_modes=TONE_MODES,
-                lang_modes=LANG_MODES,
-            )
-            try:
-                self._tray.start()
-            except Exception as e:
-                print(f"[daemon] tray failed to start ({e}); continuing headless.", flush=True)
-                self._tray = None
-
         print(
             f"[daemon] ready.\n"
             f"  hold {hold_key} to dictate\n"
             f"  {self.cfg['hotkeys'].get('cycle_mode','')} cycle tone\n"
             f"  {self.cfg['hotkeys'].get('edit_mode','')} edit mode\n"
-            f"  Ctrl-C to quit.",
+            f"  Quit from the tray, or Ctrl-C if running headless.",
             flush=True,
         )
+
+        headless = bool(os.environ.get("OPENFLOW_NO_TRAY"))
         try:
-            while not self._stop_evt.is_set():
-                self._stop_evt.wait(timeout=1.0)
+            if headless:
+                # Headless mode: just block until SIGINT.
+                while not self._stop_evt.is_set():
+                    self._stop_evt.wait(timeout=1.0)
+            else:
+                # macOS / Cocoa requires pystray to run on the main thread.
+                # Hotkey listeners (pynput) already run in their own threads,
+                # so the main thread is free to host the tray.
+                self._tray = TrayApp(
+                    on_quit=lambda: self._stop_evt.set(),
+                    get_state=lambda: {
+                        "tone": self.state.mode_tone,
+                        "lang": self.state.mode_lang,
+                    },
+                    set_tone=lambda t: setattr(self.state, "mode_tone", t),
+                    set_lang=lambda l: setattr(self.state, "mode_lang", l),
+                    tone_modes=TONE_MODES,
+                    lang_modes=LANG_MODES,
+                )
+                try:
+                    self._tray.run_blocking()
+                except Exception as e:
+                    print(f"[daemon] tray failed ({e}); falling back to headless.", flush=True)
+                    self._tray = None
+                    while not self._stop_evt.is_set():
+                        self._stop_evt.wait(timeout=1.0)
         except KeyboardInterrupt:
             print("\n[daemon] shutting down.", flush=True)
         finally:

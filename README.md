@@ -49,8 +49,8 @@ Requirements: Python ≥ 3.10 and `ffmpeg`.
 brew install ffmpeg python@3.12     # macOS
 # or:  sudo apt install ffmpeg python3.12
 
-git clone <this-repo> openflow
-cd openflow/openflow
+git clone https://github.com/khush0030/OpenFlow.git
+cd OpenFlow
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -98,10 +98,14 @@ Default hotkeys (override in `~/.openflow/config.toml`):
 
 | Action | Default |
 |---|---|
-| Hold-to-talk | `F5` |
+| Hold-to-talk **or** double-tap to toggle | Right Option (`alt_r`) |
 | Cycle tone mode | `F6` |
 | Edit mode | `Cmd+Shift+E` |
 | Undo last paste | `Cmd+Shift+Z` (stub) |
+
+**Two ways to record with the same key:**
+- **Hold** Right Option, speak, release → records while held.
+- **Double-tap** Right Option, speak (hands-free), tap once more → toggle mode for long dictations.
 
 ### Tone modes
 
@@ -170,24 +174,28 @@ python tests/test_pipeline_smoke.py    # whisper wiring smoke test
 Layout:
 
 ```
-openflow/
+OpenFlow/
 ├── README.md
 ├── PROJECT_PLAN.md
 ├── pyproject.toml
 ├── requirements.txt
-└── openflow/
+├── launcher.py         # PyInstaller entry
+├── openflow.spec       # PyInstaller build spec
+├── scripts/            # install_macos.sh, etc.
+├── tests/              # unit + smoke tests
+└── openflow/           # python package
     ├── __main__.py     # CLI entrypoint
     ├── daemon.py       # orchestrator
     ├── audio.py        # sounddevice recorder
     ├── transcribe.py   # faster-whisper wrapper
     ├── ai.py           # Anthropic Claude calls
     ├── dictionary.py   # custom-term biasing + fuzzy correction
-    ├── hotkeys.py      # pynput hold + chord listeners
+    ├── hotkeys.py      # pynput hold-or-toggle + chord listeners
     ├── paste.py        # clipboard + OS-specific paste
     ├── history.py      # sqlite log
-    ├── tray.py         # pystray system-tray UI
+    ├── tray.py         # pystray system-tray UI (main thread)
     ├── prompts.py      # all system prompts
-    ├── config.py       # ~/.openflow/config.toml loader
+    ├── config.py       # ~/.openflow/config.toml loader + .env loader
     └── ui/             # PyQt6 windows (Phase 7)
 ```
 
