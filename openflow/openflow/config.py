@@ -38,7 +38,8 @@ DEFAULTS: dict[str, Any] = {
         "always_english_output": True,
     },
     "hotkeys": {
-        "record_hold": "f5",
+        # F5 collides with macOS Siri; right-option is unbound and easy to reach.
+        "record_hold": "alt_r",
         "record_toggle": "<cmd>+<shift>+<space>",
         "edit_mode": "<cmd>+<shift>+e",
         "cycle_mode": "f6",
