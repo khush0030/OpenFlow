@@ -37,7 +37,7 @@ datas += collect_data_files("onnxruntime")
 
 # -- Analysis -------------------------------------------------------------
 a = Analysis(
-    ["openflow/__main__.py"],
+    ["launcher.py"],
     pathex=["."],
     binaries=[],
     datas=datas,
