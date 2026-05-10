@@ -1,0 +1,47 @@
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+.aider*
+.claude/
+.crush/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Whisper model cache (keep deps small in checkout)
+*.bin
+models/
+
+# User data (should NEVER be committed)
+.openflow/
+
+# Logs / temp
+*.log
+*.sqlite
+*.wav
+test.wav
+/tmp/openflow_*
+
+# Plan PDF (already represented in PROJECT_PLAN.md)
+# (uncomment to exclude)
+# OpenFlow_Project_Plan.pdf

@@ -1,0 +1,31 @@
+[project]
+name = "openflow"
+version = "0.1.0"
+description = "Self-hosted Wispr Flow alternative with Hindi/Hinglish support"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper",
+    "sounddevice",
+    "numpy",
+    "pyperclip",
+    "pynput",
+    "anthropic",
+    "scipy",
+    "pystray",
+    "pillow",
+    "rapidfuzz",
+    "tomli; python_version<'3.11'",
+    "tomli-w",
+    "PyQt6",
+    "keyring",
+]
+
+[project.scripts]
+openflow = "openflow.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["openflow*"]
