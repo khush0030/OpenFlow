@@ -72,12 +72,32 @@ class HoldToTalk:
             self._listener = None
 
 
+def _normalize_chord(s: str) -> str:
+    """Wrap special-key tokens in <> for pynput. Leave single chars alone.
+
+    "f6"            -> "<f6>"
+    "cmd+shift+e"   -> "<cmd>+<shift>+e"
+    "<cmd>+<shift>+e" -> unchanged
+    """
+    parts = [p.strip() for p in s.split("+") if p.strip()]
+    out: list[str] = []
+    for p in parts:
+        if p.startswith("<") and p.endswith(">"):
+            out.append(p)
+        elif len(p) == 1:
+            out.append(p)
+        else:
+            out.append(f"<{p}>")
+    return "+".join(out)
+
+
 class HotkeySet:
     """Bind multiple chord hotkeys (no release event). Uses GlobalHotKeys."""
 
     def __init__(self, bindings: dict[str, Callable[[], None]]) -> None:
-        # bindings: {"<cmd>+<shift>+e": fn, ...}
-        self._gh = keyboard.GlobalHotKeys(bindings)
+        # bindings: {"<cmd>+<shift>+e": fn, ...} or {"f6": fn, ...}
+        normalized = {_normalize_chord(k): v for k, v in bindings.items()}
+        self._gh = keyboard.GlobalHotKeys(normalized)
 
     def start(self) -> None:
         self._gh.start()
