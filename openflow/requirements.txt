@@ -47,6 +47,7 @@ PyQt6==6.11.0
 PyQt6-Qt6==6.11.0
 PyQt6_sip==13.11.1
 pystray==0.19.5
+python-dotenv==1.2.2
 PyYAML==6.0.3
 RapidFuzz==3.14.5
 rich==15.0.0

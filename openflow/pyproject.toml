@@ -18,6 +18,7 @@ dependencies = [
     "tomli-w",
     "PyQt6",
     "keyring",
+    "python-dotenv",
 ]
 
 [project.scripts]

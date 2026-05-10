@@ -7,6 +7,11 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None  # type: ignore[assignment]
+
 if sys.version_info >= (3, 11):
     import tomllib as _toml_read
 else:
@@ -75,8 +80,27 @@ def ensure_dirs() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+_ENV_LOADED = False
+
+
+def load_env() -> None:
+    """Load .env from (1) CWD, (2) ~/.openflow/.env. Idempotent.
+    Does NOT override variables already set in the real environment."""
+    global _ENV_LOADED
+    if _ENV_LOADED or load_dotenv is None:
+        return
+    cwd_env = Path.cwd() / ".env"
+    user_env = CONFIG_DIR / ".env"
+    if cwd_env.exists():
+        load_dotenv(cwd_env, override=False)
+    if user_env.exists():
+        load_dotenv(user_env, override=False)
+    _ENV_LOADED = True
+
+
 def load() -> dict[str, Any]:
     ensure_dirs()
+    load_env()
     if not CONFIG_PATH.exists():
         save(DEFAULTS)
         return DEFAULTS

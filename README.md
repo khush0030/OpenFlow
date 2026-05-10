@@ -56,13 +56,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Set your API key:
+Set your API key. Easiest: drop a `.env` file next to `pyproject.toml`:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env
+$EDITOR .env       # paste sk-ant-... after =
 ```
 
-(Or store it in your OS keychain via the upcoming settings GUI.)
+OpenFlow auto-loads `.env` (project root) **and** `~/.openflow/.env` at startup.
+Both are gitignored. Existing real-environment vars take precedence over `.env`.
+
+Alternative: plain `export ANTHROPIC_API_KEY=sk-ant-...` in your shell, or
+keychain via the upcoming settings GUI.
 
 ### macOS permissions
 
