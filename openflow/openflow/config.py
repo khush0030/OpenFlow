@@ -28,7 +28,9 @@ HISTORY_PATH = CONFIG_DIR / "history.sqlite"
 DEFAULTS: dict[str, Any] = {
     "general": {
         "auto_launch": False,
-        "default_tone": "professional",
+        # User wants exact words preserved by default. "verbatim" only adds
+        # punctuation/capitalization, never rewords. F6 cycles to other modes.
+        "default_tone": "verbatim",
         "default_language": "auto",
         "hindi_script": "devanagari",
         # When true, ANY spoken language is converted to English text on paste.

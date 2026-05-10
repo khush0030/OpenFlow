@@ -60,15 +60,15 @@ class AIProcessor:
 
     # -- High-level operations ------------------------------------------
 
-    def cleanup(self, text: str, mode: str = "professional", context_app: str | None = None) -> str:
+    def cleanup(self, text: str, mode: str = "verbatim", context_app: str | None = None) -> str:
+        # context_app is intentionally NOT used to override `mode` — user wants
+        # explicit control over tone via the F6 cycle / tray submenu, not
+        # silent app-aware switching. Param kept for forward-compat / logging.
         if not text.strip():
             return text
-        # If context_app maps to a known mode, prefer it.
-        if context_app and context_app in CONTEXT_HINTS:
-            mode = CONTEXT_HINTS[context_app]
         if mode == "raw":
             return text
-        system = PROMPTS.get(mode) or PROMPTS["professional"]
+        system = PROMPTS.get(mode) or PROMPTS["verbatim"]
         return self._call(system, text)
 
     def transliterate_to_roman(self, hindi_text: str) -> str:

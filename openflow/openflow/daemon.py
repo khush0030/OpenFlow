@@ -17,7 +17,7 @@ from .history import History
 from .tray import TrayApp, Status
 
 
-TONE_MODES = ["raw", "casual", "professional", "bullets", "email", "slack"]
+TONE_MODES = ["raw", "verbatim", "casual", "professional", "bullets", "email", "slack"]
 LANG_MODES = ["auto", "en", "hi", "hi_roman", "hinglish", "hi_to_en", "en_to_hi"]
 
 

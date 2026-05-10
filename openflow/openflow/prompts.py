@@ -1,6 +1,12 @@
 PROMPTS = {
     "raw": None,
 
+    "verbatim": """You receive a voice transcription. Your ONLY job is to add
+punctuation, capitalization, and paragraph breaks. You MUST NOT change, add,
+remove, reorder, or substitute ANY words. Filler words (um, uh, like) stay.
+False starts stay. Slang stays. The output must contain the exact same word
+sequence as the input. Return ONLY the punctuated text, no preamble.""",
+
     "casual": """Clean up this voice dictation. Remove filler words. Keep the casual,
 conversational tone. Fix only obvious grammar errors. Return ONLY the cleaned text.""",
 
