@@ -54,20 +54,21 @@ class TrayApp:
     # -- menu construction -----------------------------------------------
 
     def _tone_item(self, t: str) -> pystray.MenuItem:
-        return pystray.MenuItem(
-            t,
-            lambda icon, item, t=t: self._tone_clicked(t),
-            checked=lambda item, t=t: self._get_state().get("tone") == t,
-            radio=True,
-        )
+        # pystray's _assert_action inspects callable arity and rejects any
+        # signature that isn't exactly `(icon, item)`. Closures work; the
+        # lambda-with-default-arg trick fails validation.
+        def action(icon, item):
+            self._tone_clicked(t)
+        def checked(item):
+            return self._get_state().get("tone") == t
+        return pystray.MenuItem(t, action, checked=checked, radio=True)
 
     def _lang_item(self, l: str) -> pystray.MenuItem:
-        return pystray.MenuItem(
-            l,
-            lambda icon, item, l=l: self._lang_clicked(l),
-            checked=lambda item, l=l: self._get_state().get("lang") == l,
-            radio=True,
-        )
+        def action(icon, item):
+            self._lang_clicked(l)
+        def checked(item):
+            return self._get_state().get("lang") == l
+        return pystray.MenuItem(l, action, checked=checked, radio=True)
 
     def _build_menu(self) -> pystray.Menu:
         st = self._get_state()
