@@ -40,8 +40,8 @@ if [[ "$yn" =~ ^[Yy]$ ]]; then
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><false/>
-    <key>StandardOutPath</key><string>/tmp/openflow.out.log</string>
-    <key>StandardErrorPath</key><string>/tmp/openflow.err.log</string>
+    <key>StandardOutPath</key><string>$HOME/.openflow/launchd.out.log</string>
+    <key>StandardErrorPath</key><string>$HOME/.openflow/launchd.err.log</string>
 </dict>
 </plist>
 EOF

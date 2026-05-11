@@ -24,12 +24,24 @@ class Recorder:
         self._q: queue.Queue[np.ndarray] = queue.Queue()
         self._lock = threading.Lock()
         self._recording = False
+        # Live RMS sampler — recording pill subscribes via current_rms().
+        # Single-slot value updated on every audio block; thread-safe via GIL.
+        self._rms: float = 0.0
 
     def _callback(self, indata: np.ndarray, frames: int, time, status) -> None:  # noqa: ARG002
         if status:
             # Underruns/overruns can spam; print once.
             print(f"[audio] status: {status}", flush=True)
         self._q.put(indata.copy())
+        try:
+            self._rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+        except Exception:
+            self._rms = 0.0
+
+    @property
+    def current_rms(self) -> float:
+        """Latest RMS level in [0, 1]. Zero when not recording."""
+        return self._rms if self._recording else 0.0
 
     def start(self) -> None:
         with self._lock:
@@ -56,6 +68,7 @@ class Recorder:
             self._stream.close()
             self._stream = None
             self._recording = False
+            self._rms = 0.0
 
         chunks: list[np.ndarray] = []
         while not self._q.empty():

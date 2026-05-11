@@ -23,10 +23,13 @@ hidden += collect_submodules("ctranslate2")
 hidden += collect_submodules("tokenizers")
 hidden += collect_submodules("anthropic")
 hidden += collect_submodules("pynput")
-hidden += collect_submodules("pystray")
+hidden += collect_submodules("rumps")
+hidden += collect_submodules("darkdetect")
 hidden += collect_submodules("PIL")
 hidden += collect_submodules("rapidfuzz")
 hidden += collect_submodules("scipy.io")
+hidden += collect_submodules("AppKit")
+hidden += collect_submodules("ui")
 
 datas = []
 datas += collect_data_files("faster_whisper")
@@ -34,6 +37,9 @@ datas += collect_data_files("ctranslate2")
 datas += collect_data_files("tokenizers")
 datas += collect_data_files("av")  # ffmpeg-style audio decoding
 datas += collect_data_files("onnxruntime")
+# Ship our own assets (fonts/logo/tray/sounds). Empty subdirs are bundled so
+# runtime loaders find the expected layout even before designed assets land.
+datas += [("assets", "assets")]
 
 # -- Analysis -------------------------------------------------------------
 a = Analysis(
@@ -83,7 +89,7 @@ if is_macos:
     app = BUNDLE(
         coll,
         name="OpenFlow.app",
-        icon=None,                       # set later when you have an .icns
+        icon="assets/logo/icon.icns",
         bundle_identifier="com.openflow.dictation",
         info_plist={
             "LSUIElement": True,         # tray-only, no Dock icon

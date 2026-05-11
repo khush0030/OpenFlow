@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 100" width="320" height="100" role="img" aria-label="OpenFlow logo">
+  <title>OpenFlow</title>
+  <!-- Mark: concentric arcs forming an O / sound waves / breath -->
+  <g transform="translate(50, 50)">
+    <!-- Outer arc -->
+    <circle cx="0" cy="0" r="34" fill="none" stroke="#1A1814" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="180 40" transform="rotate(-30)"/>
+    <!-- Middle arc -->
+    <circle cx="0" cy="0" r="24" fill="none" stroke="#1A1814" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="120 30" transform="rotate(80)"/>
+    <!-- Inner arc -->
+    <circle cx="0" cy="0" r="14" fill="none" stroke="#1A1814" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="70 18" transform="rotate(-110)"/>
+    <!-- The point of speech -->
+    <circle cx="0" cy="0" r="3.5" fill="#B8492C"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="105" y="62"
+        font-family="Fraunces, Georgia, serif"
+        font-size="36"
+        font-weight="400"
+        font-style="italic"
+        fill="#1A1814"
+        letter-spacing="-1">openflow</text>
+</svg>

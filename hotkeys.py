@@ -7,10 +7,53 @@ Two interaction modes share one key:
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable
 
+# Force-import HIServices BEFORE pynput so its lazy AXIsProcessTrusted lookup
+# doesn't KeyError on newer pyobjc (>=12).
+try:
+    import HIServices  # noqa: F401
+    from HIServices import AXIsProcessTrusted as _ax_is_trusted  # noqa: F401
+except Exception:
+    pass
+
 from pynput import keyboard
+
+
+def accessibility_trusted() -> bool | None:
+    """True/False/None: trusted / not / can't determine."""
+    try:
+        from HIServices import AXIsProcessTrusted
+        return bool(AXIsProcessTrusted())
+    except Exception:
+        return None
+
+
+def request_accessibility_trust() -> bool:
+    """Trigger the native macOS prompt + open Settings.
+
+    Returns True if we are already trusted, False otherwise (the prompt has
+    been queued in either case). Calling this fires the OS dialog
+    "OpenFlow would like to control this computer using accessibility…",
+    which is how the user grants permission to a freshly-signed binary.
+    """
+    try:
+        from HIServices import AXIsProcessTrustedWithOptions  # type: ignore
+        from CoreFoundation import (  # type: ignore
+            CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks,
+            kCFTypeDictionaryValueCallBacks, kCFBooleanTrue,
+        )
+        key = "AXTrustedCheckOptionPrompt"
+        d = CFDictionaryCreate(
+            None, [key], [kCFBooleanTrue], 1,
+            kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
+        )
+        return bool(AXIsProcessTrustedWithOptions(d))
+    except Exception as e:
+        print(f"[hotkey] could not prompt accessibility: {e}", flush=True)
+        return False
 
 
 HoldKey = str  # e.g. "alt_r" or single char
@@ -127,8 +170,25 @@ class HoldOrToggle:
                 print(f"[hotkey] release: hold ended ({duration:.0f}ms)", flush=True)
 
     def start(self) -> None:
+        ax = accessibility_trusted()
+        if ax is False:
+            print("[hotkey] WARNING: Accessibility not granted — firing native prompt.", flush=True)
+            request_accessibility_trust()
+        elif ax is None:
+            print("[hotkey] could not check Accessibility status (HIServices unavailable)", flush=True)
         self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
         self._listener.start()
+        # Health probe — if listener thread dies within 1.5s, surface it.
+        threading.Thread(target=self._health_probe, daemon=True).start()
+
+    def _health_probe(self) -> None:
+        time.sleep(1.5)
+        listener = self._listener
+        if listener is None:
+            return
+        alive = listener.is_alive() if hasattr(listener, "is_alive") else True
+        ax = accessibility_trusted()
+        print(f"[hotkey] listener alive={alive} ax_trusted={ax} key={self.key!r}", flush=True)
 
     def stop(self) -> None:
         if self._listener is not None:

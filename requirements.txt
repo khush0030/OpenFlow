@@ -1,3 +1,4 @@
+altgraph==0.17.5
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anthropic==0.100.0
@@ -7,6 +8,7 @@ certifi==2026.4.22
 cffi==2.0.0
 click==8.3.3
 ctranslate2==4.7.1
+darkdetect==0.8.0
 distro==1.9.0
 docstring_parser==0.18.0
 faster-whisper==1.2.1
@@ -24,6 +26,7 @@ jaraco.context==6.1.2
 jaraco.functools==4.4.0
 jiter==0.14.0
 keyring==25.7.0
+macholib==1.16.4
 markdown-it-py==4.2.0
 mdurl==0.1.2
 more-itertools==11.0.2
@@ -36,6 +39,8 @@ pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 Pygments==2.20.0
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.5
 pynput==1.8.1
 pyobjc-core==12.1
 pyobjc-framework-ApplicationServices==12.1
@@ -46,11 +51,11 @@ pyperclip==1.11.0
 PyQt6==6.11.0
 PyQt6-Qt6==6.11.0
 PyQt6_sip==13.11.1
-pystray==0.19.5
 python-dotenv==1.2.2
 PyYAML==6.0.3
 RapidFuzz==3.14.5
 rich==15.0.0
+rumps==0.4.0
 scipy==1.17.1
 setuptools==82.0.1
 shellingham==1.5.4

@@ -59,7 +59,7 @@ class History:
                 (time.time(), raw, final, tone, lang, duration),
             )
 
-    def recent(self, limit: int = 50) -> list[Entry]:
+    def recent(self, limit: int = 500) -> list[Entry]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT id, ts, raw, final, tone, lang, duration FROM dictations ORDER BY ts DESC LIMIT ?",
@@ -67,7 +67,7 @@ class History:
             ).fetchall()
         return [Entry(*r) for r in rows]
 
-    def search(self, query: str, limit: int = 50) -> list[Entry]:
+    def search(self, query: str, limit: int = 500) -> list[Entry]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT id, ts, raw, final, tone, lang, duration FROM dictations "
@@ -75,3 +75,12 @@ class History:
                 (f"%{query}%", f"%{query}%", limit),
             ).fetchall()
         return [Entry(*r) for r in rows]
+
+    def delete(self, entry_id: int) -> bool:
+        with self._conn() as c:
+            cur = c.execute("DELETE FROM dictations WHERE id = ?", (entry_id,))
+            return cur.rowcount > 0
+
+    def clear(self) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM dictations")

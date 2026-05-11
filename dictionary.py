@@ -37,7 +37,10 @@ class Dictionary:
 
     def save(self) -> None:
         ensure_dirs()
-        payload = {"terms": [asdict(t) for t in self.terms]}
+        # Sort by canonical (case-insensitive) so file diffs stay tidy and
+        # the editor's row order matches DESIGN_INTEGRATION §8 acceptance.
+        sorted_terms = sorted(self.terms, key=lambda t: t.canonical.lower())
+        payload = {"terms": [asdict(t) for t in sorted_terms]}
         DICT_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
     # -- Mutators --------------------------------------------------------

@@ -9,13 +9,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+_MAX_LOG_BYTES = 5 * 1024 * 1024  # rotate at 5MB
+_LOG_KEEP = 3                     # keep .log + .log.1..N
+
+
+def _rotate_log(log_path: Path) -> None:
+    """Simple rotation: openflow.log -> .log.1, .log.1 -> .log.2, etc."""
+    try:
+        if not log_path.exists() or log_path.stat().st_size < _MAX_LOG_BYTES:
+            return
+        for i in range(_LOG_KEEP, 0, -1):
+            src = log_path.with_suffix(f".log.{i - 1}" if i > 1 else ".log")
+            dst = log_path.with_suffix(f".log.{i}")
+            if src.exists():
+                if dst.exists():
+                    dst.unlink()
+                src.rename(dst)
+    except Exception:
+        pass
+
+
 def _install_file_logger() -> None:
     """Capture print() output to ~/.openflow/openflow.log without replacing
     sys.stdout/stderr (Cocoa inspects fileno on those and SIGABRTs if they
     aren't real fds). We monkey-patch the builtin print to also write to file.
+    Each line is timestamped; the file rotates at 5MB.
     """
     log_path = Path(os.path.expanduser("~/.openflow")) / "openflow.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log(log_path)
 
     log_file = open(log_path, "a", buffering=1, encoding="utf-8")
     log_file.write(f"\n--- daemon start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
@@ -31,7 +53,8 @@ def _install_file_logger() -> None:
             try:
                 msg = kwargs.get("sep", " ").join(str(a) for a in args)
                 end = kwargs.get("end", "\n")
-                log_file.write(msg + end)
+                ts = time.strftime("%H:%M:%S")
+                log_file.write(f"[{ts}] {msg}{end}")
                 log_file.flush()
             except Exception:
                 pass
@@ -42,7 +65,14 @@ def _install_file_logger() -> None:
 
 _install_file_logger()
 
+import json
+import subprocess
+import tempfile
+
 import config as cfg_mod
+from openflow_logger import get_logger, log_exception
+
+_log = get_logger("daemon")
 from audio import Recorder, RecorderConfig
 from transcribe import Transcriber, TranscribeOptions
 from hotkeys import HoldToTalk, HotkeySet
@@ -50,28 +80,128 @@ from paste import paste, get_active_app
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
 from history import History
+from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 
 
-TONE_MODES = ["raw", "verbatim", "casual", "professional", "bullets", "email", "slack"]
-LANG_MODES = ["auto", "en", "hi", "hi_roman", "hinglish", "hi_to_en", "en_to_hi"]
+# Cycling order — preserve pre-refactor sequence.
+_TONE_CYCLE: list[ToneMode] = [
+    ToneMode.RAW, ToneMode.VERBATIM, ToneMode.CASUAL, ToneMode.PROFESSIONAL,
+    ToneMode.BULLETS, ToneMode.EMAIL, ToneMode.SLACK,
+]
+_LANG_CYCLE: list[LanguageMode] = [
+    LanguageMode.AUTO, LanguageMode.EN, LanguageMode.HI, LanguageMode.HI_ROMAN,
+    LanguageMode.HINGLISH, LanguageMode.HI_TO_EN, LanguageMode.EN_TO_HI,
+]
 
 
-@dataclass
-class DaemonState:
-    mode_tone: str = "professional"
-    mode_lang: str = "auto"
-    paused: bool = False
-    last_pasted: str = ""           # for undo
-    last_clip_before_paste: str = ""
+def _coerce_tone(s: str) -> ToneMode:
+    try:
+        return ToneMode(s)
+    except ValueError:
+        return ToneMode.PROFESSIONAL
+
+
+def _coerce_lang(s: str) -> LanguageMode:
+    try:
+        return LanguageMode(s)
+    except ValueError:
+        return LanguageMode.AUTO
+
+
+_EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
+_PILL_STATE = Path("/tmp/openflow-pill.state.json")
+_ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
+
+
+def _maybe_run_onboarding_blocking() -> None:
+    """If first run, launch onboarding subprocess and wait for it to finish.
+
+    Daemon won't proceed to tray init until onboarding writes the flag,
+    so the user always sees the wizard before any hotkey works.
+
+    "First run" = onboarded.flag missing AND no existing config.toml
+    (existing users from before the wizard shipped get auto-flagged).
+    """
+    if _ONBOARD_FLAG.exists():
+        return
+    cfg_path = Path(os.path.expanduser("~/.openflow/config.toml"))
+    if cfg_path.exists():
+        # Existing user predating the wizard — mark them onboarded silently.
+        try:
+            _ONBOARD_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            _ONBOARD_FLAG.write_text("auto-migrated")
+        except Exception:
+            pass
+        return
+    print("[daemon] first run — launching onboarding wizard", flush=True)
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "onboarding"]
+        else:
+            repo_root = Path(__file__).resolve().parent
+            cmd = [sys.executable, str(repo_root / "ui" / "onboarding.py")]
+        subprocess.run(cmd, env=os.environ.copy())
+    except Exception as e:
+        print(f"[daemon] onboarding launch failed: {e}", flush=True)
+
+
+def _write_pill_state(running: bool, rms: float = 0.0, elapsed: float = 0.0,
+                      tone: str = "", lang: str = "") -> None:
+    try:
+        _PILL_STATE.write_text(json.dumps({
+            "running": bool(running),
+            "rms": float(rms),
+            "elapsed": float(elapsed),
+            "tone": tone,
+            "lang": lang,
+        }))
+    except Exception:
+        pass
+
+
+def _spawn_recording_pill() -> None:
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "recording-pill"]
+        else:
+            repo_root = Path(__file__).resolve().parent
+            cmd = [sys.executable, str(repo_root / "ui" / "recording_pill.py")]
+        subprocess.Popen(cmd, env=os.environ.copy())
+    except Exception as e:
+        print(f"[daemon] pill spawn failed: {e}", flush=True)
+
+
+def _spawn_edit_overlay(selection: str) -> None:
+    """Spawn the PyQt6 edit-mode overlay (subprocess, never blocks)."""
+    try:
+        sel_file = Path(tempfile.mkstemp(prefix="openflow-edit-sel-", suffix=".txt")[1])
+        sel_file.write_text(selection)
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "edit-overlay", str(sel_file)]
+        else:
+            repo_root = Path(__file__).resolve().parent
+            script = repo_root / "ui" / "edit_overlay.py"
+            cmd = [sys.executable, str(script), str(sel_file)]
+        subprocess.Popen(cmd, env=os.environ.copy())
+    except Exception as e:
+        print(f"[daemon] edit overlay spawn failed: {e}", flush=True)
+
+
+def _signal_edit_overlay(status: str) -> None:
+    """Tell the running overlay to close (status='done' or 'cancel')."""
+    try:
+        _EDIT_OVERLAY_STATE.write_text(json.dumps({"status": status, "at": time.time()}))
+    except Exception:
+        pass
 
 
 class Daemon:
     def __init__(self) -> None:
         self.cfg = cfg_mod.load()
         self.state = DaemonState(
-            mode_tone=self.cfg["general"]["default_tone"],
-            mode_lang=self.cfg["general"]["default_language"],
+            tone=_coerce_tone(self.cfg["general"]["default_tone"]),
+            language=_coerce_lang(self.cfg["general"]["default_language"]),
         )
         self.recorder = Recorder(
             RecorderConfig(
@@ -104,19 +234,38 @@ class Daemon:
     # -- Mode switching --------------------------------------------------
 
     def cycle_tone(self) -> None:
-        i = TONE_MODES.index(self.state.mode_tone) if self.state.mode_tone in TONE_MODES else 0
-        self.state.mode_tone = TONE_MODES[(i + 1) % len(TONE_MODES)]
-        print(f"[daemon] tone -> {self.state.mode_tone}", flush=True)
+        i = _TONE_CYCLE.index(self.state.tone) if self.state.tone in _TONE_CYCLE else 0
+        self.state.tone = _TONE_CYCLE[(i + 1) % len(_TONE_CYCLE)]
+        self.state.notify()
+        print(f"[daemon] tone -> {self.state.tone.value}", flush=True)
 
     def cycle_lang(self) -> None:
-        i = LANG_MODES.index(self.state.mode_lang) if self.state.mode_lang in LANG_MODES else 0
-        self.state.mode_lang = LANG_MODES[(i + 1) % len(LANG_MODES)]
-        print(f"[daemon] lang -> {self.state.mode_lang}", flush=True)
+        i = _LANG_CYCLE.index(self.state.language) if self.state.language in _LANG_CYCLE else 0
+        self.state.language = _LANG_CYCLE[(i + 1) % len(_LANG_CYCLE)]
+        self.state.notify()
+        print(f"[daemon] lang -> {self.state.language.value}", flush=True)
+
+    def set_tone(self, tone: ToneMode) -> None:
+        if self.state.tone == tone:
+            return
+        self.state.tone = tone
+        self.state.notify()
+        print(f"[daemon] tone -> {tone.value}", flush=True)
+
+    def set_language(self, lang: LanguageMode) -> None:
+        if self.state.language == lang:
+            return
+        self.state.language = lang
+        self.state.notify()
+        print(f"[daemon] lang -> {lang.value}", flush=True)
+
+    def shutdown(self) -> None:
+        self._stop_evt.set()
 
     # -- Pipeline pieces -------------------------------------------------
 
     def _whisper_opts(self) -> TranscribeOptions:
-        m = self.state.mode_lang
+        m = self.state.language.value
         always_en = self.cfg["general"].get("always_english_output", True)
         prompt = None
         if self.cfg["dictionary"].get("inject_into_whisper", True):
@@ -152,8 +301,8 @@ class Daemon:
         corrected = self.dictionary.correct(raw, threshold=threshold)
 
         # Per-mode AI step
-        m_lang = self.state.mode_lang
-        m_tone = self.state.mode_tone
+        m_lang = self.state.language.value
+        m_tone = self.state.tone.value
         active = get_active_app()
         try:
             if m_lang == "hi_roman":
@@ -164,7 +313,7 @@ class Daemon:
                 return self.ai.translate_en_to_hi(corrected)
             return self.ai.cleanup(corrected, mode=m_tone, context_app=active)
         except Exception as e:
-            print(f"[daemon] AI failed ({e}); pasting corrected raw text.", flush=True)
+            log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
             return corrected
 
     # -- Hotkey callbacks ------------------------------------------------
@@ -174,15 +323,43 @@ class Daemon:
             return
         if self.recorder.is_recording:
             return
-        print(f"[daemon] recording (tone={self.state.mode_tone}, lang={self.state.mode_lang})...", flush=True)
+        print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
         self.recorder.start()
-        if self._tray:
-            self._tray.set_status(Status.RECORDING)
+        self.state.recording = RecordingState.RECORDING
+        self.state.notify()
+        # Recording pill: prime state file then spawn so first paint has data.
+        self._record_started_at = time.time()
+        _write_pill_state(running=True, rms=0.0, elapsed=0.0,
+                          tone=self.state.tone.value, lang=self.state.language.value)
+        _spawn_recording_pill()
+        # 30 Hz state pump while recording.
+        self._pill_stop = threading.Event()
+        threading.Thread(target=self._pill_pump, daemon=True).start()
+
+    def _pill_pump(self) -> None:
+        """Stream Recorder.current_rms + elapsed into /tmp/openflow-pill.state.json."""
+        try:
+            while not self._pill_stop.is_set() and self.recorder.is_recording:
+                elapsed = time.time() - self._record_started_at
+                _write_pill_state(
+                    running=True,
+                    rms=self.recorder.current_rms,
+                    elapsed=elapsed,
+                    tone=self.state.tone.value,
+                    lang=self.state.language.value,
+                )
+                self._pill_stop.wait(0.033)
+        except Exception as e:
+            print(f"[daemon] pill pump error: {e}", flush=True)
 
     def on_record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
         audio = self.recorder.stop()
+        # Tell pill to close (running=False) then stop the pump.
+        _write_pill_state(running=False)
+        if getattr(self, "_pill_stop", None):
+            self._pill_stop.set()
         sr = self.cfg["audio"]["sample_rate"]
         dur = audio.size / sr
         print(f"[daemon] captured {dur:.2f}s; transcribing...", flush=True)
@@ -220,8 +397,9 @@ class Daemon:
             self._edit_selection = sel
             self._edit_pending = True
             print(f"[daemon] edit mode armed; selection ({len(sel)} chars). Hold record key and speak instruction.", flush=True)
+            _spawn_edit_overlay(sel)
         except Exception as e:
-            print(f"[daemon] edit mode error: {e}", flush=True)
+            log_exception("daemon.edit_mode", "edit-mode trigger failed", e)
 
     # -- Worker ----------------------------------------------------------
 
@@ -229,8 +407,8 @@ class Daemon:
         if not self._busy.acquire(blocking=False):
             print("[daemon] already processing, skip.", flush=True)
             return
-        if self._tray:
-            self._tray.set_status(Status.PROCESSING)
+        self.state.recording = RecordingState.PROCESSING
+        self.state.notify()
         try:
             t0 = time.time()
             opts = self._whisper_opts()
@@ -244,6 +422,7 @@ class Daemon:
                 instruction = raw.strip()
                 sel = getattr(self, "_edit_selection", "")
                 final = self.ai.edit_selection(sel, instruction)
+                _signal_edit_overlay("done")
             else:
                 final = self._post_process(raw)
 
@@ -254,19 +433,20 @@ class Daemon:
 
             self.state.last_pasted = final
             paste(final)
+            self.state.last_paste_at = time.time()
             self.history.add(
                 raw=raw,
                 final=final,
-                tone=self.state.mode_tone,
-                lang=self.state.mode_lang,
+                tone=self.state.tone.value,
+                lang=self.state.language.value,
                 duration=audio.size / self.cfg["audio"]["sample_rate"],
             )
         except Exception as e:
-            print(f"[daemon] pipeline error: {e}", flush=True)
+            log_exception("daemon.pipeline", "pipeline crashed", e)
         finally:
             self._busy.release()
-            if self._tray:
-                self._tray.set_status(Status.IDLE)
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
 
     # -- Lifecycle -------------------------------------------------------
 
@@ -305,24 +485,14 @@ class Daemon:
                 while not self._stop_evt.is_set():
                     self._stop_evt.wait(timeout=1.0)
             else:
-                # macOS / Cocoa requires pystray to run on the main thread.
-                # Hotkey listeners (pynput) already run in their own threads,
+                # rumps runs NSApp on the calling thread (Cocoa requirement).
+                # Hotkey listeners (pynput) already run on their own threads,
                 # so the main thread is free to host the tray.
-                self._tray = TrayApp(
-                    on_quit=lambda: self._stop_evt.set(),
-                    get_state=lambda: {
-                        "tone": self.state.mode_tone,
-                        "lang": self.state.mode_lang,
-                    },
-                    set_tone=lambda t: setattr(self.state, "mode_tone", t),
-                    set_lang=lambda l: setattr(self.state, "mode_lang", l),
-                    tone_modes=TONE_MODES,
-                    lang_modes=LANG_MODES,
-                )
+                self._tray = TrayApp(self)
                 try:
                     self._tray.run_blocking()
                 except Exception as e:
-                    print(f"[daemon] tray failed ({e}); falling back to headless.", flush=True)
+                    log_exception("daemon.tray", "tray crashed — falling back to headless", e)
                     self._tray = None
                     while not self._stop_evt.is_set():
                         self._stop_evt.wait(timeout=1.0)
@@ -338,4 +508,5 @@ class Daemon:
 
 
 def main() -> None:
+    _maybe_run_onboarding_blocking()
     Daemon().run()
