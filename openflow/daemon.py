@@ -10,30 +10,34 @@ from pathlib import Path
 
 
 def _install_file_logger() -> None:
-    """Mirror stdout/stderr to ~/.openflow/openflow.log so we always have logs
-    regardless of how the daemon was launched (terminal, .app, LaunchAgent)."""
+    """Capture print() output to ~/.openflow/openflow.log without replacing
+    sys.stdout/stderr (Cocoa inspects fileno on those and SIGABRTs if they
+    aren't real fds). We monkey-patch the builtin print to also write to file.
+    """
     log_path = Path(os.path.expanduser("~/.openflow")) / "openflow.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    class Tee:
-        def __init__(self, *streams):
-            self.streams = streams
-        def write(self, s):
-            for st in self.streams:
-                try:
-                    st.write(s); st.flush()
-                except Exception:
-                    pass
-        def flush(self):
-            for st in self.streams:
-                try: st.flush()
-                except Exception: pass
+    log_file = open(log_path, "a", buffering=1, encoding="utf-8")
+    log_file.write(f"\n--- daemon start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+    log_file.flush()
 
-    f = open(log_path, "a", buffering=1, encoding="utf-8")
-    f.write(f"\n--- daemon start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-    f.flush()
-    sys.stdout = Tee(sys.stdout, f)
-    sys.stderr = Tee(sys.stderr, f)
+    import builtins
+    _original_print = builtins.print
+
+    def print_and_log(*args, **kwargs):
+        # Strip 'file' kwarg targeting non-default streams; only mirror stdout/stderr defaults.
+        out_file = kwargs.get("file")
+        if out_file in (None, sys.stdout, sys.stderr):
+            try:
+                msg = kwargs.get("sep", " ").join(str(a) for a in args)
+                end = kwargs.get("end", "\n")
+                log_file.write(msg + end)
+                log_file.flush()
+            except Exception:
+                pass
+        return _original_print(*args, **kwargs)
+
+    builtins.print = print_and_log
 
 
 _install_file_logger()
