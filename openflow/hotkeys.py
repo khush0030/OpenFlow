@@ -28,8 +28,8 @@ class HoldOrToggle:
       toggle --press-->              idle    (stop)
     """
 
-    SHORT_TAP_MS = 220
-    DOUBLE_TAP_GAP_MS = 450
+    SHORT_TAP_MS = 350         # press+release shorter than this counts as a tap
+    DOUBLE_TAP_GAP_MS = 600    # second tap must press within this window
 
     def __init__(self, key: HoldKey, on_press: Callable[[], None], on_release: Callable[[], None]) -> None:
         self.key = self._parse(key)
@@ -73,6 +73,7 @@ class HoldOrToggle:
 
         # In toggle mode: any press stops the session.
         if self._mode == "toggle":
+            print("[hotkey] press: stopping toggle session", flush=True)
             try:
                 self.on_release_cb()
             except Exception as e:
@@ -83,6 +84,7 @@ class HoldOrToggle:
         # Idle: double-tap?
         gap = now - self._last_tap_release_ms
         if self._last_tap_release_ms and gap < self.DOUBLE_TAP_GAP_MS:
+            print(f"[hotkey] press: DOUBLE-TAP detected (gap={gap:.0f}ms) -> toggle start", flush=True)
             try:
                 self.on_press_cb()
             except Exception as e:
@@ -92,6 +94,7 @@ class HoldOrToggle:
             return
 
         # Otherwise normal hold press.
+        print("[hotkey] press: hold start", flush=True)
         self._press_ms = now
         self._mode = "hold"
         try:
@@ -118,7 +121,10 @@ class HoldOrToggle:
             self._mode = "idle"
             if duration < self.SHORT_TAP_MS:
                 # Short press — remember it as the first tap of a possible double-tap.
+                print(f"[hotkey] release: tap (held {duration:.0f}ms) -> arming double-tap window", flush=True)
                 self._last_tap_release_ms = now
+            else:
+                print(f"[hotkey] release: hold ended ({duration:.0f}ms)", flush=True)
 
     def start(self) -> None:
         self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)

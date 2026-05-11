@@ -2,9 +2,41 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def _install_file_logger() -> None:
+    """Mirror stdout/stderr to ~/.openflow/openflow.log so we always have logs
+    regardless of how the daemon was launched (terminal, .app, LaunchAgent)."""
+    log_path = Path(os.path.expanduser("~/.openflow")) / "openflow.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    class Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+        def write(self, s):
+            for st in self.streams:
+                try:
+                    st.write(s); st.flush()
+                except Exception:
+                    pass
+        def flush(self):
+            for st in self.streams:
+                try: st.flush()
+                except Exception: pass
+
+    f = open(log_path, "a", buffering=1, encoding="utf-8")
+    f.write(f"\n--- daemon start {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+    f.flush()
+    sys.stdout = Tee(sys.stdout, f)
+    sys.stderr = Tee(sys.stderr, f)
+
+
+_install_file_logger()
 
 from . import config as cfg_mod
 from .audio import Recorder, RecorderConfig
