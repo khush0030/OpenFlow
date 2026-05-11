@@ -6,7 +6,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from openflow.dictionary import Dictionary
+from dictionary import Dictionary
 
 
 def make_dict() -> Dictionary:

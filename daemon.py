@@ -42,15 +42,15 @@ def _install_file_logger() -> None:
 
 _install_file_logger()
 
-from . import config as cfg_mod
-from .audio import Recorder, RecorderConfig
-from .transcribe import Transcriber, TranscribeOptions
-from .hotkeys import HoldToTalk, HotkeySet
-from .paste import paste, get_active_app
-from .ai import AIProcessor, AIConfig
-from .dictionary import Dictionary
-from .history import History
-from .tray import TrayApp, Status
+import config as cfg_mod
+from audio import Recorder, RecorderConfig
+from transcribe import Transcriber, TranscribeOptions
+from hotkeys import HoldToTalk, HotkeySet
+from paste import paste, get_active_app
+from ai import AIProcessor, AIConfig
+from dictionary import Dictionary
+from history import History
+from tray import TrayApp, Status
 
 
 TONE_MODES = ["raw", "verbatim", "casual", "professional", "bullets", "email", "slack"]
@@ -84,6 +84,9 @@ class Daemon:
             device=self.cfg["whisper"]["device"],
             compute_type=self.cfg["whisper"]["compute_type"],
         )
+        threading.Thread(
+            target=self.transcriber.preload, name="whisper-preload", daemon=True
+        ).start()
         self.ai = AIProcessor(AIConfig(
             model=self.cfg["claude"]["model"],
             max_tokens=self.cfg["claude"]["max_tokens"],

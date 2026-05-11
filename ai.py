@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from anthropic import Anthropic, APIStatusError, RateLimitError
 
-from .prompts import PROMPTS, CONTEXT_HINTS
+from prompts import PROMPTS, CONTEXT_HINTS
 
 
 @dataclass

@@ -1,6 +1,8 @@
 # Project: OpenFlow — A Self-Hosted Wispr Flow Alternative
 
 > **Handoff document for Claude Code.** Read this entire file before writing any code. Build incrementally by phase. Do not skip the testing checkpoints.
+>
+> **Scope: macOS only.** OpenFlow v1.0 targets macOS 13 (Ventura) and later, Apple Silicon and Intel both supported. Linux and Windows support is deferred to future versions. See `RECONCILIATION.md` for the full scope decision and `DESIGN_INTEGRATION.md` for the UI specifications that consume this plan.
 
 ---
 
@@ -14,16 +16,9 @@
 - Hold-to-talk + tap-to-toggle hotkeys, fully global (works in any app)
 - Sub-2-second latency from key release to text pasted
 - Hindi → English translation mode AND mixed Hinglish transcription mode
-- **Default English-output mode (REQUIREMENT):** even if the user speaks Hindi or
-  Hinglish, the text pasted must be in **English**. The user does not want
-  Devanagari output by default. Source language stays a recording-time concept;
-  output language is always English unless the user explicitly opts into a
-  Devanagari/transliteration mode in settings. Implemented via Whisper's
-  `task="translate"` plus `general.always_english_output = true` in
-  `~/.openflow/config.toml`.
 - Custom dictionary that biases the transcriber toward user-specified terms (names, jargon, brand names)
 - Works offline for transcription; only needs internet for AI cleanup
-- Cross-platform: macOS first, Linux second, Windows third
+- Platform: macOS 13+ (Ventura), Apple Silicon and Intel. Single supported platform for v1.0.
 
 ---
 
@@ -48,7 +43,7 @@ Build these in order. Tick them off as you go.
 - [ ] **Edit mode**: select text in any app, hit hotkey, dictate edit instruction → AI rewrites
 - [ ] **Undo last paste** hotkey
 - [ ] **Dictation history**: last 50 transcriptions, searchable
-- [ ] **Settings GUI** (PyQt or web-based via local server)
+- [ ] **Settings GUI** (PyQt6 with custom QSS stylesheet — see `DESIGN_INTEGRATION.md`)
 
 ### Tier 3 — Hindi/Hinglish Support (THE differentiator)
 - [ ] Language mode switcher: `EN` / `HI` / `HINGLISH` / `AUTO`
@@ -67,7 +62,7 @@ Build these in order. Tick them off as you go.
 - [ ] GUI dictionary editor
 
 ### Tier 5 — Polish
-- [ ] Auto-launch on login (LaunchAgent / systemd / Task Scheduler)
+- [ ] Auto-launch on login via LaunchAgent plist (with user consent)
 - [ ] Onboarding wizard (mic test, hotkey config, API key setup)
 - [ ] Crash recovery + telemetry-free error logging
 - [ ] Update checker
@@ -102,9 +97,9 @@ Build these in order. Tick them off as you go.
         │     ├─ translation mode (HI ↔ EN)
         │     └─ produces clean text ──> Paster
         │
-        ├─ Paster (pyperclip + osascript / xdotool)
+        ├─ Paster (pyperclip + osascript)
         │
-        └─ TrayUI (pystray + PIL)
+        └─ TrayUI (rumps — native NSStatusItem)
               ├─ status icon
               ├─ history viewer
               └─ settings window
@@ -118,18 +113,19 @@ Build these in order. Tick them off as you go.
 
 | Layer | Library | Why |
 |---|---|---|
-| Audio capture | `sounddevice` + `numpy` | Reliable, cross-platform, low-latency |
+| Audio capture | `sounddevice` + `numpy` | Reliable, low-latency, well-tested on macOS |
 | Speech-to-text | `faster-whisper` | 4x faster than openai-whisper, runs on CPU well, supports Hindi |
-| Hotkeys | `pynput` | Cross-platform global hotkeys |
+| Hotkeys | `pynput` | Global hotkeys on macOS |
 | Clipboard | `pyperclip` | Battle-tested |
-| Paste simulation | `osascript` (mac) / `xdotool` (linux) / `pyautogui` (win) | Native is most reliable |
+| Paste simulation | `osascript` via subprocess | Native AppleScript is the most reliable path |
 | AI cleanup | `anthropic` SDK | Claude Haiku 4.5 for speed + cost |
-| Tray UI | `pystray` + `Pillow` | Simple, works everywhere |
-| Settings GUI | `PyQt6` OR Flask + browser | PyQt is heavier but more native |
+| Tray UI | `rumps` | Native NSStatusItem + NSMenu wrapper; no styling fights |
+| Settings GUI | `PyQt6` | Custom QSS stylesheet — see `DESIGN_INTEGRATION.md` |
+| macOS bridge | `pyobjc-framework-Cocoa` + `pyobjc-framework-AppKit` | NSVisualEffectView for blur, NSSound for ticks |
 | Fuzzy matching | `rapidfuzz` | Fast Levenshtein for dictionary correction |
 | Config | `tomli` / `tomli-w` | TOML is more user-friendly than JSON |
 | History DB | `sqlite3` (stdlib) | No setup |
-| Packaging | `pyinstaller` | One-file binary for distribution |
+| Packaging | `pyinstaller` + `create-dmg` | `.app` bundle inside a `.dmg` |
 
 **Models:**
 - Whisper: `small` for English, `medium` for Hindi/Hinglish (Hindi accuracy is much better at medium+)
@@ -156,8 +152,8 @@ openflow/
 │   ├── transcribe.py        # faster-whisper wrapper
 │   ├── dictionary.py        # custom term management + fuzzy correction
 │   ├── ai.py                # Claude API calls (cleanup, translate, edit)
-│   ├── paste.py             # OS-specific paste logic
-│   ├── tray.py              # pystray icon + menu
+│   ├── paste.py             # osascript-based paste
+│   ├── tray.py              # rumps tray icon + native menu
 │   ├── history.py           # sqlite log
 │   ├── prompts.py           # all system prompts in one place
 │   └── ui/
@@ -171,8 +167,7 @@ openflow/
 │   └── fixtures/
 │       └── sample_audio.wav
 └── scripts/
-    ├── install_macos.sh
-    └── install_linux.sh
+    └── install_macos.sh
 ```
 
 ---
@@ -185,7 +180,8 @@ openflow/
 mkdir openflow && cd openflow
 python -m venv .venv && source .venv/bin/activate
 pip install faster-whisper sounddevice numpy pyperclip pynput anthropic \
-            scipy pystray pillow rapidfuzz tomli tomli-w PyQt6
+            scipy pillow rapidfuzz tomli tomli-w PyQt6 keyring darkdetect \
+            rumps pyobjc-framework-Cocoa pyobjc-framework-AppKit
 pip freeze > requirements.txt
 ```
 
@@ -197,7 +193,7 @@ Implement in this exact order; test after each step.
 
 1. **`audio.py`** — `Recorder` class with `start()` / `stop() -> np.ndarray`. Test by recording 3 seconds and saving to `test.wav`.
 2. **`transcribe.py`** — `Transcriber` class wrapping `faster-whisper`. Test on a known audio file.
-3. **`paste.py`** — `paste(text: str)` function that copies to clipboard and triggers Cmd+V / Ctrl+V.
+3. **`paste.py`** — `paste(text: str)` function that copies to clipboard and triggers Cmd+V via `osascript`.
 4. **`hotkeys.py`** — Listener that fires `on_press_start` and `on_release_stop` callbacks.
 5. **`daemon.py`** — wire everything together. Hotkey → record → transcribe → paste.
 
@@ -222,12 +218,12 @@ You are a dictation cleanup assistant. Clean up the user's voice transcription:
 
 ### Phase 3 — Tray UI (Day 2 morning)
 
-1. **`tray.py`** — pystray icon with menu:
-   - Status: Idle / Recording / Processing
-   - Mode submenu: Casual / Professional / ...
-   - Language submenu: EN / HI / HINGLISH / AUTO
-   - Open Settings, Open Dictionary, Quit
-2. Three icon states (different PNGs in `assets/`).
+1. **`tray.py`** — rumps-based menu (see `DESIGN_INTEGRATION.md` §4 for full spec):
+   - Status header: Ready to listen / Recording / Processing
+   - Tone submenu: Casual / Professional / Bullet points / Email / Slack
+   - Language submenu: EN / HI / HI_ROMAN / HINGLISH / HI→EN / EN→HI
+   - Dictionary, History, Settings, Quit
+2. Three icon states with template-image tinting (see `DESIGN_INTEGRATION.md` §4 and brand book §07).
 
 ### Phase 4 — Hindi/Hinglish Support (Day 2 afternoon — THIS IS CRITICAL)
 
@@ -251,14 +247,6 @@ This is where most projects fail. Whisper's Hindi support is good but needs care
 | `HINGLISH` | `None` (auto) | `transcribe` | Cleanup, preserve mix |
 | `HI_TO_EN` | `hi` | `translate` | Cleanup |
 | `EN_TO_HI` | `en` | `transcribe` | Translate to Hindi via Claude |
-
-**Default-English override (`general.always_english_output = true`)**
-
-When this flag is on (default), every mode except `HI`, `HI_ROMAN`, and `EN_TO_HI`
-collapses to `task="translate"` so the user always gets English text — even when
-they speak Hindi or Hinglish. The flag is exposed in Settings; turning it off
-re-enables the matrix above. The three exception modes are explicit user opt-ins
-to Devanagari/transliterated output and stay as defined.
 
 Add a **rotating hotkey** (e.g., F6) to cycle through modes, with tray notification on switch.
 
@@ -358,9 +346,10 @@ PyQt6 window with tabs:
 
 ### Phase 8 — Packaging (Day 6)
 
-1. **macOS**: PyInstaller → `.app` bundle → optionally sign with Apple Developer cert.
-2. **Linux**: AppImage or `.deb`.
-3. **Auto-launch**: write a LaunchAgent plist on first run (with user consent).
+1. **PyInstaller** → `.app` bundle with proper `.icns` icon at all retina sizes.
+2. **DMG installer** via `create-dmg` with the app icon mounted as the background.
+3. **Codesign + notarize** if Apple Developer cert is available; otherwise ship unsigned with Gatekeeper instructions ("Right-click → Open" on first launch).
+4. **Auto-launch**: write a LaunchAgent plist on first run (with explicit user consent in onboarding).
 
 ---
 
@@ -481,14 +470,14 @@ Wispr Flow Pro: $15/month → break-even immediate, savings of ~$160/year.
 
 1. **macOS permissions**: Accessibility (for hotkey + paste) AND Microphone must be granted. The first-run wizard must walk the user through this; otherwise they'll think it's broken.
 2. **Whisper Hindi quality drops with `small`**: Always use `medium` minimum for Hindi. The 8x cost in compute is worth it.
-3. **`pynput` on Wayland (Linux)**: Doesn't work. Need to detect Wayland and fall back to `evdev` or warn the user.
-4. **Paste timing**: Need ~100ms sleep between clipboard write and paste keystroke, or it pastes the previous clipboard content.
-5. **Audio device hot-swap**: If user plugs in AirPods mid-session, `sounddevice` may break. Wrap recorder in retry logic.
-6. **Long recordings**: Whisper's quality degrades past ~30s. Either chunk the audio or warn the user.
-7. **Claude rate limits**: Haiku has generous limits but on free tier you can hit them. Add exponential backoff.
-8. **Devanagari font rendering in tray menu**: pystray uses system fonts; on Linux without Indian language fonts, Hindi menu items show as boxes. Detect and fall back to Roman labels.
-9. **Custom dictionary token cost**: Don't dump 500 terms into Whisper's `initial_prompt` — it has a 224-token limit. Implement smart truncation by recency/frequency.
-10. **Don't store the API key in `config.toml`** — keep it in env var or OS keychain (`keyring` library).
+3. **Paste timing**: Need ~100ms sleep between clipboard write and paste keystroke, or it pastes the previous clipboard content.
+4. **Audio device hot-swap**: If user plugs in AirPods mid-session, `sounddevice` may break. Wrap recorder in retry logic.
+5. **Long recordings**: Whisper's quality degrades past ~30s. Either chunk the audio or warn the user.
+6. **Claude rate limits**: Haiku has generous limits but on free tier you can hit them. Add exponential backoff.
+7. **Custom dictionary token cost**: Don't dump 500 terms into Whisper's `initial_prompt` — it has a 224-token limit. Implement smart truncation by recency/frequency.
+8. **Don't store the API key in `config.toml`** — keep it in env var or macOS Keychain (`keyring` library).
+9. **Notch awareness**: The recording pill must never appear inside the notch area on M1/M2/M3 MacBook Pros. Clamp the Y position to `safeAreaInsets.top + 32px`.
+10. **App bundle signing**: An unsigned `.app` triggers Gatekeeper on first launch. Document the right-click-Open workaround in the README until codesigning is set up.
 
 ---
 
@@ -510,18 +499,21 @@ When you start, run these in order:
 
 ```bash
 # 1. Verify environment
-python --version  # Need 3.10+
-which ffmpeg      # Required by faster-whisper
+sw_vers                           # Need macOS 13+ (Ventura)
+python --version                  # Need 3.10+
+which ffmpeg || brew install ffmpeg  # Required by faster-whisper
 
 # 2. Bootstrap project
-mkdir -p openflow/openflow/ui openflow/tests/fixtures openflow/scripts openflow/assets
+mkdir -p openflow/openflow/ui/settings_tabs openflow/tests/fixtures \
+         openflow/scripts openflow/assets/{fonts,logo,tray,sounds}
 cd openflow
 
 # 3. Set up venv and install
 python -m venv .venv
 source .venv/bin/activate
 pip install faster-whisper sounddevice numpy pyperclip pynput anthropic \
-            scipy pystray pillow rapidfuzz tomli tomli-w PyQt6 keyring
+            scipy pillow rapidfuzz tomli tomli-w PyQt6 keyring darkdetect \
+            rumps pyobjc-framework-Cocoa pyobjc-framework-AppKit
 
 # 4. Build Phase 1 (core loop) before anything else.
 #    Test it works end-to-end before moving on.

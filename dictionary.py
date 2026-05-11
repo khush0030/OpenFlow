@@ -9,7 +9,7 @@ from typing import Iterable
 
 from rapidfuzz import fuzz, process
 
-from .config import DICT_PATH, ensure_dirs
+from config import DICT_PATH, ensure_dirs
 
 
 @dataclass

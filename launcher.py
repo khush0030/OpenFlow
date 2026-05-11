@@ -1,9 +1,7 @@
-"""PyInstaller entry point. Runs the openflow package's main() with proper
-package context (so absolute and any leftover relative imports both resolve).
-"""
+"""PyInstaller entry point."""
 import sys
 
-from openflow.__main__ import main
+from cli import main
 
 if __name__ == "__main__":
     sys.exit(main())

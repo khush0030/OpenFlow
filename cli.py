@@ -14,17 +14,17 @@ from __future__ import annotations
 import argparse
 import sys
 
-from openflow.config import CONFIG_PATH, DICT_PATH, HISTORY_PATH
+from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from openflow.daemon import main
+    from daemon import main
     main()
     return 0
 
 
 def _cmd_dict_list(args: argparse.Namespace) -> int:
-    from openflow.dictionary import Dictionary
+    from dictionary import Dictionary
     d = Dictionary.load()
     if not d.terms:
         print("(empty)")
@@ -37,7 +37,7 @@ def _cmd_dict_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_dict_add(args: argparse.Namespace) -> int:
-    from openflow.dictionary import Dictionary
+    from dictionary import Dictionary
     d = Dictionary.load()
     hints = [h.strip() for h in (args.hints or "").split(",") if h.strip()]
     d.add(args.name, hints=hints, language=args.lang, context=args.context)
@@ -47,7 +47,7 @@ def _cmd_dict_add(args: argparse.Namespace) -> int:
 
 
 def _cmd_dict_remove(args: argparse.Namespace) -> int:
-    from openflow.dictionary import Dictionary
+    from dictionary import Dictionary
     d = Dictionary.load()
     ok = d.remove(args.name)
     d.save()
@@ -56,7 +56,7 @@ def _cmd_dict_remove(args: argparse.Namespace) -> int:
 
 
 def _cmd_history(args: argparse.Namespace) -> int:
-    from openflow.history import History
+    from history import History
     h = History()
     rows = h.recent(limit=args.limit)
     for r in rows:

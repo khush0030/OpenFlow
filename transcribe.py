@@ -13,7 +13,7 @@ class TranscribeOptions:
     language: str | None = None        # "en", "hi", or None for auto-detect
     task: str = "transcribe"           # "transcribe" or "translate" (-> English)
     initial_prompt: str | None = None  # for dictionary biasing
-    beam_size: int = 5
+    beam_size: int = 1
     vad_filter: bool = True
 
 
@@ -28,6 +28,10 @@ class Transcriber:
         self.device = device
         self.compute_type = compute_type
         self._model: WhisperModel | None = None
+
+    def preload(self) -> None:
+        """Eagerly load the model. Safe to call from a background thread."""
+        self._ensure_loaded()
 
     def _ensure_loaded(self) -> WhisperModel:
         if self._model is None:

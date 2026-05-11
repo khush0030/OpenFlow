@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from .config import HISTORY_PATH, ensure_dirs
+from config import HISTORY_PATH, ensure_dirs
 
 
 @dataclass

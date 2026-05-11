@@ -11,8 +11,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from openflow.audio import save_wav
-from openflow.transcribe import Transcriber, TranscribeOptions
+from audio import save_wav
+from transcribe import Transcriber, TranscribeOptions
 
 
 def test_save_wav_and_transcribe(tmpdir: str = "/tmp") -> None:
