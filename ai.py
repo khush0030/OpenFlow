@@ -26,8 +26,40 @@ class AIProcessor:
         if self._client is None:
             key = os.environ.get(self.cfg.api_key_env)
             if not key:
+                # Fall back to macOS Keychain (onboarding stores key there).
+                try:
+                    import keyring  # type: ignore
+                    key = keyring.get_password("openflow", "anthropic_api_key")
+                    if key:
+                        os.environ[self.cfg.api_key_env] = key
+                except Exception as e:
+                    print(f"[ai] keyring read failed: {e}", flush=True)
+            if not key:
+                # Last resort: load from ~/.openflow/.env or repo .env file.
+                for env_path in (
+                    os.path.expanduser("~/.openflow/.env"),
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+                ):
+                    if os.path.exists(env_path):
+                        try:
+                            with open(env_path, encoding="utf-8") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line or line.startswith("#") or "=" not in line:
+                                        continue
+                                    k, _, v = line.partition("=")
+                                    if k.strip() == self.cfg.api_key_env:
+                                        key = v.strip().strip('"').strip("'")
+                                        os.environ[self.cfg.api_key_env] = key
+                                        break
+                        except Exception:
+                            pass
+                        if key:
+                            break
+            if not key:
                 raise RuntimeError(
-                    f"Missing API key. Set ${self.cfg.api_key_env} or store in keyring."
+                    f"Missing API key. Set ${self.cfg.api_key_env}, run onboarding, "
+                    "or place it in ~/.openflow/.env"
                 )
             self._client = Anthropic(api_key=key)
         return self._client

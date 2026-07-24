@@ -6,11 +6,12 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget,
 )
 
 from config import DICT_PATH
 from ui.settings_tabs._common import SectionTitle, SettingsRow
+from ui.widgets import ToggleSwitch
 from ui.tokens import Color, Font
 
 
@@ -63,7 +64,7 @@ class LanguageTab(QWidget):
             "Higher = stricter match before substituting. 85 is a good default.",
         ))
 
-        self.inject = QCheckBox("On")
+        self.inject = ToggleSwitch()
         self.inject.setChecked(cfg["dictionary"].get("inject_into_whisper", True))
         self.inject.toggled.connect(self._on_inject)
         outer.addWidget(SettingsRow(

@@ -7,6 +7,7 @@ Two interaction modes share one key:
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Callable
@@ -89,6 +90,14 @@ class HoldOrToggle:
         k = k.strip().lower()
         if k.startswith("<") and k.endswith(">"):
             k = k[1:-1]
+        # vk:NNN — raw macOS virtual keycode. Use when pynput emits a raw
+        # KeyCode (e.g. Fn=177, right Cmd may sometimes arrive as KeyCode(54)
+        # depending on pynput/pyobjc version).
+        if k.startswith("vk:"):
+            try:
+                return keyboard.KeyCode.from_vk(int(k[3:]))
+            except Exception:
+                pass
         special = getattr(keyboard.Key, k, None)
         if special is not None:
             return special
@@ -97,8 +106,19 @@ class HoldOrToggle:
     def _matches(self, key) -> bool:
         try:
             if isinstance(self.key, keyboard.Key):
-                return key == self.key
+                # Direct enum match
+                if key == self.key:
+                    return True
+                # Some pynput/pyobjc builds emit raw KeyCode for modifiers
+                # instead of the named Key.* enum. Fall back to vk compare.
+                target_vk = getattr(self.key.value, "vk", None)
+                if target_vk is not None and isinstance(key, keyboard.KeyCode):
+                    if getattr(key, "vk", None) == target_vk:
+                        return True
+                return False
             if isinstance(self.key, keyboard.KeyCode) and isinstance(key, keyboard.KeyCode):
+                if self.key.vk is not None and key.vk is not None:
+                    return key.vk == self.key.vk
                 return key.char == self.key.char
         except Exception:
             return False
@@ -109,8 +129,14 @@ class HoldOrToggle:
         return time.monotonic() * 1000.0
 
     def _on_press(self, key) -> None:
+        # Diag: log every press until the user has triggered ours at least
+        # once, so we can confirm pynput is seeing events + what physical
+        # key the user is pressing. Disable via OPENFLOW_LOG_ALL_KEYS=0.
+        if not getattr(self, "_match_seen", False) and os.environ.get("OPENFLOW_LOG_ALL_KEYS", "1") != "0":
+            print(f"[hotkey][trace] saw press: {key!r}  (configured key={self.key!r})", flush=True)
         if not self._matches(key) or self._down:
             return
+        self._match_seen = True
         self._down = True
         now = self._now_ms()
 
@@ -185,10 +211,22 @@ class HoldOrToggle:
         time.sleep(1.5)
         listener = self._listener
         if listener is None:
+            print("[hotkey] no listener; probe exit", flush=True)
             return
         alive = listener.is_alive() if hasattr(listener, "is_alive") else True
         ax = accessibility_trusted()
         print(f"[hotkey] listener alive={alive} ax_trusted={ax} key={self.key!r}", flush=True)
+        # Recurring liveness check — every 10s log alive status until process exit.
+        while True:
+            time.sleep(10)
+            listener = self._listener
+            if listener is None:
+                print("[hotkey][heartbeat] listener gone", flush=True)
+                return
+            alive = listener.is_alive() if hasattr(listener, "is_alive") else None
+            if not alive:
+                print(f"[hotkey][heartbeat] LISTENER DIED key={self.key!r}", flush=True)
+                return
 
     def stop(self) -> None:
         if self._listener is not None:

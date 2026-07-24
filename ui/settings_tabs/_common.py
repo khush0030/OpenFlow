@@ -17,11 +17,14 @@ from ui.tokens import Color, Font, Space
 
 class SectionTitle(QLabel):
     def __init__(self, text: str, parent: Optional[QWidget] = None):
-        super().__init__(text, parent)
-        f = QFont(Font.DISPLAY, Font.SIZE_H3)
-        f.setItalic(True)
+        super().__init__(text.upper(), parent)
+        f = QFont(Font.MONO, Font.SIZE_LABEL)
+        f.setWeight(QFont.Weight.Medium)
         self.setFont(f)
-        self.setStyleSheet(f"color: {Color.INK}; margin-top: 16px; margin-bottom: 8px;")
+        self.setStyleSheet(
+            f"color: {Color.INK_MUTED}; letter-spacing: 2px;"
+            f"margin-top: 18px; margin-bottom: 4px;"
+        )
 
 
 class SettingsRow(QFrame):
@@ -34,18 +37,25 @@ class SettingsRow(QFrame):
             f"SettingsRow {{ border-bottom: 1px solid {Color.PAPER_DEEPER}; }}"
         )
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, Space.MD, 0, Space.MD)
-        lay.setSpacing(Space.LG)
+        lay.setContentsMargins(0, Space.LG, 0, Space.LG)
+        lay.setSpacing(Space.XL)
 
         col = QVBoxLayout()
-        col.setSpacing(2)
+        col.setSpacing(4)
+        col.setContentsMargins(0, 0, 0, 0)
         lbl = QLabel(label, self)
+        lbl_font = QFont(Font.BODY, Font.SIZE_BODY + 1)
+        lbl_font.setWeight(QFont.Weight.Medium)
+        lbl.setFont(lbl_font)
         lbl.setStyleSheet(f"color: {Color.INK};")
         col.addWidget(lbl)
         if description:
             sub = QLabel(description, self)
-            sub.setStyleSheet(f"color: {Color.INK_MUTED}; font-size: {Font.SIZE_LABEL}px;")
+            sub.setStyleSheet(
+                f"color: {Color.INK_MUTED}; font-size: {Font.SIZE_BODY_SM}px;"
+                f"line-height: 150%;"
+            )
             sub.setWordWrap(True)
             col.addWidget(sub)
         lay.addLayout(col, 1)
-        lay.addWidget(control)
+        lay.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)

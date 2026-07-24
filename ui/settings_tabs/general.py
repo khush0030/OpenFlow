@@ -1,7 +1,8 @@
 """General settings tab."""
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QComboBox, QVBoxLayout, QWidget
+from ui.widgets import ToggleSwitch
 
 from ui.settings_tabs._common import SectionTitle, SettingsRow
 
@@ -58,7 +59,7 @@ class GeneralTab(QWidget):
         outer.addWidget(SectionTitle("Behavior"))
 
         # Always-English override
-        self.always_en = QCheckBox("On")
+        self.always_en = ToggleSwitch()
         self.always_en.setChecked(cfg["general"].get("always_english_output", True))
         self.always_en.toggled.connect(self._on_always_en)
         outer.addWidget(SettingsRow(
@@ -68,7 +69,7 @@ class GeneralTab(QWidget):
         ))
 
         # Auto-launch placeholder (LaunchAgent management is Phase 10 territory)
-        self.autolaunch = QCheckBox("On")
+        self.autolaunch = ToggleSwitch()
         self.autolaunch.setChecked(cfg["general"].get("auto_launch", False))
         self.autolaunch.toggled.connect(self._on_autolaunch)
         outer.addWidget(SettingsRow(

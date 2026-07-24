@@ -40,6 +40,20 @@ if [[ ! -d "dist/OpenFlow.app" ]]; then
     exit 1
 fi
 
+# Deep-sign with our stable identity. PyInstaller's codesign_identity only
+# signs the main executable; nested frameworks/dylibs keep PyInstaller's
+# ad-hoc signature, which fails hardened-runtime team-id matching at load
+# time. Re-sign everything with the same identity.
+SIGN_IDENT="${SIGN_ID:-OpenFlow Local Dev}"
+if security find-identity -v -p codesigning | grep -q "$SIGN_IDENT"; then
+    echo "==> Deep-signing all nested binaries with: $SIGN_IDENT"
+    find dist/OpenFlow.app -type f \( -name "*.dylib" -o -name "*.so" -o -name "Python" \) \
+        -exec codesign --force --sign "$SIGN_IDENT" {} \; 2>/dev/null
+    codesign --force --deep --sign "$SIGN_IDENT" dist/OpenFlow.app
+    echo "==> Verifying signature"
+    codesign --verify --deep dist/OpenFlow.app && echo "  ✓ signature valid"
+fi
+
 # Optional codesign
 if [[ -n "${SIGN_ID:-}" ]]; then
     echo "==> Codesigning with: $SIGN_ID"

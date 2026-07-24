@@ -189,20 +189,34 @@ QTabWidget::pane {{
     background-color: {Color.PAPER};
     border: none;
     border-top: 1px solid {Color.PAPER_DEEPER};
+    top: -1px;
+}}
+QTabWidget::tab-bar {{
+    alignment: left;
+    left: 28px;
+}}
+QTabBar {{
+    background-color: {Color.PAPER_DEEP};
 }}
 QTabBar::tab {{
-    background-color: {Color.PAPER_DEEP};
+    background-color: transparent;
     color: {Color.INK_MUTED};
-    padding: 8px 14px;
-    margin-right: 2px;
+    padding: 10px 22px;
+    margin-right: 4px;
+    min-width: 90px;
     border-top-left-radius: {Radius.MD}px;
     border-top-right-radius: {Radius.MD}px;
-    font-size: {Font.SIZE_BODY_SM}px;
+    font-size: {Font.SIZE_BODY}px;
+    font-weight: {Font.WEIGHT_MEDIUM};
+}}
+QTabBar::tab:hover:!selected {{
+    color: {Color.INK_SOFT};
 }}
 QTabBar::tab:selected {{
     background-color: {Color.PAPER};
     color: {Color.INK};
-    font-weight: {Font.WEIGHT_MEDIUM};
+    border-bottom: 2px solid {Color.TERRACOTTA};
+    padding-bottom: 8px;
 }}
 
 /* === SEPARATORS === */

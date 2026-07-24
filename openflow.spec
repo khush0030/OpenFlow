@@ -70,7 +70,7 @@ exe = EXE(
     console=not is_macos,    # macOS: windowed (no terminal); other: console
     disable_windowed_traceback=False,
     target_arch=None,
-    codesign_identity=None,
+    codesign_identity="OpenFlow Local Dev",
     entitlements_file=None,
 )
 coll = COLLECT(

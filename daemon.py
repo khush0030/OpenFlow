@@ -75,7 +75,12 @@ from openflow_logger import get_logger, log_exception
 _log = get_logger("daemon")
 from audio import Recorder, RecorderConfig
 from transcribe import Transcriber, TranscribeOptions
-from hotkeys import HoldToTalk, HotkeySet
+# Use NSEvent-backed listener by default (works correctly under rumps NSApp).
+# Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
+if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
+    from hotkeys import HoldToTalk, HotkeySet
+else:
+    from hotkeys_nsevent import HoldToTalk, HotkeySet
 from paste import paste, get_active_app
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
@@ -111,6 +116,24 @@ def _coerce_lang(s: str) -> LanguageMode:
 
 _EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
 _PILL_STATE = Path("/tmp/openflow-pill.state.json")
+_PILL_CONTROL = Path("/tmp/openflow-pill.control.json")
+_RESULT_PATH = Path("/tmp/openflow-result.txt")
+
+
+def _spawn_result_overlay(text: str) -> None:
+    """Show a floating dictation-result widget when paste fell back to
+    clipboard only (no text field focused). Lets the user click Paste
+    after positioning their cursor."""
+    try:
+        _RESULT_PATH.write_text(text, encoding="utf-8")
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "result-overlay"]
+        else:
+            repo_root = Path(__file__).resolve().parent
+            cmd = [sys.executable, str(repo_root / "ui" / "result_overlay.py")]
+        subprocess.Popen(cmd, env=os.environ.copy())
+    except Exception as e:
+        print(f"[daemon] result overlay spawn failed: {e}", flush=True)
 _ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
 
 
@@ -337,7 +360,14 @@ class Daemon:
         threading.Thread(target=self._pill_pump, daemon=True).start()
 
     def _pill_pump(self) -> None:
-        """Stream Recorder.current_rms + elapsed into /tmp/openflow-pill.state.json."""
+        """Stream RMS + elapsed to state file; also poll pill control file
+        for cancel/confirm button clicks."""
+        # Clear any stale control file from a previous session.
+        try:
+            if _PILL_CONTROL.exists():
+                _PILL_CONTROL.unlink()
+        except Exception:
+            pass
         try:
             while not self._pill_stop.is_set() and self.recorder.is_recording:
                 elapsed = time.time() - self._record_started_at
@@ -348,7 +378,22 @@ class Daemon:
                     tone=self.state.tone.value,
                     lang=self.state.language.value,
                 )
-                self._pill_stop.wait(0.033)
+                # Drain control file
+                if _PILL_CONTROL.exists():
+                    try:
+                        data = json.loads(_PILL_CONTROL.read_text())
+                        _PILL_CONTROL.unlink()
+                        action = data.get("action")
+                        if action == "cancel":
+                            print("[daemon] pill cancel — discarding recording", flush=True)
+                            self._cancel_pending = True
+                            self.on_record_stop()
+                        elif action == "confirm":
+                            print("[daemon] pill confirm — finishing recording", flush=True)
+                            self.on_record_stop()
+                    except Exception as e:
+                        print(f"[daemon] control parse error: {e}", flush=True)
+                self._pill_stop.wait(0.05)
         except Exception as e:
             print(f"[daemon] pill pump error: {e}", flush=True)
 
@@ -360,6 +405,13 @@ class Daemon:
         _write_pill_state(running=False)
         if getattr(self, "_pill_stop", None):
             self._pill_stop.set()
+        # If pill cancel was requested, drop audio + skip pipeline.
+        if getattr(self, "_cancel_pending", False):
+            self._cancel_pending = False
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            print("[daemon] recording discarded (cancel).", flush=True)
+            return
         sr = self.cfg["audio"]["sample_rate"]
         dur = audio.size / sr
         print(f"[daemon] captured {dur:.2f}s; transcribing...", flush=True)
@@ -432,8 +484,10 @@ class Daemon:
                 return
 
             self.state.last_pasted = final
-            paste(final)
+            paste_status = paste(final)
             self.state.last_paste_at = time.time()
+            if paste_status == "clipboard":
+                _spawn_result_overlay(final)
             self.history.add(
                 raw=raw,
                 final=final,
@@ -454,6 +508,11 @@ class Daemon:
         hold_key = self.cfg["hotkeys"]["record_hold"]
         self._hold = HoldToTalk(hold_key, self.on_record_start, self.on_record_stop)
         self._hold.start()
+        # macOS TIS (Text Input Sources) API is not thread-safe during init.
+        # Two pynput listeners starting concurrently both call
+        # TISCopyCurrentKeyboardInputSource and SIGABRT. Stagger them so the
+        # first listener finishes its TIS init before the second begins.
+        time.sleep(0.8)
 
         chords: dict[str, callable] = {}
         cycle_tone_key = self.cfg["hotkeys"].get("cycle_mode")
@@ -468,6 +527,7 @@ class Daemon:
         if chords:
             self._chords = HotkeySet(chords)
             self._chords.start()
+            time.sleep(0.4)  # let second listener settle too
 
         print(
             f"[daemon] ready.\n"

@@ -72,6 +72,11 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(LanguageTab(self.cfg, self._save_soon),  "Language")
         self.tabs.addTab(AITab(self.cfg, self._save_soon),        "AI")
         self.tabs.addTab(AdvancedTab(self.cfg, self._save_soon),  "Advanced")
+        # No elision, no scroll arrows — tabs always fit.
+        self.tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
+        self.tabs.tabBar().setUsesScrollButtons(False)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setDocumentMode(True)
         outer.addWidget(self.tabs)
 
         # Footer with "Saved" microcopy

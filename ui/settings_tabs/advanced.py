@@ -5,11 +5,12 @@ import subprocess
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
+    QComboBox, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
     QWidget,
 )
 
 from config import CONFIG_PATH, HISTORY_PATH
+from ui.widgets import ToggleSwitch
 from ui.settings_tabs._common import SectionTitle, SettingsRow
 
 
@@ -62,7 +63,7 @@ class AdvancedTab(QWidget):
 
         outer.addWidget(SectionTitle("History"))
 
-        self.history_enabled = QCheckBox("On")
+        self.history_enabled = ToggleSwitch()
         self.history_enabled.setChecked(cfg.get("history", {}).get("enabled", True))
         self.history_enabled.toggled.connect(self._on_history_enabled)
         outer.addWidget(SettingsRow(
