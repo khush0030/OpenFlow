@@ -169,30 +169,34 @@ def _maybe_run_onboarding_blocking() -> None:
         print(f"[daemon] onboarding launch failed: {e}", flush=True)
 
 
-def _write_pill_state(running: bool, rms: float = 0.0, elapsed: float = 0.0,
+def _write_pill_state(state: str, rms: float = 0.0, elapsed: float = 0.0,
                       tone: str = "", lang: str = "") -> None:
+    """state: 'idle' | 'recording' | 'processing' | 'exit'. The persistent
+    pill polls this file; ts lets it detect a dead daemon and quit."""
     try:
         _PILL_STATE.write_text(json.dumps({
-            "running": bool(running),
+            "state": state,
             "rms": float(rms),
             "elapsed": float(elapsed),
             "tone": tone,
             "lang": lang,
+            "ts": time.time(),
         }))
     except Exception:
         pass
 
 
-def _spawn_recording_pill() -> None:
+def _spawn_recording_pill() -> subprocess.Popen | None:
     try:
         if getattr(sys, "frozen", False):
             cmd = [sys.executable, "recording-pill"]
         else:
             repo_root = Path(__file__).resolve().parent
             cmd = [sys.executable, str(repo_root / "ui" / "recording_pill.py")]
-        subprocess.Popen(cmd, env=os.environ.copy())
+        return subprocess.Popen(cmd, env=os.environ.copy())
     except Exception as e:
         print(f"[daemon] pill spawn failed: {e}", flush=True)
+        return None
 
 
 def _spawn_edit_overlay(selection: str) -> None:
@@ -253,6 +257,11 @@ class Daemon:
         self._edit_pending = False  # for edit-mode
         self._tray: TrayApp | None = None
         self._stop_evt = threading.Event()
+        # Persistent flow bar (recording pill) — spawned once by the pump,
+        # respawned by its watchdog if the subprocess dies.
+        self._pill_proc: subprocess.Popen | None = None
+        self._record_started_at = 0.0
+        self._cancel_pending = False
 
     # -- Mode switching --------------------------------------------------
 
@@ -350,63 +359,86 @@ class Daemon:
         self.recorder.start()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
-        # Recording pill: prime state file then spawn so first paint has data.
+        # Prime the state file so the persistent pill morphs to the waveform
+        # immediately instead of waiting for the next pump tick.
         self._record_started_at = time.time()
-        _write_pill_state(running=True, rms=0.0, elapsed=0.0,
+        _write_pill_state("recording", rms=0.0, elapsed=0.0,
                           tone=self.state.tone.value, lang=self.state.language.value)
-        _spawn_recording_pill()
-        # 30 Hz state pump while recording.
-        self._pill_stop = threading.Event()
-        threading.Thread(target=self._pill_pump, daemon=True).start()
 
     def _pill_pump(self) -> None:
-        """Stream RMS + elapsed to state file; also poll pill control file
-        for cancel/confirm button clicks."""
+        """Persistent flow-bar companion loop. Runs for the daemon's whole
+        life: streams idle/recording/processing state to the state file,
+        drains chip/button clicks from the control file, and respawns the
+        pill subprocess if it dies."""
         # Clear any stale control file from a previous session.
         try:
             if _PILL_CONTROL.exists():
                 _PILL_CONTROL.unlink()
         except Exception:
             pass
-        try:
-            while not self._pill_stop.is_set() and self.recorder.is_recording:
-                elapsed = time.time() - self._record_started_at
-                _write_pill_state(
-                    running=True,
-                    rms=self.recorder.current_rms,
-                    elapsed=elapsed,
-                    tone=self.state.tone.value,
-                    lang=self.state.language.value,
-                )
-                # Drain control file
+        last_idle_write = 0.0
+        last_respawn = 0.0
+        while not self._stop_evt.is_set():
+            try:
+                now = time.time()
+                if self.recorder.is_recording:
+                    _write_pill_state(
+                        "recording",
+                        rms=self.recorder.current_rms,
+                        elapsed=now - self._record_started_at,
+                        tone=self.state.tone.value,
+                        lang=self.state.language.value,
+                    )
+                elif self.state.recording == RecordingState.PROCESSING:
+                    _write_pill_state("processing",
+                                      tone=self.state.tone.value,
+                                      lang=self.state.language.value)
+                elif now - last_idle_write >= 0.5:
+                    # Idle only needs to keep ts fresh for the pill's
+                    # dead-daemon check; 2 Hz is plenty.
+                    _write_pill_state("idle",
+                                      tone=self.state.tone.value,
+                                      lang=self.state.language.value)
+                    last_idle_write = now
+
+                # Drain control file (idle-chip / cancel / confirm clicks).
                 if _PILL_CONTROL.exists():
                     try:
                         data = json.loads(_PILL_CONTROL.read_text())
                         _PILL_CONTROL.unlink()
                         action = data.get("action")
-                        if action == "cancel":
+                        if action == "start":
+                            if (not self.recorder.is_recording
+                                    and self.state.recording == RecordingState.IDLE):
+                                print("[daemon] pill start — beginning recording", flush=True)
+                                self.on_record_start()
+                        elif action == "cancel" and self.recorder.is_recording:
                             print("[daemon] pill cancel — discarding recording", flush=True)
                             self._cancel_pending = True
                             self.on_record_stop()
-                        elif action == "confirm":
+                        elif action == "confirm" and self.recorder.is_recording:
                             print("[daemon] pill confirm — finishing recording", flush=True)
                             self.on_record_stop()
                     except Exception as e:
                         print(f"[daemon] control parse error: {e}", flush=True)
-                self._pill_stop.wait(0.05)
-        except Exception as e:
-            print(f"[daemon] pill pump error: {e}", flush=True)
+
+                # Watchdog: (re)spawn the pill, at most once per 3s.
+                if ((self._pill_proc is None or self._pill_proc.poll() is not None)
+                        and now - last_respawn > 3.0):
+                    if self._pill_proc is not None:
+                        print("[daemon] pill died — respawning", flush=True)
+                    self._pill_proc = _spawn_recording_pill()
+                    last_respawn = now
+            except Exception as e:
+                print(f"[daemon] pill pump error: {e}", flush=True)
+            self._stop_evt.wait(0.05)
 
     def on_record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
         audio = self.recorder.stop()
-        # Tell pill to close (running=False) then stop the pump.
-        _write_pill_state(running=False)
-        if getattr(self, "_pill_stop", None):
-            self._pill_stop.set()
         # If pill cancel was requested, drop audio + skip pipeline.
-        if getattr(self, "_cancel_pending", False):
+        if self._cancel_pending:
             self._cancel_pending = False
             self.state.recording = RecordingState.IDLE
             self.state.notify()
@@ -417,9 +449,15 @@ class Daemon:
         print(f"[daemon] captured {dur:.2f}s; transcribing...", flush=True)
         if dur < 0.25:
             print("[daemon] too short, ignoring.", flush=True)
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
             return
         edit_mode = self._edit_pending
         self._edit_pending = False
+        # Mark processing *before* the worker spins up so the pill never
+        # flashes back to idle between recorder stop and worker start.
+        self.state.recording = RecordingState.PROCESSING
+        self.state.notify()
         threading.Thread(target=self._pipeline_worker, args=(audio, edit_mode), daemon=True).start()
 
     def on_undo(self) -> None:
@@ -529,6 +567,12 @@ class Daemon:
             self._chords.start()
             time.sleep(0.4)  # let second listener settle too
 
+        # Persistent flow bar: prime the state file, then start the pump.
+        # The pump's watchdog performs the initial spawn and any respawns.
+        _write_pill_state("idle", tone=self.state.tone.value,
+                          lang=self.state.language.value)
+        threading.Thread(target=self._pill_pump, name="pill-pump", daemon=True).start()
+
         print(
             f"[daemon] ready.\n"
             f"  hold {hold_key} to dictate\n"
@@ -559,6 +603,15 @@ class Daemon:
         except KeyboardInterrupt:
             print("\n[daemon] shutting down.", flush=True)
         finally:
+            self._stop_evt.set()
+            # Tell the pill to quit now instead of waiting out its 3s
+            # stale-daemon timeout.
+            _write_pill_state("exit")
+            if self._pill_proc is not None:
+                try:
+                    self._pill_proc.terminate()
+                except Exception:
+                    pass
             if self._hold:
                 self._hold.stop()
             if self._chords:
