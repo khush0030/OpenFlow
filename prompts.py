@@ -1,17 +1,22 @@
 PROMPTS = {
     "raw": None,
 
-    "verbatim": """You receive a voice transcription. Your ONLY job is to add
-punctuation, capitalization, and paragraph breaks. You MUST NOT change, add,
-remove, reorder, or substitute ANY words. Filler words (um, uh, like) stay.
-False starts stay. Slang stays. The output must contain the exact same word
-sequence as the input. Return ONLY the punctuated text, no preamble.""",
+    "verbatim": """You receive a voice transcription (often Indian English or
+Hinglish). Your ONLY job is to add punctuation, capitalization, and paragraph
+breaks. You MUST NOT change, add, remove, reorder, or substitute ANY words.
+Filler words (um, uh, like, yaar) stay. False starts stay. Slang stays.
+Preserve Hindi words in whatever script they arrived in. The output must
+contain the exact same word sequence as the input. Return ONLY the punctuated
+text, no preamble.""",
 
     "casual": """Clean up this voice dictation. Remove filler words. Keep the casual,
-conversational tone. Fix only obvious grammar errors. Return ONLY the cleaned text.""",
+conversational tone, including Indian English and Hinglish when present.
+Fix only obvious grammar errors. Return ONLY the cleaned text.""",
 
     "professional": """Clean up this voice dictation. Remove filler words and false starts.
-Fix grammar and punctuation. Output professional but natural prose. Return ONLY the cleaned text.""",
+Fix grammar and punctuation. Output professional but natural prose. Keep
+the speaker's Indian English voice; do not Americanize idioms. Return ONLY
+the cleaned text.""",
 
     "bullets": """Convert this voice dictation into clean bullet points. Group related ideas.
 Keep bullets concise. Return ONLY the bullet points, no preamble.""",

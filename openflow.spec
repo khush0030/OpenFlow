@@ -16,12 +16,9 @@ import sys
 block_cipher = None
 is_macos = sys.platform == "darwin"
 
-# faster-whisper / ctranslate2 ship native libs and tokenizer data we must bundle
+# httpx is used for Sarvam STT + chat; scipy.io writes WAV payloads
 hidden = []
-hidden += collect_submodules("faster_whisper")
-hidden += collect_submodules("ctranslate2")
-hidden += collect_submodules("tokenizers")
-hidden += collect_submodules("anthropic")
+hidden += collect_submodules("httpx")
 hidden += collect_submodules("pynput")
 hidden += collect_submodules("rumps")
 hidden += collect_submodules("darkdetect")
@@ -30,13 +27,10 @@ hidden += collect_submodules("rapidfuzz")
 hidden += collect_submodules("scipy.io")
 hidden += collect_submodules("AppKit")
 hidden += collect_submodules("ui")
+hidden += ["sarvam", "transcribe", "ai", "httpcore", "h11", "anyio", "certifi"]
 
 datas = []
-datas += collect_data_files("faster_whisper")
-datas += collect_data_files("ctranslate2")
-datas += collect_data_files("tokenizers")
-datas += collect_data_files("av")  # ffmpeg-style audio decoding
-datas += collect_data_files("onnxruntime")
+datas += collect_data_files("certifi")
 # Ship our own assets (fonts/logo/tray/sounds). Empty subdirs are bundled so
 # runtime loaders find the expected layout even before designed assets land.
 datas += [("assets", "assets")]

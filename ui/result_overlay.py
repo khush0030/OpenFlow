@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ui.fonts import load_fonts
 from ui.tokens import Color, Font, Radius, Shadow, Space
+from ui.vibrancy import pin_overlay
 
 # Path to the transcribed text the daemon dropped for us.
 INPUT_PATH = Path("/tmp/openflow-result.txt")
@@ -145,6 +146,8 @@ class ResultOverlay(QWidget):
 
         # Place bottom-right of active screen
         QTimer.singleShot(0, self._place)
+        # Show over fullscreen apps / all Spaces, like the pill.
+        QTimer.singleShot(60, lambda: pin_overlay(self))
 
     @staticmethod
     def _truncate(s: str, limit: int = 320) -> str:
@@ -208,6 +211,15 @@ class ResultOverlay(QWidget):
             self.close()
             return
         super().keyPressEvent(ev)
+
+    def closeEvent(self, ev):
+        """Qt.Tool windows lack WA_QuitOnClose — without an explicit quit
+        the subprocess would outlive the window forever (zombie overlays).
+        Delay lets the ↩ Paste path fire its deferred Cmd+V first."""
+        super().closeEvent(ev)
+        app = QApplication.instance()
+        if app is not None:
+            QTimer.singleShot(500, app.quit)
 
 
 def _set_accessory_activation_policy() -> None:

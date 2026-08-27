@@ -37,7 +37,7 @@ from ui.tokens import Color, Font, Radius, Space
 
 ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
 KEYRING_SERVICE = "openflow"
-KEYRING_USER = "anthropic_api_key"
+KEYRING_USER = "sarvam_api_key"
 
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -236,10 +236,10 @@ class _PermRow(QWidget):
 
 
 class StepKey(_Step):
-    title_words = [("Paste your", False), ("Anthropic", True), ("key.", False)]
+    title_words = [("Paste your", False), ("Sarvam", True), ("key.", False)]
     description = (
-        "OpenFlow uses Claude to clean up dictations. The key stays on this "
-        "Mac — we store it in your macOS Keychain, not on disk in plain text."
+        "OpenFlow uses Sarvam for speech-to-text and cleanup. The key stays "
+        "on this Mac — we store it in your macOS Keychain, not on disk in plain text."
     )
 
     def build_body(self) -> QWidget:
@@ -249,14 +249,14 @@ class StepKey(_Step):
         lay.setSpacing(Space.SM)
         self.field = QLineEdit(host)
         self.field.setEchoMode(QLineEdit.EchoMode.Password)
-        self.field.setPlaceholderText("sk-ant-…")
-        existing = _read_key_from_keychain() or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.field.setPlaceholderText("Sarvam subscription key")
+        existing = _read_key_from_keychain() or os.environ.get("SARVAM_API_KEY", "")
         if existing:
             self.field.setText(existing)
         lay.addWidget(self.field)
 
         self.hint = QLabel(
-            "Get a key at console.anthropic.com → Settings → API keys.",
+            "Get a key at dashboard.sarvam.ai → API keys.",
             host,
         )
         self.hint.setStyleSheet(f"color: {Color.INK_MUTED}; font-size: {Font.SIZE_LABEL}px;")
@@ -271,7 +271,7 @@ class StepKey(_Step):
         key = self.field.text().strip()
         if key:
             _store_key_in_keychain(key)
-            os.environ["ANTHROPIC_API_KEY"] = key
+            os.environ["SARVAM_API_KEY"] = key
 
 
 class StepDefaults(_Step):

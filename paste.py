@@ -1,20 +1,18 @@
-"""macOS paste: copy to clipboard then trigger Cmd+V.
+"""macOS paste: restore the user's app, copy, Cmd+V at the cursor.
 
-Primary path: CGEventPost (uses Accessibility, no separate Automation
-permission required). Falls back to osascript System Events if PyObjC
-unavailable for any reason.
-
-`paste()` returns True/False so the daemon can log success.
+Wispr-style: never require a proven AX text field, never surface a
+result-overlay. Remember the last non-OpenFlow frontmost app so paste
+lands where the user was typing.
 """
 from __future__ import annotations
 
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 import pyperclip
 
-# Pre-import so PyInstaller bundles AppKit + Quartz modules
 try:
     import Quartz  # noqa: F401
     from Quartz import (  # type: ignore
@@ -26,68 +24,99 @@ except Exception as _e:
     print(f"[paste] Quartz unavailable: {_e}", flush=True)
     _HAS_QUARTZ = False
 
-try:
-    from ApplicationServices import (  # type: ignore
-        AXUIElementCreateSystemWide, AXUIElementCopyAttributeValue,
-    )
-    _HAS_AX = True
-except Exception:
-    _HAS_AX = False
 
-
-# Roles where pasting would be wrong (buttons, menus, system UI).
-_NON_TEXT_ROLES = {
-    "AXButton", "AXMenuItem", "AXMenuBar", "AXMenu", "AXMenuButton",
-    "AXCheckBox", "AXRadioButton", "AXTabGroup", "AXTab", "AXLink",
-    "AXImage", "AXProgressIndicator", "AXSlider", "AXDock", "AXDockItem",
-    "AXDesktop",
-}
-
-
-def has_text_focus() -> bool:
-    """Return True if any focusable UI element accepts pasted text.
-
-    Strategy: only refuse paste when the focused element is *obviously*
-    non-text (button/menu/desktop). For anything ambiguous (web areas,
-    groups, custom widgets) default to allowing paste — the user explicitly
-    triggered dictation, so we should land the text somewhere.
-    """
-    if not _HAS_AX:
-        return True
-    try:
-        sys_el = AXUIElementCreateSystemWide()
-        err, focused = AXUIElementCopyAttributeValue(sys_el, "AXFocusedUIElement", None)
-        if err != 0 or focused is None:
-            # No focused element at all — likely on Desktop or in a context
-            # menu / Mission Control. Don't paste.
-            return False
-        err, role = AXUIElementCopyAttributeValue(focused, "AXRole", None)
-        if err != 0 or not role:
-            return True  # ambiguous, allow paste
-        r = str(role)
-        if r in _NON_TEXT_ROLES:
-            return False
-        return True
-    except Exception as e:
-        print(f"[paste] AX focus probe failed: {e}", flush=True)
-        return True
-
-
+_OWN_NAMES = {"openflow", "openflow.app"}
+_OWN_BUNDLES = {"com.openflow.dictation"}
+_VK_V = 9
 _LAST_CLIPBOARD: Optional[str] = None
-_VK_V = 9  # macOS virtual keycode for 'V'
+
+
+@dataclass(frozen=True)
+class FrontApp:
+    pid: int
+    name: str
+    bundle_id: str = ""
+
+
+def _is_own_app(name: str, bundle_id: str) -> bool:
+    n = (name or "").strip().lower()
+    b = (bundle_id or "").strip().lower()
+    if b in _OWN_BUNDLES:
+        return True
+    if n in _OWN_NAMES:
+        return True
+    return False
+
+
+def capture_front_app() -> FrontApp | None:
+    """Frontmost GUI app, or None if it's OpenFlow / lookup failed."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events"\n'
+             "set p to first application process whose frontmost is true\n"
+             "set pid to unix id of p\n"
+             "set n to name of p\n"
+             'set bid to ""\n'
+             "try\n"
+             "set bid to bundle identifier of p\n"
+             "end try\n"
+             'return (pid as text) & tab & n & tab & bid\n'
+             "end tell"],
+            capture_output=True, text=True, timeout=1.0,
+        )
+        if r.returncode != 0:
+            return None
+        parts = (r.stdout or "").strip().split("\t")
+        if len(parts) < 2:
+            return None
+        pid = int(parts[0])
+        name = parts[1].strip()
+        bid = parts[2].strip() if len(parts) > 2 else ""
+        if _is_own_app(name, bid):
+            return None
+        return FrontApp(pid=pid, name=name, bundle_id=bid)
+    except Exception as e:
+        print(f"[paste] capture front app failed: {e}", flush=True)
+        return None
+
+
+def activate_front_app(target: FrontApp) -> bool:
+    """Bring the remembered app to the foreground so Cmd+V hits its cursor."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e",
+             f'tell application "System Events" to set frontmost of '
+             f"(first process whose unix id is {int(target.pid)}) to true"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        if r.returncode == 0:
+            return True
+        print(f"[paste] activate pid {target.pid} failed: {r.stderr.strip()}", flush=True)
+    except Exception as e:
+        print(f"[paste] activate failed: {e}", flush=True)
+    if target.name:
+        try:
+            r = subprocess.run(
+                ["osascript", "-e", f'tell application "{target.name}" to activate'],
+                capture_output=True, text=True, timeout=2.0,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+    return False
 
 
 def _cgevent_paste() -> bool:
-    """Synthesize Cmd+V via CGEventPost. Returns True on success."""
     if not _HAS_QUARTZ:
         return False
     try:
         down = CGEventCreateKeyboardEvent(None, _VK_V, True)
-        up   = CGEventCreateKeyboardEvent(None, _VK_V, False)
+        up = CGEventCreateKeyboardEvent(None, _VK_V, False)
         CGEventSetFlags(down, kCGEventFlagMaskCommand)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, down)
-        time.sleep(0.02)
+        time.sleep(0.03)
         CGEventPost(kCGHIDEventTap, up)
         return True
     except Exception as e:
@@ -96,7 +125,6 @@ def _cgevent_paste() -> bool:
 
 
 def _osascript_paste() -> bool:
-    """Fallback Cmd+V via osascript (requires Automation permission)."""
     try:
         r = subprocess.run(
             ["osascript", "-e",
@@ -112,13 +140,11 @@ def _osascript_paste() -> bool:
         return False
 
 
-def paste(text: str) -> str:
-    """Copy text to clipboard + try to Cmd+V it.
+def paste(text: str, target: FrontApp | None = None) -> str:
+    """Copy + Cmd+V into `target` (the app the user was in).
 
-    Returns one of:
-      'pasted'    — Cmd+V fired into a text-accepting field
-      'clipboard' — only on clipboard; daemon should surface a result overlay
-      'failed'    — clipboard write failed
+    Returns 'pasted', 'clipboard' (keystroke failed; text still on clipboard),
+    or 'failed'.
     """
     global _LAST_CLIPBOARD
     if not text:
@@ -132,12 +158,14 @@ def paste(text: str) -> str:
     except Exception as e:
         print(f"[paste] clipboard write failed: {e}", flush=True)
         return "failed"
-    # Clipboard write is async; small wait avoids pasting stale content.
     time.sleep(0.12)
 
-    if not has_text_focus():
-        print("[paste] no text-accepting focus — surfacing result overlay", flush=True)
-        return "clipboard"
+    if target is not None:
+        if activate_front_app(target):
+            print(f"[paste] restored focus → {target.name} ({target.pid})", flush=True)
+            time.sleep(0.12)
+        else:
+            print(f"[paste] could not restore {target.name}; pasting into current focus", flush=True)
 
     if _cgevent_paste():
         return "pasted"
@@ -151,7 +179,9 @@ def restore_clipboard() -> None:
 
 
 def get_active_app() -> Optional[str]:
-    """Return frontmost app name via osascript. None on failure."""
+    app = capture_front_app()
+    if app:
+        return app.name
     try:
         r = subprocess.run(
             ["osascript", "-e",

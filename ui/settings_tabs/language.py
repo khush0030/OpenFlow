@@ -65,12 +65,15 @@ class LanguageTab(QWidget):
         ))
 
         self.inject = ToggleSwitch()
-        self.inject.setChecked(cfg["dictionary"].get("inject_into_whisper", True))
+        self.inject.setChecked(cfg["dictionary"].get(
+            "inject_into_cleanup",
+            cfg["dictionary"].get("inject_into_whisper", True),
+        ))
         self.inject.toggled.connect(self._on_inject)
         outer.addWidget(SettingsRow(
-            "Bias Whisper",
+            "Bias cleanup",
             self.inject,
-            "Injects your dictionary terms as Whisper's initial_prompt for better recognition.",
+            "Injects your dictionary terms into the Sarvam cleanup prompt so names stay spelled correctly.",
         ))
 
         outer.addStretch()
@@ -88,5 +91,5 @@ class LanguageTab(QWidget):
         self.save_cb()
 
     def _on_inject(self, v: bool):
-        self.cfg["dictionary"]["inject_into_whisper"] = bool(v)
+        self.cfg["dictionary"]["inject_into_cleanup"] = bool(v)
         self.save_cb()

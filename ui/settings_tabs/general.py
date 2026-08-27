@@ -65,7 +65,7 @@ class GeneralTab(QWidget):
         outer.addWidget(SettingsRow(
             "Always output English",
             self.always_en,
-            "Routes any spoken language through Whisper's translate task. Disable to honor selected language mode.",
+            "Routes speech through Saaras translate mode. Disable to honor the selected language (Hinglish, Hindi, etc.).",
         ))
 
         # Auto-launch placeholder (LaunchAgent management is Phase 10 territory)

@@ -86,3 +86,44 @@ def _clear_color():
         return NSColor.clearColor()
     except Exception:
         return None
+
+
+# NSWindowCollectionBehavior bits (AppKit/NSWindow.h)
+_CB_CAN_JOIN_ALL_SPACES  = 1 << 0
+_CB_STATIONARY           = 1 << 4
+_CB_FULLSCREEN_AUXILIARY = 1 << 8
+_STATUS_WINDOW_LEVEL = 25  # kCGStatusWindowLevel — above fullscreen app windows
+
+
+def pin_overlay(widget) -> bool:
+    """Make an overlay window visible on every Space, including other apps'
+    fullscreen Spaces (Wispr-style HUD behavior).
+
+    Qt's WindowStaysOnTopHint alone maps to a floating window level that
+    macOS hides whenever a fullscreen app is frontmost — the overlay only
+    exists on the desktop Space. Call AFTER the widget is shown.
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        import objc  # type: ignore
+    except Exception as e:
+        print(f"[vibrancy] objc unavailable: {e}", flush=True)
+        return False
+    try:
+        win_id = int(widget.winId())
+        ns_view = objc.objc_object(c_void_p=win_id)
+        ns_window = ns_view.window()
+        if ns_window is None:
+            return False
+        ns_window.setCollectionBehavior_(
+            _CB_CAN_JOIN_ALL_SPACES | _CB_STATIONARY | _CB_FULLSCREEN_AUXILIARY
+        )
+        ns_window.setLevel_(_STATUS_WINDOW_LEVEL)
+        # Force onto screen without activating the app — never-active
+        # accessory apps otherwise may leave the window ordered out.
+        ns_window.orderFrontRegardless()
+        return True
+    except Exception as e:
+        print(f"[vibrancy] pin_overlay failed: {e}", flush=True)
+        return False

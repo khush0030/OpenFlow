@@ -3,20 +3,17 @@ from __future__ import annotations
 
 import subprocess
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QComboBox, QMessageBox, QPushButton, QSpinBox, QVBoxLayout,
     QWidget,
 )
 
-from config import CONFIG_PATH, HISTORY_PATH
+from config import CONFIG_PATH, HISTORY_PATH  # noqa: F401
 from ui.widgets import ToggleSwitch
 from ui.settings_tabs._common import SectionTitle, SettingsRow
 
 
-_MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
-_DEVICES = ["cpu", "mps", "cuda"]
-_COMPUTE = ["int8", "float16", "float32"]
+_STT_MODELS = ["saaras:v4", "saaras:v3"]
 
 
 class AdvancedTab(QWidget):
@@ -24,41 +21,23 @@ class AdvancedTab(QWidget):
         super().__init__()
         self.cfg = cfg
         self.save_cb = save_cb
+        self.cfg.setdefault("sarvam", {})
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(36, 24, 36, 24)
         outer.setSpacing(0)
 
-        outer.addWidget(SectionTitle("Whisper"))
+        outer.addWidget(SectionTitle("Speech-to-text"))
 
-        self.model_size = QComboBox()
-        self.model_size.addItems(_MODEL_SIZES)
-        self.model_size.setCurrentText(cfg["whisper"].get("model", "small"))
-        self.model_size.currentTextChanged.connect(self._on_model_size)
+        self.stt_model = QComboBox()
+        self.stt_model.setEditable(True)
+        self.stt_model.addItems(_STT_MODELS)
+        self.stt_model.setCurrentText(cfg.get("sarvam", {}).get("stt_model", "saaras:v4"))
+        self.stt_model.currentTextChanged.connect(self._on_stt_model)
         outer.addWidget(SettingsRow(
-            "Model size",
-            self.model_size,
-            "medium or large-v3 strongly recommended for Hindi. small is fine for English.",
-        ))
-
-        self.device = QComboBox()
-        self.device.addItems(_DEVICES)
-        self.device.setCurrentText(cfg["whisper"].get("device", "cpu"))
-        self.device.currentTextChanged.connect(self._on_device)
-        outer.addWidget(SettingsRow(
-            "Device",
-            self.device,
-            "Use mps if you're on Apple Silicon for a speed boost.",
-        ))
-
-        self.compute = QComboBox()
-        self.compute.addItems(_COMPUTE)
-        self.compute.setCurrentText(cfg["whisper"].get("compute_type", "int8"))
-        self.compute.currentTextChanged.connect(self._on_compute)
-        outer.addWidget(SettingsRow(
-            "Compute type",
-            self.compute,
-            "int8 for CPU, float16 for GPU/MPS.",
+            "Saaras model",
+            self.stt_model,
+            "Clips longer than ~28s are split automatically. REST STT max is 30s per request.",
         ))
 
         outer.addWidget(SectionTitle("History"))
@@ -69,7 +48,7 @@ class AdvancedTab(QWidget):
         outer.addWidget(SettingsRow(
             "Save dictation history",
             self.history_enabled,
-            "Stored locally in sqlite at ~/.openflow/history.sqlite",
+            "Stored locally in sqlite at ~/.openflow/history.sqlite. Also used as style examples for cleanup.",
         ))
 
         self.history_cap = QSpinBox()
@@ -102,11 +81,13 @@ class AdvancedTab(QWidget):
 
         outer.addStretch()
 
-    def _on_model_size(self, v): self.cfg["whisper"]["model"] = v; self.save_cb()
-    def _on_device(self, v): self.cfg["whisper"]["device"] = v; self.save_cb()
-    def _on_compute(self, v): self.cfg["whisper"]["compute_type"] = v; self.save_cb()
+    def _on_stt_model(self, v):
+        self.cfg.setdefault("sarvam", {})["stt_model"] = v
+        self.save_cb()
+
     def _on_history_enabled(self, v):
         self.cfg.setdefault("history", {})["enabled"] = bool(v); self.save_cb()
+
     def _on_history_cap(self, v):
         self.cfg.setdefault("history", {})["size_cap"] = int(v); self.save_cb()
 

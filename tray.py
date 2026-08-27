@@ -192,13 +192,20 @@ def _spawn_ui_subprocess(module: str) -> None:
     Inherits env so the child reads the same config + dictionary file.
     """
     env = os.environ.copy()
+    # Strip LaunchServices per-instance vars — inherited, they make the
+    # child's windows invisible (registered under the daemon's instance).
+    for _k in ("__CFBundleIdentifier", "LaunchInstanceID",
+               "XPC_SERVICE_NAME", "XPC_FLAGS"):
+        env.pop(_k, None)
     if getattr(sys, "frozen", False):
-        # PyInstaller bundle: sys.executable is `openflow`; route through CLI.
+        # PyInstaller bundle: route through LaunchServices — a directly
+        # exec'd child of this daemon never gets its windows onscreen.
         sub = _BUNDLE_SUBCOMMAND.get(module)
         if not sub:
             print(f"[tray] no bundle subcommand for {module}", flush=True)
             return
-        cmd = [sys.executable, *sub]
+        app_path = str(Path(sys.executable).resolve().parents[2])
+        cmd = ["/usr/bin/open", "-n", "-a", app_path, "--args", *sub]
         cwd = None
     else:
         repo_root = Path(__file__).resolve().parent

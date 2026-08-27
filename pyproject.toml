@@ -4,12 +4,11 @@ version = "0.1.0"
 description = "Self-hosted Wispr Flow alternative with Hindi/Hinglish support"
 requires-python = ">=3.10"
 dependencies = [
-    "faster-whisper",
     "sounddevice",
     "numpy",
     "pyperclip",
     "pynput",
-    "anthropic",
+    "httpx",
     "scipy",
     "rumps>=0.4.0",
     "darkdetect>=0.8",
@@ -32,7 +31,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["cli", "launcher", "daemon", "audio", "transcribe", "hotkeys", "paste", "ai", "dictionary", "history", "tray", "config", "prompts", "state", "sounds"]
+py-modules = ["cli", "launcher", "daemon", "audio", "transcribe", "sarvam", "hotkeys", "paste", "ai", "dictionary", "history", "tray", "config", "prompts", "state", "sounds"]
 
 [tool.setuptools.packages.find]
 include = ["ui*"]

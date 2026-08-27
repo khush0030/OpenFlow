@@ -81,7 +81,7 @@ if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
     from hotkeys import HoldToTalk, HotkeySet
 else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet
-from paste import paste, get_active_app
+from paste import paste, get_active_app, capture_front_app
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
 from history import History
@@ -114,26 +114,64 @@ def _coerce_lang(s: str) -> LanguageMode:
         return LanguageMode.AUTO
 
 
+def _child_env() -> dict:
+    """Env for UI subprocesses. The daemon (launched via LaunchServices)
+    carries per-instance LS vars; if a child app process inherits them,
+    WindowServer treats it as part of the daemon's app instance and its
+    windows never come onscreen. Strip them so each overlay registers as
+    its own app."""
+    env = os.environ.copy()
+    for k in ("__CFBundleIdentifier", "LaunchInstanceID",
+              "XPC_SERVICE_NAME", "XPC_FLAGS"):
+        env.pop(k, None)
+    return env
+
+
+def _app_bundle_path() -> str:
+    """/Applications/OpenFlow.app derived from the frozen executable path."""
+    # sys.executable = .../OpenFlow.app/Contents/MacOS/openflow
+    return str(Path(sys.executable).resolve().parents[2])
+
+
+def _spawn_ui(subcommand: list[str], dev_script: str,
+              dev_args: tuple = ()) -> subprocess.Popen | None:
+    """Launch a UI surface subprocess.
+
+    Frozen: route through LaunchServices (`open -n -g`) — windows of a
+    directly-exec'd child of this daemon never come onscreen (WindowServer
+    treats the child as a windowless helper of our instance). LS launch
+    registers it as a real app so overlays actually render.
+    Dev: plain interpreter subprocess.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            cmd = ["/usr/bin/open", "-n", "-g", "-a", _app_bundle_path(),
+                   "--args", *subcommand]
+        else:
+            repo_root = Path(__file__).resolve().parent
+            cmd = [sys.executable, str(repo_root / dev_script), *dev_args]
+        return subprocess.Popen(cmd, env=_child_env())
+    except Exception as e:
+        print(f"[daemon] spawn {subcommand} failed: {e}", flush=True)
+        return None
+
+
+def _pill_alive(proc: subprocess.Popen | None) -> bool:
+    """Aliveness for the watchdog. Frozen spawns go through `open`, whose
+    Popen exits immediately — fall back to pgrep for the real process."""
+    if getattr(sys, "frozen", False):
+        try:
+            r = subprocess.run(["pgrep", "-f", "recording-pill"],
+                               capture_output=True, timeout=2.0)
+            return r.returncode == 0
+        except Exception:
+            return True  # fail open: don't respawn-storm on pgrep hiccups
+    return proc is not None and proc.poll() is None
+
+
 _EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
 _PILL_STATE = Path("/tmp/openflow-pill.state.json")
 _PILL_CONTROL = Path("/tmp/openflow-pill.control.json")
-_RESULT_PATH = Path("/tmp/openflow-result.txt")
-
-
-def _spawn_result_overlay(text: str) -> None:
-    """Show a floating dictation-result widget when paste fell back to
-    clipboard only (no text field focused). Lets the user click Paste
-    after positioning their cursor."""
-    try:
-        _RESULT_PATH.write_text(text, encoding="utf-8")
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "result-overlay"]
-        else:
-            repo_root = Path(__file__).resolve().parent
-            cmd = [sys.executable, str(repo_root / "ui" / "result_overlay.py")]
-        subprocess.Popen(cmd, env=os.environ.copy())
-    except Exception as e:
-        print(f"[daemon] result overlay spawn failed: {e}", flush=True)
 _ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
 
 
@@ -164,7 +202,7 @@ def _maybe_run_onboarding_blocking() -> None:
         else:
             repo_root = Path(__file__).resolve().parent
             cmd = [sys.executable, str(repo_root / "ui" / "onboarding.py")]
-        subprocess.run(cmd, env=os.environ.copy())
+        subprocess.run(cmd, env=_child_env())
     except Exception as e:
         print(f"[daemon] onboarding launch failed: {e}", flush=True)
 
@@ -187,16 +225,7 @@ def _write_pill_state(state: str, rms: float = 0.0, elapsed: float = 0.0,
 
 
 def _spawn_recording_pill() -> subprocess.Popen | None:
-    try:
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "recording-pill"]
-        else:
-            repo_root = Path(__file__).resolve().parent
-            cmd = [sys.executable, str(repo_root / "ui" / "recording_pill.py")]
-        return subprocess.Popen(cmd, env=os.environ.copy())
-    except Exception as e:
-        print(f"[daemon] pill spawn failed: {e}", flush=True)
-        return None
+    return _spawn_ui(["recording-pill"], "ui/recording_pill.py")
 
 
 def _spawn_edit_overlay(selection: str) -> None:
@@ -204,13 +233,8 @@ def _spawn_edit_overlay(selection: str) -> None:
     try:
         sel_file = Path(tempfile.mkstemp(prefix="openflow-edit-sel-", suffix=".txt")[1])
         sel_file.write_text(selection)
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "edit-overlay", str(sel_file)]
-        else:
-            repo_root = Path(__file__).resolve().parent
-            script = repo_root / "ui" / "edit_overlay.py"
-            cmd = [sys.executable, str(script), str(sel_file)]
-        subprocess.Popen(cmd, env=os.environ.copy())
+        _spawn_ui(["edit-overlay", str(sel_file)], "ui/edit_overlay.py",
+                  dev_args=(str(sel_file),))
     except Exception as e:
         print(f"[daemon] edit overlay spawn failed: {e}", flush=True)
 
@@ -236,18 +260,18 @@ class Daemon:
                 device=self.cfg["audio"].get("device", "default"),
             )
         )
+        sarvam_cfg = self.cfg.get("sarvam") or {}
         self.transcriber = Transcriber(
-            model_size=self.cfg["whisper"]["model"],
-            device=self.cfg["whisper"]["device"],
-            compute_type=self.cfg["whisper"]["compute_type"],
+            model=sarvam_cfg.get("stt_model", "saaras:v4"),
+            api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
         )
         threading.Thread(
-            target=self.transcriber.preload, name="whisper-preload", daemon=True
+            target=self.transcriber.preload, name="sarvam-preload", daemon=True
         ).start()
         self.ai = AIProcessor(AIConfig(
-            model=self.cfg["claude"]["model"],
-            max_tokens=self.cfg["claude"]["max_tokens"],
-            api_key_env=self.cfg["claude"]["api_key_env"],
+            model=sarvam_cfg.get("chat_model", "sarvam-105b"),
+            max_tokens=int(sarvam_cfg.get("max_tokens", 1024)),
+            api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
         ))
         self.dictionary = Dictionary.load()
         self.history = History()
@@ -262,6 +286,8 @@ class Daemon:
         self._pill_proc: subprocess.Popen | None = None
         self._record_started_at = 0.0
         self._cancel_pending = False
+        # Last non-OpenFlow frontmost app — paste target (Wispr-style).
+        self._paste_target = None
 
     # -- Mode switching --------------------------------------------------
 
@@ -296,34 +322,69 @@ class Daemon:
 
     # -- Pipeline pieces -------------------------------------------------
 
-    def _whisper_opts(self) -> TranscribeOptions:
+    def _stt_opts(self) -> TranscribeOptions:
+        """Map OpenFlow language mode → Saaras language_code + mode."""
         m = self.state.language.value
         always_en = self.cfg["general"].get("always_english_output", True)
-        prompt = None
-        if self.cfg["dictionary"].get("inject_into_whisper", True):
-            lang_for_prompt = "hi" if m in ("hi", "hi_roman", "hi_to_en") else "en"
-            prompt = self.dictionary.initial_prompt(language=lang_for_prompt)
+        sr = int(self.cfg["audio"].get("sample_rate", 16000))
+        tone_raw = self.state.tone.value == "raw"
 
-        # Global override: collapse every input language to English.
-        # Whisper's task="translate" handles any source -> English.
+        def _opts(language_code: str | None, mode: str) -> TranscribeOptions:
+            if tone_raw and mode == "transcribe":
+                mode = "verbatim"
+            return TranscribeOptions(
+                language_code=language_code,
+                mode=mode,
+                sample_rate=sr,
+            )
+
+        # Global override: collapse every input language to English, except
+        # modes that exist specifically to emit Hindi / Roman Hindi.
         if always_en and m not in ("en_to_hi", "hi_roman", "hi"):
-            src_lang = None  # auto-detect
             if m == "en":
-                src_lang = "en"
-            return TranscribeOptions(language=src_lang, task="translate", initial_prompt=prompt)
+                return _opts("en-IN", "transcribe")
+            if m == "hi_to_en":
+                return _opts("hi-IN", "translate")
+            return _opts("unknown", "translate")
 
         if m == "en":
-            return TranscribeOptions(language="en", task="transcribe", initial_prompt=prompt)
+            return _opts("en-IN", "transcribe")
         if m == "hi":
-            return TranscribeOptions(language="hi", task="transcribe", initial_prompt=prompt)
+            script = self.cfg["general"].get("hindi_script", "devanagari")
+            return _opts("hi-IN", "translit" if script == "roman" else "transcribe")
         if m == "hi_roman":
-            return TranscribeOptions(language="hi", task="transcribe", initial_prompt=prompt)
+            return _opts("hi-IN", "translit")
+        if m == "hinglish":
+            return _opts("unknown", "codemix")
         if m == "hi_to_en":
-            return TranscribeOptions(language="hi", task="translate", initial_prompt=prompt)
+            return _opts("hi-IN", "translate")
         if m == "en_to_hi":
-            return TranscribeOptions(language="en", task="transcribe", initial_prompt=prompt)
-        # hinglish or auto
-        return TranscribeOptions(language=None, task="transcribe", initial_prompt=prompt)
+            return _opts("en-IN", "transcribe")
+        # auto: detect EN / HI / mix; codemix keeps English words in Latin
+        # and Hindi in Devanagari — the daily Hinglish path.
+        return _opts("unknown", "codemix")
+
+    def _style_examples(self) -> str | None:
+        try:
+            rows = self.history.recent(limit=12)
+        except Exception:
+            return None
+        parts: list[str] = []
+        for r in rows:
+            raw = (r.raw or "").strip()
+            final = (r.final or "").strip()
+            if not raw or not final or raw == final:
+                continue
+            parts.append(f"raw: {raw}\npreferred: {final}")
+            if len(parts) >= 4:
+                break
+        return "\n\n".join(parts) if parts else None
+
+    def _inject_glossary(self) -> bool:
+        d = self.cfg.get("dictionary") or {}
+        if "inject_into_cleanup" in d:
+            return bool(d["inject_into_cleanup"])
+        return bool(d.get("inject_into_whisper", True))
 
     def _post_process(self, raw: str) -> str:
         if not raw:
@@ -332,18 +393,37 @@ class Daemon:
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
 
-        # Per-mode AI step
+        # Per-mode AI step (Sarvam chat)
         m_lang = self.state.language.value
         m_tone = self.state.tone.value
         active = get_active_app()
+        glossary = None
+        if self._inject_glossary():
+            lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
+            glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
+        examples = self._style_examples()
         try:
             if m_lang == "hi_roman":
-                # Whisper produced Devanagari; ask Claude to transliterate.
-                return self.ai.transliterate_to_roman(corrected)
+                if any("\u0900" <= ch <= "\u097F" for ch in corrected):
+                    return self.ai.transliterate_to_roman(corrected)
+                return self.ai.cleanup(
+                    corrected,
+                    mode=m_tone,
+                    context_app=active,
+                    language=m_lang,
+                    glossary=glossary,
+                    examples=examples,
+                )
             if m_lang == "en_to_hi":
-                # Whisper produced English; ask Claude to translate.
                 return self.ai.translate_en_to_hi(corrected)
-            return self.ai.cleanup(corrected, mode=m_tone, context_app=active)
+            return self.ai.cleanup(
+                corrected,
+                mode=m_tone,
+                context_app=active,
+                language=m_lang,
+                glossary=glossary,
+                examples=examples,
+            )
         except Exception as e:
             log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
             return corrected
@@ -356,6 +436,10 @@ class Daemon:
         if self.recorder.is_recording:
             return
         print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
+        remembered = capture_front_app()
+        if remembered is not None:
+            self._paste_target = remembered
+            print(f"[daemon] paste target → {remembered.name}", flush=True)
         self.recorder.start()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
@@ -378,6 +462,7 @@ class Daemon:
             pass
         last_idle_write = 0.0
         last_respawn = 0.0
+        last_alive_check = 0.0
         while not self._stop_evt.is_set():
             try:
                 now = time.time()
@@ -400,6 +485,9 @@ class Daemon:
                                       tone=self.state.tone.value,
                                       lang=self.state.language.value)
                     last_idle_write = now
+                    remembered = capture_front_app()
+                    if remembered is not None:
+                        self._paste_target = remembered
 
                 # Drain control file (idle-chip / cancel / confirm clicks).
                 if _PILL_CONTROL.exists():
@@ -422,13 +510,16 @@ class Daemon:
                     except Exception as e:
                         print(f"[daemon] control parse error: {e}", flush=True)
 
-                # Watchdog: (re)spawn the pill, at most once per 3s.
-                if ((self._pill_proc is None or self._pill_proc.poll() is not None)
-                        and now - last_respawn > 3.0):
-                    if self._pill_proc is not None:
-                        print("[daemon] pill died — respawning", flush=True)
-                    self._pill_proc = _spawn_recording_pill()
-                    last_respawn = now
+                # Watchdog: (re)spawn the pill. Aliveness via pgrep when
+                # frozen (LS `open` Popen exits immediately) — check at
+                # 2s cadence, respawn at most once per 3s.
+                if now - last_alive_check >= 2.0:
+                    last_alive_check = now
+                    if not _pill_alive(self._pill_proc) and now - last_respawn > 3.0:
+                        if last_respawn:
+                            print("[daemon] pill died — respawning", flush=True)
+                        self._pill_proc = _spawn_recording_pill()
+                        last_respawn = now
             except Exception as e:
                 print(f"[daemon] pill pump error: {e}", flush=True)
             self._stop_evt.wait(0.05)
@@ -501,10 +592,14 @@ class Daemon:
         self.state.notify()
         try:
             t0 = time.time()
-            opts = self._whisper_opts()
+            opts = self._stt_opts()
             raw = self.transcriber.transcribe(audio, opts)
             t1 = time.time()
-            print(f"[daemon] whisper {t1-t0:.2f}s: {raw!r}", flush=True)
+            print(
+                f"[daemon] sarvam-stt {t1-t0:.2f}s mode={opts.mode} "
+                f"lang={opts.language_code!r}: {raw!r}",
+                flush=True,
+            )
             if not raw.strip():
                 return
 
@@ -517,15 +612,14 @@ class Daemon:
                 final = self._post_process(raw)
 
             t2 = time.time()
-            print(f"[daemon] ai {t2-t1:.2f}s -> {final!r}", flush=True)
+            print(f"[daemon] sarvam-chat {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
                 return
 
             self.state.last_pasted = final
-            paste_status = paste(final)
+            paste_status = paste(final, target=self._paste_target)
             self.state.last_paste_at = time.time()
-            if paste_status == "clipboard":
-                _spawn_result_overlay(final)
+            print(f"[daemon] paste {paste_status}", flush=True)
             self.history.add(
                 raw=raw,
                 final=final,

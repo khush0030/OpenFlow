@@ -27,7 +27,7 @@ class ToneMode(str, Enum):
     EMAIL        = "email"
     SLACK        = "slack"
     # Pre-existing working values from daemon — preserved per RECON §5.
-    RAW          = "raw"        # no AI cleanup; raw whisper
+    RAW          = "raw"        # no AI cleanup; raw Saaras transcript
     VERBATIM     = "verbatim"   # punctuation only
 
 
@@ -38,7 +38,7 @@ class LanguageMode(str, Enum):
     HINGLISH = "hinglish"
     HI_TO_EN = "hi_to_en"
     EN_TO_HI = "en_to_hi"
-    # Existing daemon default — auto-detect within Whisper.
+    # Existing daemon default — auto-detect via Saaras language_code=unknown.
     AUTO     = "auto"
 
 

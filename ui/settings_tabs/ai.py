@@ -1,22 +1,18 @@
-"""AI settings tab."""
+"""AI settings tab — Sarvam STT + chat."""
 from __future__ import annotations
 
 import os
 
 from PyQt6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout,
+    QComboBox, QHBoxLayout, QLineEdit, QPushButton, QSpinBox, QVBoxLayout,
     QWidget,
 )
 
 from ui.settings_tabs._common import SectionTitle, SettingsRow
-from ui.tokens import Color, Font
 
 
-_MODELS = [
-    "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6",
-    "claude-opus-4-7",
-]
+_STT_MODELS = ["saaras:v4", "saaras:v3"]
+_CHAT_MODELS = ["sarvam-105b"]
 
 
 class AITab(QWidget):
@@ -24,21 +20,26 @@ class AITab(QWidget):
         super().__init__()
         self.cfg = cfg
         self.save_cb = save_cb
+        self.cfg.setdefault("sarvam", {})
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(36, 24, 36, 24)
         outer.setSpacing(0)
 
-        outer.addWidget(SectionTitle("Anthropic API"))
+        outer.addWidget(SectionTitle("Sarvam API"))
 
-        # API key — read-only display of current env var name + entered key
         api_box = QHBoxLayout()
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("sk-ant-...")
-        # Pre-fill with current value if known.
-        env_var = cfg["claude"].get("api_key_env", "ANTHROPIC_API_KEY")
+        self.api_key.setPlaceholderText("Sarvam subscription key")
+        env_var = cfg["sarvam"].get("api_key_env", "SARVAM_API_KEY")
         cur = os.environ.get(env_var, "")
+        if not cur:
+            try:
+                import keyring
+                cur = keyring.get_password("openflow", "sarvam_api_key") or ""
+            except Exception:
+                cur = ""
         if cur:
             self.api_key.setText(cur)
         self.api_key.editingFinished.connect(self._on_api_key)
@@ -53,26 +54,39 @@ class AITab(QWidget):
         outer.addWidget(SettingsRow(
             "API key",
             wrap,
-            f"Read from env ${env_var} or your shell rc. Not persisted to disk by this dialog.",
+            "Used for both speech-to-text (Saaras) and cleanup (sarvam-105b). "
+            "Stored in Keychain / $" + env_var + ", not in config.toml.",
         ))
 
-        outer.addWidget(SectionTitle("Model"))
+        outer.addWidget(SectionTitle("Models"))
+
+        self.stt_model = QComboBox()
+        self.stt_model.setEditable(True)
+        self.stt_model.addItems(_STT_MODELS)
+        self.stt_model.setCurrentText(cfg["sarvam"].get("stt_model", _STT_MODELS[0]))
+        self.stt_model.currentTextChanged.connect(self._on_stt_model)
+        outer.addWidget(SettingsRow(
+            "Speech-to-text",
+            self.stt_model,
+            "v4 adds Global English on top of Indian English and 22 Indic languages. "
+            "Hinglish uses Saaras codemix mode.",
+        ))
 
         self.model = QComboBox()
         self.model.setEditable(True)
-        self.model.addItems(_MODELS)
-        self.model.setCurrentText(cfg["claude"].get("model", _MODELS[0]))
+        self.model.addItems(_CHAT_MODELS)
+        self.model.setCurrentText(cfg["sarvam"].get("chat_model", _CHAT_MODELS[0]))
         self.model.currentTextChanged.connect(self._on_model)
         outer.addWidget(SettingsRow(
-            "Model",
+            "Cleanup model",
             self.model,
-            "Haiku is fast + cheap and recommended. Sonnet/Opus only for slow but careful cleanup.",
+            "sarvam-105b punctuates, applies tone, and rewrites in edit mode.",
         ))
 
         self.max_tokens = QSpinBox()
         self.max_tokens.setRange(256, 4096)
         self.max_tokens.setSingleStep(64)
-        self.max_tokens.setValue(int(cfg["claude"].get("max_tokens", 1024)))
+        self.max_tokens.setValue(int(cfg["sarvam"].get("max_tokens", 1024)))
         self.max_tokens.valueChanged.connect(self._on_max_tokens)
         outer.addWidget(SettingsRow(
             "Max tokens",
@@ -83,37 +97,44 @@ class AITab(QWidget):
         outer.addStretch()
 
     def _on_api_key(self):
-        # We don't write keys to TOML for safety. Stash in process env so the
-        # current daemon (if same process) picks it up. Persistent storage is
-        # via shell rc or, later, macOS Keychain (Phase 10 onboarding).
-        env_var = self.cfg["claude"].get("api_key_env", "ANTHROPIC_API_KEY")
+        env_var = self.cfg["sarvam"].get("api_key_env", "SARVAM_API_KEY")
         key = self.api_key.text().strip()
-        if key:
-            os.environ[env_var] = key
+        if not key:
+            return
+        os.environ[env_var] = key
+        try:
+            import keyring
+            keyring.set_password("openflow", "sarvam_api_key", key)
+        except Exception:
+            pass
 
     def _test_key(self):
         from PyQt6.QtWidgets import QMessageBox
         try:
-            from anthropic import Anthropic
-            env_var = self.cfg["claude"].get("api_key_env", "ANTHROPIC_API_KEY")
-            key = self.api_key.text().strip() or os.environ.get(env_var, "")
-            if not key:
-                QMessageBox.warning(self, "Test connection", "No API key set.")
-                return
-            client = Anthropic(api_key=key)
-            client.messages.create(
-                model=self.cfg["claude"].get("model", _MODELS[0]),
+            from sarvam import chat_complete, resolve_api_key
+            env_var = self.cfg["sarvam"].get("api_key_env", "SARVAM_API_KEY")
+            typed = self.api_key.text().strip()
+            if typed:
+                os.environ[env_var] = typed
+            key = typed or resolve_api_key(env_var)
+            chat_complete(
+                [{"role": "user", "content": "Reply with the single word pong."}],
+                api_key=key,
+                model=self.cfg["sarvam"].get("chat_model", _CHAT_MODELS[0]),
                 max_tokens=16,
-                messages=[{"role": "user", "content": "ping"}],
             )
-            QMessageBox.information(self, "Test connection", "Connection ok.")
+            QMessageBox.information(self, "Test connection", "Sarvam connection ok.")
         except Exception as e:
             QMessageBox.critical(self, "Test connection", f"Failed: {e}")
 
+    def _on_stt_model(self, v: str):
+        self.cfg["sarvam"]["stt_model"] = v
+        self.save_cb()
+
     def _on_model(self, v: str):
-        self.cfg["claude"]["model"] = v
+        self.cfg["sarvam"]["chat_model"] = v
         self.save_cb()
 
     def _on_max_tokens(self, v: int):
-        self.cfg["claude"]["max_tokens"] = int(v)
+        self.cfg["sarvam"]["max_tokens"] = int(v)
         self.save_cb()

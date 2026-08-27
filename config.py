@@ -52,19 +52,15 @@ DEFAULTS: dict[str, Any] = {
         "device": "default",
         "silence_threshold": 0.01,
     },
-    "whisper": {
-        "model": "small",
-        "device": "cpu",
-        "compute_type": "int8",
-    },
-    "claude": {
-        "model": "claude-haiku-4-5-20251001",
+    "sarvam": {
+        "stt_model": "saaras:v4",
+        "chat_model": "sarvam-105b",
         "max_tokens": 1024,
-        "api_key_env": "ANTHROPIC_API_KEY",
+        "api_key_env": "SARVAM_API_KEY",
     },
     "dictionary": {
         "fuzzy_threshold": 85,
-        "inject_into_whisper": True,
+        "inject_into_cleanup": True,
     },
 }
 

@@ -7,7 +7,7 @@ Three visual modes driven by the daemon's state file:
                 mono label. Click anywhere on it to start dictation.
   recording   — expanded pill: cancel (✕) / confirm (✓) buttons flanking
                 a live 12-bar RMS waveform.
-  processing  — amber traveling-wave shimmer while whisper + Claude run.
+  processing  — amber traveling-wave shimmer while Saaras + Sarvam chat run.
 
 IPC: daemon writes /tmp/openflow-pill.state.json (~20 Hz while recording
 or processing, 2 Hz idle) with keys:
@@ -28,7 +28,10 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import QRect, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import (
+    QColor, QCursor, QFont, QFontMetrics, QGuiApplication, QPainter,
+    QPainterPath, QPen,
+)
 from PyQt6.QtWidgets import (
     QApplication, QGraphicsDropShadowEffect, QWidget,
 )
@@ -37,7 +40,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ui.fonts import load_fonts
 from ui.tokens import Color, Font, Radius, Shadow
-from ui.vibrancy import apply_vibrancy
+from ui.vibrancy import apply_vibrancy, pin_overlay
 
 
 STATE_PATH = Path("/tmp/openflow-pill.state.json")
@@ -95,12 +98,19 @@ class RecordingPill(QWidget):
         self._anim.timeout.connect(self._tick)
         self._anim.start(33)
 
+        self._idle_skip = 0
         self._set_mode("idle", force=True)
         QTimer.singleShot(40, lambda: apply_vibrancy(self, material="hud"))
+        # Visible on every Space incl. fullscreen apps — without this the
+        # pill only exists on the desktop Space and looks "missing".
+        QTimer.singleShot(60, lambda: pin_overlay(self))
 
     # ── placement ────────────────────────────────────────────
     def _place(self):
-        screen = QApplication.primaryScreen()
+        # Follow the user: place on the screen holding the cursor, not
+        # always the primary display.
+        screen = (QGuiApplication.screenAt(QCursor.pos())
+                  or QApplication.primaryScreen())
         if not screen:
             return
         geo = screen.availableGeometry()
@@ -191,7 +201,12 @@ class RecordingPill(QWidget):
         elif self._mode == "processing":
             self._proc_phase = (self._proc_phase + 0.24) % (2 * math.pi)
         else:
-            self._dot_phase = (self._dot_phase + 0.05) % (2 * math.pi)
+            # Idle: repaint at ~10fps instead of 30 — the breathing dot
+            # doesn't need more, and this pill runs all day.
+            self._idle_skip = (self._idle_skip + 1) % 3
+            if self._idle_skip:
+                return
+            self._dot_phase = (self._dot_phase + 0.15) % (2 * math.pi)
         self.update()
 
     # ── geometry helpers ─────────────────────────────────────

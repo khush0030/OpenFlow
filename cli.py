@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH
@@ -170,10 +171,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"pynput listener failed: {type(e).__name__}: {e}")
 
     # Config sanity
-    from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH
+    from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH, load_env
     print(f"\nConfig: {CONFIG_PATH} (exists={CONFIG_PATH.exists()})")
     print(f"Dict:   {DICT_PATH} (exists={DICT_PATH.exists()})")
     print(f"Hist:   {HISTORY_PATH} (exists={HISTORY_PATH.exists()})")
+
+    load_env()
+    has_env = bool(os.environ.get("SARVAM_API_KEY"))
+    has_keyring = False
+    try:
+        import keyring
+        has_keyring = bool(keyring.get_password("openflow", "sarvam_api_key"))
+    except Exception:
+        pass
+    print(f"Sarvam key: env={'yes' if has_env else 'no'} keychain={'yes' if has_keyring else 'no'}")
 
     return 0
 
