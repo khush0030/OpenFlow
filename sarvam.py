@@ -96,24 +96,34 @@ def _error_message(resp: httpx.Response) -> str:
     return str(body)[:400]
 
 
+_client: httpx.Client | None = None
+
+
+def _http() -> httpx.Client:
+    global _client
+    if _client is None or _client.is_closed:
+        _client = httpx.Client(timeout=25.0)
+    return _client
+
+
 def _request_with_retry(
     method: str,
     url: str,
     *,
     headers: dict[str, str],
     timeout: float,
-    retries: int = 3,
+    retries: int = 2,
     **kwargs: Any,
 ) -> httpx.Response:
     last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            resp = httpx.request(
+            resp = _http().request(
                 method, url, headers=headers, timeout=timeout, **kwargs
             )
             if resp.status_code == 429 or 500 <= resp.status_code < 600:
                 last_err = SarvamError(_error_message(resp), resp.status_code)
-                time.sleep(2 ** attempt)
+                time.sleep(0.4 * (attempt + 1))
                 continue
             if resp.status_code >= 400:
                 raise SarvamError(
@@ -123,10 +133,10 @@ def _request_with_retry(
             return resp
         except httpx.TimeoutException as e:
             last_err = e
-            time.sleep(2 ** attempt)
+            time.sleep(0.4 * (attempt + 1))
         except httpx.TransportError as e:
             last_err = e
-            time.sleep(2 ** attempt)
+            time.sleep(0.4 * (attempt + 1))
     raise SarvamError(f"Sarvam request failed after retries: {last_err}")
 
 
@@ -137,7 +147,7 @@ def speech_to_text(
     model: str = "saaras:v4",
     mode: str = "transcribe",
     language_code: str | None = None,
-    timeout: float = 60.0,
+    timeout: float = 25.0,
 ) -> STTResult:
     data: dict[str, str] = {
         "model": model,

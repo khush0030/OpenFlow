@@ -1,20 +1,20 @@
-"""macOS paste: restore the user's app, copy, Cmd+V at the cursor.
+"""Insert dictation at the caret: AX insert when possible, else Cmd+V.
 
-Wispr-style: never require a proven AX text field, never surface a
-result-overlay. Remember the last non-OpenFlow frontmost app so paste
-lands where the user was typing.
+Never `activate` an app that is already frontmost — that steals focus
+from the text field. Clipboard writes go through NSPasteboard (no pbcopy).
 """
 from __future__ import annotations
 
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
-import pyperclip
+_HAS_QUARTZ = False
+_HAS_AX = False
+_HAS_APPKIT = False
 
 try:
-    import Quartz  # noqa: F401
     from Quartz import (  # type: ignore
         CGEventCreateKeyboardEvent, CGEventPost, CGEventSetFlags,
         kCGHIDEventTap, kCGEventFlagMaskCommand,
@@ -22,89 +22,182 @@ try:
     _HAS_QUARTZ = True
 except Exception as _e:
     print(f"[paste] Quartz unavailable: {_e}", flush=True)
-    _HAS_QUARTZ = False
+
+try:
+    from ApplicationServices import (  # type: ignore
+        AXUIElementCopyAttributeValue,
+        AXUIElementCreateSystemWide,
+        AXUIElementSetAttributeValue,
+    )
+    _HAS_AX = True
+except Exception:
+    _HAS_AX = False
+
+try:
+    from AppKit import (  # type: ignore
+        NSPasteboard,
+        NSRunningApplication,
+        NSWorkspace,
+    )
+    try:
+        from AppKit import NSPasteboardTypeString  # type: ignore
+    except Exception:
+        from AppKit import NSStringPboardType as NSPasteboardTypeString  # type: ignore
+    _HAS_APPKIT = True
+except Exception as _e:
+    print(f"[paste] AppKit unavailable: {_e}", flush=True)
+    import pyperclip  # fallback only
+    NSPasteboard = None  # type: ignore
+    NSPasteboardTypeString = None  # type: ignore
 
 
 _OWN_NAMES = {"openflow", "openflow.app"}
 _OWN_BUNDLES = {"com.openflow.dictation"}
 _VK_V = 9
+_NS_APP_ACTIVATE_IGNORING_OTHERS = 1 << 1
 _LAST_CLIPBOARD: Optional[str] = None
 
 
-@dataclass(frozen=True)
-class FrontApp:
+@dataclass
+class PasteTarget:
     pid: int
     name: str
     bundle_id: str = ""
+    ax_element: Any = None
+
+
+# Back-compat alias used by older call sites / tests.
+FrontApp = PasteTarget
 
 
 def _is_own_app(name: str, bundle_id: str) -> bool:
     n = (name or "").strip().lower()
     b = (bundle_id or "").strip().lower()
-    if b in _OWN_BUNDLES:
-        return True
-    if n in _OWN_NAMES:
-        return True
-    return False
+    return b in _OWN_BUNDLES or n in _OWN_NAMES
 
 
-def capture_front_app() -> FrontApp | None:
-    """Frontmost GUI app, or None if it's OpenFlow / lookup failed."""
+def _front_ns_app():
+    if not _HAS_APPKIT:
+        return None
     try:
-        r = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events"\n'
-             "set p to first application process whose frontmost is true\n"
-             "set pid to unix id of p\n"
-             "set n to name of p\n"
-             'set bid to ""\n'
-             "try\n"
-             "set bid to bundle identifier of p\n"
-             "end try\n"
-             'return (pid as text) & tab & n & tab & bid\n'
-             "end tell"],
-            capture_output=True, text=True, timeout=1.0,
-        )
-        if r.returncode != 0:
-            return None
-        parts = (r.stdout or "").strip().split("\t")
-        if len(parts) < 2:
-            return None
-        pid = int(parts[0])
-        name = parts[1].strip()
-        bid = parts[2].strip() if len(parts) > 2 else ""
-        if _is_own_app(name, bid):
-            return None
-        return FrontApp(pid=pid, name=name, bundle_id=bid)
-    except Exception as e:
-        print(f"[paste] capture front app failed: {e}", flush=True)
+        return NSWorkspace.sharedWorkspace().frontmostApplication()
+    except Exception:
         return None
 
 
-def activate_front_app(target: FrontApp) -> bool:
-    """Bring the remembered app to the foreground so Cmd+V hits its cursor."""
+def capture_front_app() -> PasteTarget | None:
+    """Frontmost GUI app via NSWorkspace (no AppleScript)."""
+    app = _front_ns_app()
+    if app is None:
+        return None
     try:
-        r = subprocess.run(
-            ["osascript", "-e",
-             f'tell application "System Events" to set frontmost of '
-             f"(first process whose unix id is {int(target.pid)}) to true"],
-            capture_output=True, text=True, timeout=2.0,
-        )
-        if r.returncode == 0:
-            return True
-        print(f"[paste] activate pid {target.pid} failed: {r.stderr.strip()}", flush=True)
+        pid = int(app.processIdentifier())
+        name = str(app.localizedName() or "")
+        bid = str(app.bundleIdentifier() or "")
+    except Exception:
+        return None
+    if _is_own_app(name, bid):
+        return None
+    return PasteTarget(pid=pid, name=name, bundle_id=bid)
+
+
+def capture_paste_target() -> PasteTarget | None:
+    """App + focused AX element at the caret, captured on key-down."""
+    target = capture_front_app()
+    ax = _ax_focused_element()
+    if target is None and ax is None:
+        return None
+    if target is None:
+        app = _front_ns_app()
+        pid = int(app.processIdentifier()) if app is not None else 0
+        name = str(app.localizedName() or "") if app is not None else ""
+        bid = str(app.bundleIdentifier() or "") if app is not None else ""
+        target = PasteTarget(pid=pid, name=name, bundle_id=bid, ax_element=ax)
+    else:
+        target.ax_element = ax
+    return target
+
+
+def _ax_focused_element():
+    if not _HAS_AX:
+        return None
+    try:
+        sys_el = AXUIElementCreateSystemWide()
+        err, focused = AXUIElementCopyAttributeValue(sys_el, "AXFocusedUIElement", None)
+        if err != 0 or focused is None:
+            return None
+        return focused
+    except Exception:
+        return None
+
+
+def _ax_insert(text: str, element=None) -> bool:
+    """Insert at caret by setting AXSelectedText (replaces selection only)."""
+    if not _HAS_AX or not text:
+        return False
+    focused = element if element is not None else _ax_focused_element()
+    if focused is None:
+        return False
+    try:
+        err = AXUIElementSetAttributeValue(focused, "AXSelectedText", text)
+        return err == 0
+    except Exception as e:
+        print(f"[paste] AX insert failed: {e}", flush=True)
+        return False
+
+
+def _front_pid() -> int | None:
+    app = _front_ns_app()
+    if app is None:
+        return None
+    try:
+        return int(app.processIdentifier())
+    except Exception:
+        return None
+
+
+def activate_front_app(target: PasteTarget) -> bool:
+    if not _HAS_APPKIT or target.pid <= 0:
+        return False
+    try:
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(target.pid)
+        if app is None or app.isTerminated():
+            return False
+        return bool(app.activateWithOptions_(_NS_APP_ACTIVATE_IGNORING_OTHERS))
     except Exception as e:
         print(f"[paste] activate failed: {e}", flush=True)
-    if target.name:
+        return False
+
+
+def _clipboard_get() -> str | None:
+    if _HAS_APPKIT and NSPasteboard is not None:
         try:
-            r = subprocess.run(
-                ["osascript", "-e", f'tell application "{target.name}" to activate'],
-                capture_output=True, text=True, timeout=2.0,
-            )
-            return r.returncode == 0
+            s = NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString)
+            return str(s) if s else ""
         except Exception:
-            return False
-    return False
+            pass
+    try:
+        import pyperclip
+        return pyperclip.paste()
+    except Exception:
+        return None
+
+
+def _clipboard_set(text: str) -> bool:
+    if _HAS_APPKIT and NSPasteboard is not None:
+        try:
+            pb = NSPasteboard.generalPasteboard()
+            pb.clearContents()
+            return bool(pb.setString_forType_(text, NSPasteboardTypeString))
+        except Exception as e:
+            print(f"[paste] NSPasteboard write failed: {e}", flush=True)
+    try:
+        import pyperclip
+        pyperclip.copy(text)
+        return True
+    except Exception as e:
+        print(f"[paste] clipboard write failed: {e}", flush=True)
+        return False
 
 
 def _cgevent_paste() -> bool:
@@ -116,7 +209,7 @@ def _cgevent_paste() -> bool:
         CGEventSetFlags(down, kCGEventFlagMaskCommand)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, down)
-        time.sleep(0.03)
+        time.sleep(0.015)
         CGEventPost(kCGHIDEventTap, up)
         return True
     except Exception as e:
@@ -140,33 +233,33 @@ def _osascript_paste() -> bool:
         return False
 
 
-def paste(text: str, target: FrontApp | None = None) -> str:
-    """Copy + Cmd+V into `target` (the app the user was in).
-
-    Returns 'pasted', 'clipboard' (keystroke failed; text still on clipboard),
-    or 'failed'.
-    """
+def paste(text: str, target: PasteTarget | None = None) -> str:
+    """Land `text` at the caret in `target`. Prefers AX insert (no focus change)."""
     global _LAST_CLIPBOARD
     if not text:
         return "failed"
-    try:
-        _LAST_CLIPBOARD = pyperclip.paste()
-    except Exception:
-        _LAST_CLIPBOARD = None
-    try:
-        pyperclip.copy(text)
-    except Exception as e:
-        print(f"[paste] clipboard write failed: {e}", flush=True)
+    _LAST_CLIPBOARD = _clipboard_get()
+    if not _clipboard_set(text):
         return "failed"
-    time.sleep(0.12)
+
+    ax_el = target.ax_element if target is not None else None
+    if _ax_insert(text, ax_el):
+        print("[paste] inserted via AXSelectedText", flush=True)
+        return "pasted"
 
     if target is not None:
-        if activate_front_app(target):
-            print(f"[paste] restored focus → {target.name} ({target.pid})", flush=True)
-            time.sleep(0.12)
-        else:
-            print(f"[paste] could not restore {target.name}; pasting into current focus", flush=True)
+        current = _front_pid()
+        if current != target.pid:
+            if activate_front_app(target):
+                print(f"[paste] restored {target.name} ({target.pid})", flush=True)
+                time.sleep(0.05)
+                if _ax_insert(text, ax_el):
+                    print("[paste] inserted via AX after restore", flush=True)
+                    return "pasted"
+            else:
+                print(f"[paste] could not restore {target.name}", flush=True)
 
+    time.sleep(0.04)
     if _cgevent_paste():
         return "pasted"
     print("[paste] CGEvent failed; falling back to osascript", flush=True)
@@ -175,19 +268,9 @@ def paste(text: str, target: FrontApp | None = None) -> str:
 
 def restore_clipboard() -> None:
     if _LAST_CLIPBOARD is not None:
-        pyperclip.copy(_LAST_CLIPBOARD)
+        _clipboard_set(_LAST_CLIPBOARD)
 
 
 def get_active_app() -> Optional[str]:
     app = capture_front_app()
-    if app:
-        return app.name
-    try:
-        r = subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to name of first application process whose frontmost is true'],
-            capture_output=True, text=True, timeout=1.0,
-        )
-        return r.stdout.strip() or None
-    except Exception:
-        return None
+    return app.name if app else None

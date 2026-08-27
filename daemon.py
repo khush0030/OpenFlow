@@ -81,7 +81,7 @@ if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
     from hotkeys import HoldToTalk, HotkeySet
 else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet
-from paste import paste, get_active_app, capture_front_app
+from paste import paste, get_active_app, capture_paste_target
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
 from history import History
@@ -389,40 +389,41 @@ class Daemon:
     def _post_process(self, raw: str) -> str:
         if not raw:
             return ""
-        # Dictionary fuzzy correction
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
 
-        # Per-mode AI step (Sarvam chat)
         m_lang = self.state.language.value
         m_tone = self.state.tone.value
-        active = get_active_app()
+
+        # Saaras already punctuates in transcribe/codemix/translate. Skip the
+        # chat hop for raw/verbatim — that's the default path and the lag.
+        if m_lang == "en_to_hi":
+            try:
+                return self.ai.translate_en_to_hi(corrected)
+            except Exception as e:
+                log_exception("daemon.pipeline", "EN→HI failed — pasting English", e)
+                return corrected
+        if m_lang == "hi_roman" and any("\u0900" <= ch <= "\u097F" for ch in corrected):
+            try:
+                return self.ai.transliterate_to_roman(corrected)
+            except Exception as e:
+                log_exception("daemon.pipeline", "transliterate failed", e)
+                return corrected
+        if m_tone in ("raw", "verbatim"):
+            return corrected
+
         glossary = None
         if self._inject_glossary():
             lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
             glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
-        examples = self._style_examples()
         try:
-            if m_lang == "hi_roman":
-                if any("\u0900" <= ch <= "\u097F" for ch in corrected):
-                    return self.ai.transliterate_to_roman(corrected)
-                return self.ai.cleanup(
-                    corrected,
-                    mode=m_tone,
-                    context_app=active,
-                    language=m_lang,
-                    glossary=glossary,
-                    examples=examples,
-                )
-            if m_lang == "en_to_hi":
-                return self.ai.translate_en_to_hi(corrected)
             return self.ai.cleanup(
                 corrected,
                 mode=m_tone,
-                context_app=active,
+                context_app=get_active_app(),
                 language=m_lang,
                 glossary=glossary,
-                examples=examples,
+                examples=self._style_examples(),
             )
         except Exception as e:
             log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
@@ -436,10 +437,14 @@ class Daemon:
         if self.recorder.is_recording:
             return
         print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
-        remembered = capture_front_app()
+        remembered = capture_paste_target()
         if remembered is not None:
             self._paste_target = remembered
-            print(f"[daemon] paste target → {remembered.name}", flush=True)
+            print(
+                f"[daemon] paste target → {remembered.name} "
+                f"ax={'yes' if remembered.ax_element is not None else 'no'}",
+                flush=True,
+            )
         self.recorder.start()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
@@ -485,9 +490,6 @@ class Daemon:
                                       tone=self.state.tone.value,
                                       lang=self.state.language.value)
                     last_idle_write = now
-                    remembered = capture_front_app()
-                    if remembered is not None:
-                        self._paste_target = remembered
 
                 # Drain control file (idle-chip / cancel / confirm clicks).
                 if _PILL_CONTROL.exists():
@@ -612,7 +614,7 @@ class Daemon:
                 final = self._post_process(raw)
 
             t2 = time.time()
-            print(f"[daemon] sarvam-chat {t2-t1:.2f}s -> {final!r}", flush=True)
+            print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
                 return
 
@@ -667,8 +669,10 @@ class Daemon:
                           lang=self.state.language.value)
         threading.Thread(target=self._pill_pump, name="pill-pump", daemon=True).start()
 
+        sv = self.cfg.get("sarvam") or {}
         print(
-            f"[daemon] ready.\n"
+            f"[daemon] ready (pipeline=sarvam {sv.get('stt_model', 'saaras:v4')} + "
+            f"{sv.get('chat_model', 'sarvam-105b')}).\n"
             f"  hold {hold_key} to dictate\n"
             f"  {self.cfg['hotkeys'].get('cycle_mode','')} cycle tone\n"
             f"  {self.cfg['hotkeys'].get('edit_mode','')} edit mode\n"

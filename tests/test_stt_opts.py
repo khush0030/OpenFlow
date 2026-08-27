@@ -84,9 +84,31 @@ def test_hi_roman_script_setting() -> None:
     assert opts.mode == "translit", opts.mode
 
 
+def test_verbatim_skips_llm() -> None:
+    import daemon as dm
+
+    class _Dict:
+        def correct(self, text, threshold=85):
+            return text
+
+    class _AI:
+        def cleanup(self, *a, **k):
+            raise AssertionError("verbatim must not call chat")
+        def translate_en_to_hi(self, t):
+            raise AssertionError("verbatim must not translate")
+        def transliterate_to_roman(self, t):
+            raise AssertionError("verbatim must not transliterate")
+
+    d = _make_daemon(always_en=False, lang=LanguageMode.AUTO, tone=ToneMode.VERBATIM)
+    d.dictionary = _Dict()
+    d.ai = _AI()
+    assert dm.Daemon._post_process(d, "hello there") == "hello there"
+
+
 if __name__ == "__main__":
     test_matrix_always_en_off()
     test_always_en_override()
     test_raw_tone_uses_verbatim()
     test_hi_roman_script_setting()
+    test_verbatim_skips_llm()
     print("OK")

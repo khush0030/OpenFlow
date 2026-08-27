@@ -31,7 +31,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-py-modules = ["cli", "launcher", "daemon", "audio", "transcribe", "sarvam", "hotkeys", "paste", "ai", "dictionary", "history", "tray", "config", "prompts", "state", "sounds"]
+py-modules = ["cli", "launcher", "daemon", "audio", "transcribe", "sarvam", "hotkeys", "paste", "ai", "dictionary", "history", "tray", "config", "prompts", "state", "sounds", "openflow", "openflow_logger"]
 
 [tool.setuptools.packages.find]
 include = ["ui*"]
