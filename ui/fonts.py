@@ -1,12 +1,12 @@
 """Bundled font registration for OpenFlow.
 
-Loads Fraunces / Geist / JetBrains Mono from assets/fonts/ into Qt's
-font database. Call load_fonts() once at app startup, before constructing
-any QWidget.
+Loads Geist (UI) and Fraunces (headlines, transcripts) from assets/fonts/
+into Qt's font database. Both are variable fonts under the SIL OFL (licences
+alongside). Call load_fonts() once at app startup, before constructing any
+QWidget.
 
 If a font file is missing, this logs a warning and falls back to a system
-font rather than raising. The stylesheet uses CSS-style font stacks, so a
-missing custom font degrades gracefully.
+font rather than raising.
 """
 from __future__ import annotations
 
@@ -19,13 +19,8 @@ from typing import Iterable
 _ASSETS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 
 FONT_FILES: tuple[str, ...] = (
-    "Fraunces[opsz,wght].ttf",
-    "Fraunces-Italic[opsz,wght].ttf",
-    "Geist-Regular.ttf",
-    "Geist-Medium.ttf",
-    "Geist-SemiBold.ttf",
-    "JetBrainsMono-Regular.ttf",
-    "JetBrainsMono-Medium.ttf",
+    "Geist[wght].ttf",
+    "Fraunces[SOFT,WONK,opsz,wght].ttf",
 )
 
 
