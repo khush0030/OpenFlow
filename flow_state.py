@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from openflow_logger import log_exception
+
 IDLE = "idle"
 RECORDING = "recording"
 SILENT = "silent"
@@ -160,7 +162,8 @@ class FlowController:
                     self._set(PROCESSING)
                     try:
                         self._hooks.rerun(kept.audio, kept.target)
-                    except Exception:
+                    except Exception as e:
+                        log_exception("flow_state", "rerun hook failed — offering Retry", e)
                         # Keep the audio so Retry works again.
                         self.failed(kept.audio, kept.target)
             elif action == "copy" and self.state == CARD:

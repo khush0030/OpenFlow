@@ -168,7 +168,11 @@ def test_message_waits_for_the_lock():
     assert got == [fc.message()]
 
 
-def test_rerun_failure_goes_to_error_and_retry_still_works():
+def test_rerun_failure_goes_to_error_and_retry_still_works(monkeypatch):
+    import flow_state
+
+    logged = []
+    monkeypatch.setattr(flow_state, "log_exception", lambda *a: logged.append(a))
     fc, calls, _, _ = make()
     attempts = []
 
@@ -181,6 +185,8 @@ def test_rerun_failure_goes_to_error_and_retry_still_works():
     fc.failed("AUDIO", "TARGET")
     fc.handle_action({"action": "retry"})
     assert fc.state == ERROR
+    assert len(logged) == 1 and logged[0][0] == "flow_state"
+    assert isinstance(logged[0][2], RuntimeError)
     fc.handle_action({"action": "retry"})
     assert attempts == [("AUDIO", "TARGET"), ("AUDIO", "TARGET")]
     assert fc.state == PROCESSING
