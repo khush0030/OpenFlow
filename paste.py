@@ -36,6 +36,23 @@ except Exception:
     _HAS_AX = False
 
 try:
+    from ApplicationServices import AXUIElementSetMessagingTimeout  # type: ignore
+except Exception:
+    AXUIElementSetMessagingTimeout = None  # type: ignore
+
+AX_MESSAGING_TIMEOUT_S = 0.25
+
+
+def _ax_set_timeout(el) -> None:
+    """Cap how long an AX call to a hung app may block (default is ~6 s)."""
+    if AXUIElementSetMessagingTimeout is None:
+        return
+    try:
+        AXUIElementSetMessagingTimeout(el, AX_MESSAGING_TIMEOUT_S)
+    except Exception:
+        pass
+
+try:
     from AppKit import (  # type: ignore
         NSPasteboard,
         NSRunningApplication,
@@ -127,6 +144,7 @@ def _ax_focused_element():
         return None
     try:
         sys_el = AXUIElementCreateSystemWide()
+        _ax_set_timeout(sys_el)
         err, focused = AXUIElementCopyAttributeValue(sys_el, "AXFocusedUIElement", None)
         if err != 0 or focused is None:
             return None
@@ -151,15 +169,20 @@ def _ax_insert(text: str, element=None) -> bool:
 
 
 EDITABLE_ROLES = frozenset({"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"})
+# What Chromium/Electron report while their AX tree is still building.
+GENERIC_ROLES = frozenset({"AXGroup", "AXWebArea", "AXUnknown"})
 
 
 def classify_focus(role: str | None, range_settable: bool | None) -> bool | None:
-    """True = editable text field; False = a non-editable element is focused
-    (show the couldn't-paste card); None = unknown (paste as usual)."""
+    """True = editable text field; False = a clearly non-text element is
+    focused (show the couldn't-paste card); None = unsure, including generic
+    container roles that may hide a text box (paste as usual)."""
     if role is None and range_settable is None:
         return None
     if role in EDITABLE_ROLES or range_settable:
         return True
+    if role in GENERIC_ROLES:
+        return None
     return False
 
 
@@ -185,8 +208,9 @@ def enable_manual_accessibility(pid: int) -> None:
     if not _HAS_AX or pid <= 0:
         return
     try:
-        AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid),
-                                     "AXManualAccessibility", True)
+        app_el = AXUIElementCreateApplication(pid)
+        _ax_set_timeout(app_el)
+        AXUIElementSetAttributeValue(app_el, "AXManualAccessibility", True)
     except Exception:
         pass
 

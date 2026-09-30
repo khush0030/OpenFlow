@@ -52,3 +52,31 @@ def test_focused_editable_falls_back_to_current_focus(monkeypatch):
 def test_focused_editable_unknown_without_element(monkeypatch):
     _fake_ax(monkeypatch, roles={}, settable={}, focused=None)
     assert paste.focused_editable(None) is None
+
+
+def test_classify_generic_roles_are_unknown():
+    assert classify_focus("AXGroup", None) is None
+    assert classify_focus("AXWebArea", False) is None
+    assert classify_focus("AXUnknown", None) is None
+
+
+def test_classify_generic_role_with_settable_selection_is_editable():
+    assert classify_focus("AXGroup", True) is True
+
+
+def test_classify_list_still_not_editable():
+    assert classify_focus("AXList", False) is False
+
+
+def test_enable_manual_accessibility_sets_messaging_timeout(monkeypatch):
+    calls = []
+    app_el = object()
+    monkeypatch.setattr(paste, "_HAS_AX", True)
+    monkeypatch.setattr(paste, "AXUIElementCreateApplication", lambda pid: app_el, raising=False)
+    monkeypatch.setattr(paste, "AXUIElementSetMessagingTimeout",
+                        lambda el, t: calls.append(("timeout", el, t)) or 0, raising=False)
+    monkeypatch.setattr(paste, "AXUIElementSetAttributeValue",
+                        lambda el, attr, v: calls.append(("set", el, attr)) or 0, raising=False)
+    paste.enable_manual_accessibility(42)
+    assert ("timeout", app_el, 0.25) in calls
+    assert calls[0][0] == "timeout"  # timeout applied before the AX write
