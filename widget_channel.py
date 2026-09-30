@@ -6,12 +6,17 @@ connection is the liveness signal for both sides (no polling, no pgrep).
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
+import select
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
+
+from openflow_logger import log_exception
 
 SOCKET_PATH = str(Path(os.path.expanduser("~/.openflow")) / "widget.sock")
 
@@ -42,12 +47,19 @@ class _Conn:
             return False
         try:
             data = (json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            # Nothing was written, so the connection is still healthy.
+            log_exception("widget_channel", "unserializable message dropped", exc)
+            return False
+        try:
             with self._lock:
                 self.sock.sendall(data)
             return True
-        except (OSError, TypeError, ValueError):
+        except OSError as exc:
             # A timed-out sendall may have written a partial line, so the
             # stream is unusable: close rather than keep it.
+            if self.alive:
+                log_exception("widget_channel", "send failed; closing connection", exc)
             self.close()
             return False
 
@@ -81,7 +93,10 @@ class _Conn:
                     except ValueError:
                         continue
                     if isinstance(msg, dict):
-                        self._on_message(msg)
+                        try:
+                            self._on_message(msg)
+                        except Exception as exc:  # a handler bug must not drop the link
+                            log_exception("widget_channel", "message handler raised", exc)
         except OSError:
             pass
         finally:
@@ -99,27 +114,65 @@ class WidgetServer:
         self._lock = threading.Lock()
         self._sock: Optional[socket.socket] = None
         self._stopped = threading.Event()
+        self._ino: Optional[int] = None
 
     def start(self) -> None:
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.unlink(self.path)
-        except FileNotFoundError:
-            pass
+        Path(self.path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._clear_stale_path()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(self.path)
-        os.chmod(self.path, 0o600)
+        old_umask = os.umask(0o177)  # socket is created 0600, never wider
+        try:
+            s.bind(self.path)
+        finally:
+            os.umask(old_umask)
+        self._ino = os.stat(self.path).st_ino
         s.listen(2)
         self._sock = s
         threading.Thread(target=self._accept_loop, name="widget-channel-accept",
                          daemon=True).start()
 
+    def _clear_stale_path(self) -> None:
+        """Refuse to steal a live server's path; unlink it only if stale."""
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(self.path)
+        except FileNotFoundError:
+            return
+        except ConnectionRefusedError:
+            os.unlink(self.path)  # nobody listening: stale
+            return
+        finally:
+            probe.close()
+        # The probe connects and closes without sending; _accept_loop ignores
+        # such connections, so it does not evict the live server's widget.
+        raise OSError(errno.EADDRINUSE, f"widget server already running at {self.path}")
+
+    @staticmethod
+    def _is_probe(client: socket.socket) -> bool:
+        """True if the peer closed right after connecting (a liveness probe).
+
+        A real widget never closes without talking; it stays connected, so
+        the short wait times out and it is treated as real.
+        """
+        try:
+            readable, _, _ = select.select([client], [], [], 0.05)
+            return bool(readable) and client.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
     def _accept_loop(self) -> None:
         while not self._stopped.is_set():
             try:
                 client, _ = self._sock.accept()
-            except OSError:
-                break
+            except OSError as exc:
+                if self._stopped.is_set():
+                    break
+                log_exception("widget_channel", "accept failed; retrying", exc)
+                time.sleep(0.1)
+                continue
+            if self._is_probe(client):
+                client.close()
+                continue
             conn = _Conn(client, self._dispatch, self._closed)
             with self._lock:
                 old, self._conn = self._conn, conn
@@ -127,7 +180,10 @@ class WidgetServer:
                 old.send({"type": "exit"})
                 old.close()
             if self._on_connect is not None:
-                self._on_connect()
+                try:
+                    self._on_connect()
+                except Exception as exc:
+                    log_exception("widget_channel", "on_connect raised", exc)
 
     def _dispatch(self, msg: dict) -> None:
         if self._on_message is not None:
@@ -157,7 +213,9 @@ class WidgetServer:
         if self._sock is not None:
             self._sock.close()
         try:
-            os.unlink(self.path)
+            # Only remove the path if it is still the socket we bound.
+            if self._ino is not None and os.stat(self.path).st_ino == self._ino:
+                os.unlink(self.path)
         except OSError:
             pass
 

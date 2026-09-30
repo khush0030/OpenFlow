@@ -140,3 +140,214 @@ def test_non_dict_json_lines_are_dropped():
     assert got == [{"ok": 1}]
     peer.close()
     srv.stop()
+
+
+# --- review fixes -----------------------------------------------------------
+
+import errno
+import stat
+
+import pytest
+
+import widget_channel
+
+
+@pytest.fixture
+def logged(monkeypatch):
+    calls = []
+    monkeypatch.setattr(widget_channel, "log_exception",
+                        lambda *a, **k: calls.append(a))
+    return calls
+
+
+def test_accept_loop_survives_raising_on_connect(logged):
+    def boom():
+        raise RuntimeError("on_connect bug")
+
+    srv = WidgetServer(sock_path(), on_connect=boom)
+    srv.start()
+    first = WidgetClient(srv.path)
+    assert first.connect()
+    assert wait_for(lambda: srv.connected and logged)
+    got = []
+    second = WidgetClient(srv.path, on_message=got.append)
+    assert second.connect()
+    assert wait_for(lambda: len(logged) >= 2)
+    assert srv.send({"type": "ping"})
+    assert wait_for(lambda: got == [{"type": "ping"}])
+    first.close()
+    second.close()
+    srv.stop()
+
+
+def test_accept_loop_survives_transient_accept_error(logged):
+    class Flaky:
+        def __init__(self, real):
+            self.real, self.failed = real, False
+
+        def accept(self):
+            if not self.failed:
+                self.failed = True
+                raise OSError(errno.ECONNABORTED, "aborted")
+            return self.real.accept()
+
+        def close(self):
+            self.real.close()
+
+    srv = WidgetServer(sock_path())
+    srv._on_connect = lambda: setattr(srv, "_sock", Flaky(srv._sock))
+    srv.start()
+    first = WidgetClient(srv.path)
+    assert first.connect()
+    assert wait_for(lambda: srv.connected and isinstance(srv._sock, Flaky))
+    got = []
+    second = WidgetClient(srv.path, on_message=got.append)
+    assert second.connect()
+    assert wait_for(lambda: logged)  # the transient error was logged
+    assert wait_for(lambda: srv.send({"type": "ping"}) and got)
+    first.close()
+    second.close()
+    srv.stop()
+
+
+def test_handler_exception_does_not_close_connection(logged):
+    seen = []
+
+    def handler(msg):
+        seen.append(msg)
+        if msg.get("n") == 1:
+            raise RuntimeError("handler bug")
+
+    srv = WidgetServer(sock_path(), on_message=handler)
+    srv.start()
+    cli = WidgetClient(srv.path)
+    assert cli.connect()
+    assert wait_for(lambda: srv.connected)
+    assert cli.send({"n": 1}) and cli.send({"n": 2})
+    assert wait_for(lambda: len(seen) == 2)
+    assert logged and srv.connected and cli.connected
+    cli.close()
+    srv.stop()
+
+
+def test_client_handler_exception_does_not_close_connection(logged):
+    seen = []
+
+    def handler(msg):
+        seen.append(msg)
+        if msg.get("n") == 1:
+            raise RuntimeError("handler bug")
+
+    srv = WidgetServer(sock_path())
+    srv.start()
+    cli = WidgetClient(srv.path, on_message=handler)
+    assert cli.connect()
+    assert wait_for(lambda: srv.connected)
+    assert srv.send({"n": 1}) and srv.send({"n": 2})
+    assert wait_for(lambda: len(seen) == 2)
+    assert logged and cli.connected and srv.connected
+    cli.close()
+    srv.stop()
+
+
+def test_unserializable_message_keeps_connection_open(logged):
+    srv = WidgetServer(sock_path())
+    srv.start()
+    cli = WidgetClient(srv.path)
+    assert cli.connect()
+    assert wait_for(lambda: srv.connected)
+    assert srv.send({"bad": object()}) is False
+    assert logged
+    assert srv.connected
+    assert srv.send({"type": "ping"}) is True
+    cli.close()
+    srv.stop()
+
+
+def test_timed_out_connection_is_logged_once(logged):
+    srv = WidgetServer(sock_path())
+    srv.start()
+    peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    peer.connect(srv.path)
+    assert wait_for(lambda: srv.connected)
+    payload = {"type": "blob", "data": "x" * 65536}
+    for _ in range(200):
+        if srv.send(payload) is False:
+            break
+    assert srv.send(payload) is False
+    assert srv.send(payload) is False
+    assert len(logged) == 1
+    peer.close()
+    srv.stop()
+
+
+def test_second_server_on_live_path_is_refused_and_does_not_evict():
+    path = sock_path()
+    a = WidgetServer(path)
+    a.start()
+    got = []
+    cli = WidgetClient(path, on_message=got.append)
+    assert cli.connect()
+    assert wait_for(lambda: a.connected)
+    b = WidgetServer(path)
+    with pytest.raises(OSError) as ei:
+        b.start()
+    assert ei.value.errno == errno.EADDRINUSE
+    time.sleep(0.3)  # the probe must not have evicted the real widget
+    assert a.connected and cli.connected
+    assert a.send({"type": "ping"})
+    assert wait_for(lambda: got == [{"type": "ping"}])
+    cli.close()
+    a.stop()
+
+
+def test_stale_socket_file_is_replaced():
+    path = sock_path()
+    dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dead.bind(path)
+    dead.close()  # file remains, nobody listening
+    assert os.path.exists(path)
+    srv = WidgetServer(path)
+    srv.start()
+    cli = WidgetClient(path)
+    assert cli.connect()
+    cli.close()
+    srv.stop()
+
+
+def test_stop_does_not_unlink_a_path_it_no_longer_owns():
+    path = sock_path()
+    srv = WidgetServer(path)
+    srv.start()
+    os.unlink(path)
+    other = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    other.bind(path)  # someone else's live socket now owns the path
+    srv.stop()
+    assert os.path.exists(path)
+    other.close()
+
+
+def test_socket_is_0600_and_umask_restored():
+    before = os.umask(0o022)
+    try:
+        srv = WidgetServer(sock_path())
+        srv.start()
+        assert stat.S_IMODE(os.stat(srv.path).st_mode) == 0o600
+        assert os.umask(0o022) == 0o022
+        srv.stop()
+    finally:
+        os.umask(before)
+
+
+def test_new_dir_is_0700_and_existing_dir_untouched():
+    root = tempfile.mkdtemp(dir="/tmp", prefix="ofw")
+    new_dir = os.path.join(root, "d")
+    srv = WidgetServer(os.path.join(new_dir, "w.sock"))
+    srv.start()
+    assert stat.S_IMODE(os.stat(new_dir).st_mode) == 0o700
+    srv.stop()
+    os.chmod(root, 0o755)
+    srv = WidgetServer(os.path.join(root, "w.sock"))
+    srv.start()
+    assert stat.S_IMODE(os.stat(root).st_mode) == 0o755
+    srv.stop()
