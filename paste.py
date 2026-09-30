@@ -26,7 +26,9 @@ except Exception as _e:
 try:
     from ApplicationServices import (  # type: ignore
         AXUIElementCopyAttributeValue,
+        AXUIElementCreateApplication,
         AXUIElementCreateSystemWide,
+        AXUIElementIsAttributeSettable,
         AXUIElementSetAttributeValue,
     )
     _HAS_AX = True
@@ -104,6 +106,8 @@ def capture_front_app() -> PasteTarget | None:
 def capture_paste_target() -> PasteTarget | None:
     """App + focused AX element at the caret, captured on key-down."""
     target = capture_front_app()
+    if target is not None:
+        enable_manual_accessibility(target.pid)
     ax = _ax_focused_element()
     if target is None and ax is None:
         return None
@@ -144,6 +148,72 @@ def _ax_insert(text: str, element=None) -> bool:
     except Exception as e:
         print(f"[paste] AX insert failed: {e}", flush=True)
         return False
+
+
+EDITABLE_ROLES = frozenset({"AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"})
+
+
+def classify_focus(role: str | None, range_settable: bool | None) -> bool | None:
+    """True = editable text field; False = a non-editable element is focused
+    (show the couldn't-paste card); None = unknown (paste as usual)."""
+    if role is None and range_settable is None:
+        return None
+    if role in EDITABLE_ROLES or range_settable:
+        return True
+    return False
+
+
+def _ax_copy(el, attr: str):
+    try:
+        err, value = AXUIElementCopyAttributeValue(el, attr, None)
+        return value if err == 0 else None
+    except Exception:
+        return None
+
+
+def _ax_settable(el, attr: str) -> bool | None:
+    try:
+        err, settable = AXUIElementIsAttributeSettable(el, attr, None)
+        return bool(settable) if err == 0 else None
+    except Exception:
+        return None
+
+
+def enable_manual_accessibility(pid: int) -> None:
+    """Electron / Chromium apps only build their accessibility tree when an
+    assistive app asks; without this their text fields look like plain groups."""
+    if not _HAS_AX or pid <= 0:
+        return
+    try:
+        AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid),
+                                     "AXManualAccessibility", True)
+    except Exception:
+        pass
+
+
+def focused_editable(target: PasteTarget | None = None) -> bool | None:
+    """Would text land in an editable field? Uses the element captured at
+    key-down (where the user was when they started talking) when available,
+    otherwise the current system focus."""
+    if not _HAS_AX:
+        return None
+    pid = target.pid if target is not None else (_front_pid() or 0)
+    enable_manual_accessibility(pid)
+    el = None
+    if target is not None and target.ax_element is not None:
+        el = target.ax_element
+    if el is None:
+        el = _ax_focused_element()
+    if el is None:
+        return None
+    role = _ax_copy(el, "AXRole")
+    return classify_focus(str(role) if role is not None else None,
+                          _ax_settable(el, "AXSelectedTextRange"))
+
+
+def set_clipboard(text: str) -> bool:
+    """Public clipboard write (NSPasteboard, pyperclip fallback)."""
+    return _clipboard_set(text)
 
 
 def _front_pid() -> int | None:
