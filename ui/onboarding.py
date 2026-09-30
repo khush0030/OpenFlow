@@ -156,7 +156,7 @@ class StepWelcome(_Step):
     title_words = [("Hold to talk.", False), ("Type with your", False), ("voice.", True)]
     description = (
         "OpenFlow turns your speech into clean text in any app. Set up "
-        "takes about a minute: grant two permissions, paste your Anthropic "
+        "takes about a minute: grant two permissions, paste your Sarvam "
         "API key, and pick a hotkey."
     )
 

@@ -1,4 +1,4 @@
-"""Custom dictionary: Whisper bias prompt + post-transcription fuzzy correction."""
+"""Custom dictionary: cleanup-prompt glossary + post-transcription fuzzy correction."""
 from __future__ import annotations
 
 import json
@@ -68,7 +68,7 @@ class Dictionary:
         self.terms = [t for t in self.terms if t.canonical.lower() != canonical.lower()]
         return len(self.terms) < before
 
-    # -- Whisper biasing -------------------------------------------------
+    # -- Cleanup glossary -------------------------------------------------
 
     def initial_prompt(self, max_tokens: int = 200, language: str | None = None) -> str | None:
         eligible = [t for t in self.terms if language is None or t.language in ("both", language)]

@@ -217,7 +217,10 @@ class HoldOrToggle:
     def start(self) -> None:
         ax = accessibility_trusted()
         if ax is False:
-            print("[hotkey] WARNING: Accessibility not granted — NSEvent global monitor won't fire.", flush=True)
+            print("[hotkey] WARNING: Accessibility not granted — paste will be clipboard-only. "
+                  "Firing native prompt.", flush=True)
+            from permissions import request_accessibility_trust
+            request_accessibility_trust()
         # Defer install so we don't race rumps' NSApp creation. A background
         # thread waits for NSApp to settle, then installs the monitor.
         threading.Thread(target=self._deferred_install, daemon=True).start()

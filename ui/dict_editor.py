@@ -291,7 +291,7 @@ class DictEditor(QDialog):
         tf = QFont(Font.DISPLAY, Font.SIZE_H1)
         title.setFont(tf)
         col.addWidget(title)
-        subtitle = QLabel("Names, jargon, places — biased into Whisper and corrected post-transcription.", host)
+        subtitle = QLabel("Names, jargon, places — fed to the cleanup prompt and fuzzy-corrected after transcription.", host)
         subtitle.setStyleSheet(f"color: {Color.INK_MUTED}; font-size: {Font.SIZE_BODY_SM}px;")
         col.addWidget(subtitle)
         lay.addLayout(col)

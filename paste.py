@@ -234,7 +234,11 @@ def _osascript_paste() -> bool:
 
 
 def paste(text: str, target: PasteTarget | None = None) -> str:
-    """Land `text` at the caret in `target`. Prefers AX insert (no focus change)."""
+    """Land `text` at the caret in `target` via clipboard + Cmd+V.
+
+    Cmd+V first: Electron / Chromium apps (VS Code, Chrome, Slack) accept an
+    AXSelectedText write and report success while inserting nothing, so AX
+    insert is only a last resort when synthetic keystrokes are unavailable."""
     global _LAST_CLIPBOARD
     if not text:
         return "failed"
@@ -242,28 +246,32 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
     if not _clipboard_set(text):
         return "failed"
 
+    from permissions import accessibility_trusted
+    if accessibility_trusted() is False:
+        # The OS drops synthetic Cmd+V and AX writes from untrusted
+        # processes without any error — don't pretend it pasted.
+        print("[paste] Accessibility not granted — text left on clipboard (press ⌘V)", flush=True)
+        return "clipboard"
+
+    if target is not None and _front_pid() != target.pid:
+        if activate_front_app(target):
+            print(f"[paste] restored {target.name} ({target.pid})", flush=True)
+            time.sleep(0.08)
+        else:
+            print(f"[paste] could not restore {target.name}", flush=True)
+
+    time.sleep(0.04)
+    if _cgevent_paste():
+        print("[paste] sent Cmd+V", flush=True)
+        return "pasted"
+    print("[paste] CGEvent failed; falling back to osascript", flush=True)
+    if _osascript_paste():
+        return "pasted"
     ax_el = target.ax_element if target is not None else None
     if _ax_insert(text, ax_el):
         print("[paste] inserted via AXSelectedText", flush=True)
         return "pasted"
-
-    if target is not None:
-        current = _front_pid()
-        if current != target.pid:
-            if activate_front_app(target):
-                print(f"[paste] restored {target.name} ({target.pid})", flush=True)
-                time.sleep(0.05)
-                if _ax_insert(text, ax_el):
-                    print("[paste] inserted via AX after restore", flush=True)
-                    return "pasted"
-            else:
-                print(f"[paste] could not restore {target.name}", flush=True)
-
-    time.sleep(0.04)
-    if _cgevent_paste():
-        return "pasted"
-    print("[paste] CGEvent failed; falling back to osascript", flush=True)
-    return "pasted" if _osascript_paste() else "clipboard"
+    return "clipboard"
 
 
 def restore_clipboard() -> None:

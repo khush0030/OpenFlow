@@ -14,7 +14,7 @@ or processing, 2 Hz idle) with keys:
     {"state": "idle"|"recording"|"processing"|"exit",
      "rms": float, "elapsed": float, "tone": str, "lang": str, "ts": float}
 Pill polls at 30 Hz and quits when state is "exit" or ts goes stale for
->3s (daemon died — its pump's watchdog respawns us on restart). Clicks
+>10s (daemon died — its pump's watchdog respawns us on restart). Clicks
 write {"action": "start"|"cancel"|"confirm"} to
 /tmp/openflow-pill.control.json; the daemon's pump drains it.
 """
@@ -53,7 +53,7 @@ BTN_SIZE = 28           # X and ✓ buttons (diameter)
 IDLE_H = 30
 REC_W, REC_H = 180, 46
 PROC_W, PROC_H = 148, 38
-STALE_S = 3.0           # no fresh ts for this long -> daemon dead, quit
+STALE_S = 10.0          # no fresh ts for this long -> daemon dead, quit
 
 
 class RecordingPill(QWidget):
@@ -175,6 +175,9 @@ class RecordingPill(QWidget):
                 return
         # Missing, unreadable, or stale-ts state file.
         if now - self._last_good > STALE_S:
+            age = f"{now - float(data.get('ts', 0.0)):.1f}s" if data else "unreadable"
+            from openflow_logger import get_logger
+            get_logger("pill").warning(f"daemon heartbeat stale ({age}) — quitting")
             self._quit()  # daemon gone; its watchdog respawns us on restart
 
     def _quit(self) -> None:

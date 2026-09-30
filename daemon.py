@@ -384,7 +384,7 @@ class Daemon:
         d = self.cfg.get("dictionary") or {}
         if "inject_into_cleanup" in d:
             return bool(d["inject_into_cleanup"])
-        return bool(d.get("inject_into_whisper", True))
+        return True
 
     def _post_process(self, raw: str) -> str:
         if not raw:
@@ -702,7 +702,7 @@ class Daemon:
             print("\n[daemon] shutting down.", flush=True)
         finally:
             self._stop_evt.set()
-            # Tell the pill to quit now instead of waiting out its 3s
+            # Tell the pill to quit now instead of waiting out its 10s
             # stale-daemon timeout.
             _write_pill_state("exit")
             if self._pill_proc is not None:

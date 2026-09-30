@@ -27,7 +27,7 @@ hidden += collect_submodules("rapidfuzz")
 hidden += collect_submodules("scipy.io")
 hidden += collect_submodules("AppKit")
 hidden += collect_submodules("ui")
-hidden += ["sarvam", "transcribe", "ai", "httpcore", "h11", "anyio", "certifi"]
+hidden += ["sarvam", "transcribe", "ai", "permissions", "httpcore", "h11", "anyio", "certifi"]
 
 datas = []
 datas += collect_data_files("certifi")
@@ -65,7 +65,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity="OpenFlow Local Dev",
-    entitlements_file=None,
+    entitlements_file="entitlements.plist",
 )
 coll = COLLECT(
     exe,
@@ -87,6 +87,9 @@ if is_macos:
         bundle_identifier="com.openflow.dictation",
         info_plist={
             "LSUIElement": True,         # tray-only, no Dock icon
+            # Background tray app: App Nap throttles the pill-pump heartbeat
+            # and the flow bar quits thinking the daemon died.
+            "NSAppSleepDisabled": True,
             "CFBundleShortVersionString": "0.1.0",
             "NSMicrophoneUsageDescription":
                 "OpenFlow needs the microphone to capture your dictation.",

@@ -58,8 +58,8 @@ Done. Next:
        and add /Applications/OpenFlow.app (toggle ON).
   2. The first record will prompt for Microphone access; allow it.
   3. Drop your API key in ~/.openflow/.env:
-       echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/.openflow/.env
+       echo 'SARVAM_API_KEY=...' > ~/.openflow/.env
   4. Launch OpenFlow.app from Spotlight (Cmd+Space, "OpenFlow").
 
-Hold the right Option key to dictate.
+Hold the configured record key (default right Option) to dictate.
 EOF

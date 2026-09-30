@@ -97,6 +97,25 @@ def load_env() -> None:
     _ENV_LOADED = True
 
 
+def _migrate(user: dict[str, Any]) -> bool:
+    """Drop pre-Sarvam sections (Whisper/Claude) and rename legacy keys.
+    Returns True if anything changed."""
+    changed = False
+    for stale in ("whisper", "claude"):
+        if stale in user:
+            del user[stale]
+            changed = True
+    d = user.get("dictionary")
+    if isinstance(d, dict) and "inject_into_whisper" in d:
+        d.setdefault("inject_into_cleanup", d["inject_into_whisper"])
+        del d["inject_into_whisper"]
+        changed = True
+    if "sarvam" not in user:
+        user["sarvam"] = dict(DEFAULTS["sarvam"])
+        changed = True
+    return changed
+
+
 def load() -> dict[str, Any]:
     ensure_dirs()
     load_env()
@@ -105,6 +124,8 @@ def load() -> dict[str, Any]:
         return DEFAULTS
     with open(CONFIG_PATH, "rb") as f:
         user = _toml_read.load(f)
+    if _migrate(user):
+        save(user)
     return _deep_merge(DEFAULTS, user)
 
 

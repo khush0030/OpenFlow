@@ -21,8 +21,8 @@
 
 | | Wispr Flow Pro | **OpenFlow** |
 |---|---|---|
-| Price | $15 / month | **Free** (BYO Anthropic key, ~$1.50/mo) |
-| Hosting | Cloud | **Local** (Whisper on-device) |
+| Price | $15 / month | **Free** (BYO Sarvam key, pay-per-use) |
+| Hosting | Cloud | **Your machine + your API key** (Sarvam cloud STT/LLM) |
 | Hindi / Hinglish → English | Limited | **First-class** |
 | Custom dictionary | No | **Yes** (canonical + phonetic hints) |
 | Open source | No | **Yes** |
@@ -41,20 +41,19 @@ Beta. Daily-driver on macOS. Linux runs from source.
 | Phase | What | Status |
 |---|---|---|
 | 0 | Bootstrap (venv, deps, repo structure) | ✅ done |
-| 1 | Core loop: hotkey → record → Whisper → paste | ✅ done |
-| 2 | Claude cleanup + tone modes + always-English default | ✅ done |
+| 1 | Core loop: hotkey → record → speech-to-text → paste | ✅ done |
+| 2 | AI cleanup + tone modes + always-English default | ✅ done |
 | 3 | Tray icon (status, mode submenus, quit) | ✅ done |
 | 4 | Hindi / Hinglish + auto-translate-to-English | ✅ done |
-| 5 | Custom dictionary (Whisper bias + rapidfuzz correction) | ✅ done |
+| 5 | Custom dictionary (cleanup glossary + rapidfuzz correction) | ✅ done |
 | 6 | Edit mode (select → speak instruction → AI rewrite) | ✅ done |
 | 7 | PyQt6 settings GUI + onboarding wizard + dict editor | ✅ done |
 | 8 | macOS `.app` packaging + LaunchAgent auto-start | ✅ done |
 | 9 | NSEvent-based hotkey backend (macOS reliability fix) | ✅ done |
-| 10 | Code-signing + notarization + DMG release | 🚧 in progress |
-| 11 | Linux `.deb` / AppImage + Windows `.exe` | ⏳ planned |
-| 12 | VAD (silero), streaming partials, local-LLM fallback | ⏳ planned |
+| 10 | Sarvam pipeline (Saaras v4 STT + Sarvam chat), signed local build | ✅ done |
 
-See [PROJECT_PLAN.md](./PROJECT_PLAN.md) for the full backlog.
+What's next — widget redesign, speed, hands-free, call copilot — lives in
+[ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -95,12 +94,11 @@ Not supported yet — see Phase 11 in [Roadmap](#roadmap).
 
 ## Quick Start
 
-Requirements: **Python ≥ 3.10**, **ffmpeg**, **Anthropic API key**.
+Requirements: **macOS**, **Python ≥ 3.10**, **Sarvam API key** ([dashboard.sarvam.ai](https://dashboard.sarvam.ai)).
 
 ```bash
 # 1. Deps
-brew install ffmpeg python@3.12        # macOS
-# sudo apt install ffmpeg python3.12   # Debian / Ubuntu
+brew install python@3.12
 
 # 2. Clone + venv
 git clone https://github.com/khush0030/OpenFlow.git
@@ -110,7 +108,7 @@ pip install -r requirements.txt
 
 # 3. API key
 cp .env.example .env
-$EDITOR .env                            # paste sk-ant-... after ANTHROPIC_API_KEY=
+$EDITOR .env                            # paste your key after SARVAM_API_KEY=
 
 # 4. Run
 python -m openflow
@@ -187,7 +185,7 @@ Cycle with `F6` or pick from the tray's **Tone** submenu.
 `auto` · `en` · `hi` · `hi_roman` · `hinglish` · `hi_to_en` · `en_to_hi`
 
 With `general.always_english_output = true` (default), every mode except `hi`,
-`hi_roman`, and `en_to_hi` forces English output via Whisper's `task="translate"`.
+`hi_roman`, and `en_to_hi` forces English output via Saaras `mode="translate"`.
 
 ### Edit mode
 
@@ -215,7 +213,7 @@ With `general.always_english_output = true` (default), every mode except `hi`,
 
 Each term contributes two things:
 
-1. `canonical` is injected into Whisper's `initial_prompt`, biasing the transcriber toward the correct spelling.
+1. `canonical` is injected into the cleanup prompt as a glossary so names stay spelled correctly.
 2. `phonetic_hints` feed a post-transcription fuzzy-correction pass (rapidfuzz, default threshold 85).
 
 Edit visually from the tray → **Settings → Dictionary**.
@@ -227,10 +225,10 @@ Edit visually from the tray → **Settings → Dictionary**.
 ```
 HotkeyListener (NSEvent on macOS / pynput fallback)
    └─> AudioRecorder (sounddevice, 16 kHz mono)
-         └─> Transcriber (faster-whisper, dict-biased initial_prompt)
+         └─> Transcriber (Sarvam Saaras v4 speech-to-text)
                └─> DictionaryCorrector (rapidfuzz, threshold 85)
-                     └─> AIProcessor (Anthropic Claude Haiku 4.5)
-                           └─> Paster (CGEventPost primary, osascript fallback)
+                     └─> AIProcessor (Sarvam chat — skipped for raw/verbatim tones)
+                           └─> Paster (clipboard + Cmd+V, osascript / AX fallbacks)
                                  └─> History (SQLite)
 TrayUI (pystray, main thread) + PyQt6 windows wrap the daemon.
 ```
@@ -262,12 +260,14 @@ OpenFlow/
 ├── tests/                 # unit + smoke tests
 ├── daemon.py              # orchestrator
 ├── audio.py               # sounddevice recorder
-├── transcribe.py          # faster-whisper wrapper
-├── ai.py                  # Anthropic Claude calls
+├── sarvam.py              # Sarvam HTTP client (STT + chat)
+├── transcribe.py          # Saaras speech-to-text wrapper
+├── ai.py                  # cleanup / translate / edit prompts
+├── permissions.py         # macOS Accessibility check + prompt
 ├── dictionary.py          # custom-term biasing + fuzzy correction
 ├── hotkeys.py             # pynput backend (fallback)
 ├── hotkeys_nsevent.py     # NSEvent backend (macOS default)
-├── paste.py               # CGEventPost / osascript / xdotool
+├── paste.py               # clipboard + Cmd+V, osascript / AX fallbacks
 ├── history.py             # sqlite log
 ├── tray.py                # pystray system-tray UI
 ├── prompts.py             # all system prompts
@@ -283,26 +283,23 @@ OpenFlow/
 
 ```toml
 [general]
+default_tone = "verbatim"          # raw / verbatim / casual / professional / bullets / email / slack
+default_language = "auto"
 always_english_output = true       # speak any language, paste English
-tone_mode = "casual"
-language_mode = "auto"
 
 [hotkeys]
-record = "cmd_r"                   # hold or double-tap to toggle
-tone_cycle = "f6"
-edit_mode = "cmd+shift+e"
+record_hold = "cmd_r"
+cycle_mode = "f6"
+edit_mode = "<cmd>+<shift>+e"
 
-[ai]
-model = "claude-haiku-4-5-20251001"
-max_tokens = 500
+[sarvam]
+stt_model = "saaras:v4"
+chat_model = "sarvam-105b"
+api_key_env = "SARVAM_API_KEY"
 
-[whisper]
-model_size = "small"               # tiny / base / small / medium / large-v3
-compute_type = "int8"              # int8 / float16 / float32
-language = "auto"
-
-[paths]
-data_dir = "~/.openflow"
+[dictionary]
+fuzzy_threshold = 85
+inject_into_cleanup = true
 ```
 
 Edit live from the tray → **Settings**; the daemon hot-reloads.
@@ -311,13 +308,9 @@ Edit live from the tray → **Settings**; the daemon hot-reloads.
 
 ## Cost
 
-| Item | Per dictation | Per month (100/day) |
-|---|---|---|
-| Whisper (local, CPU `int8`) | $0 | $0 |
-| Claude Haiku 4.5 cleanup (~500 in/out tokens) | ~$0.0005 | ~$1.50 |
-| **Total** | **~$0.0005** | **~$1.50** |
-
-Wispr Flow Pro is $15/mo → OpenFlow breaks even on day one, ~$160/yr saved.
+All inference runs on Sarvam's API with your own key: speech-to-text on every
+dictation, plus a chat call only for cleanup tones (verbatim/raw skip it).
+Check current per-hour/per-token rates on the Sarvam dashboard.
 
 ---
 
@@ -327,7 +320,7 @@ Wispr Flow Pro is $15/mo → OpenFlow breaks even on day one, ~$160/yr saved.
 source .venv/bin/activate
 
 python tests/test_dictionary.py        # fuzzy-correction unit tests
-python tests/test_pipeline_smoke.py    # whisper wiring smoke test
+python tests/test_pipeline_smoke.py    # Sarvam pipeline smoke test (needs key)
 
 # Headless daemon mode (no tray) — for debugging in a terminal
 OPENFLOW_NO_TRAY=1 python -m openflow run
@@ -352,21 +345,7 @@ NOTARIZE=1 NOTARY_PROFILE=openflow-notary \
 
 ## Roadmap
 
-**Shipping next** (Phase 10–11)
-
-- Apple Developer ID code-signing + notarization in CI
-- Tagged GitHub Releases with signed `.dmg`
-- Sparkle / homebrew-cask auto-update channel
-- Linux `.deb` + AppImage; Windows `.exe` (WinSparkle)
-
-**Later** (Phase 12+)
-
-- VAD via silero — start recording on speech, not key-down
-- Streaming partial transcription (faster-whisper batched)
-- Local-LLM cleanup via Ollama → fully offline mode
-- True undo-last-paste (replace via clipboard history snapshot)
-- Optional Devanagari output mode (already supported by `hi`, just not the default)
-- Plugin API for custom post-processors
+See [ROADMAP.md](./ROADMAP.md).
 
 ---
 
@@ -391,6 +370,5 @@ for personal purposes.
 
 <div align="center">
   Built by <a href="https://github.com/khush0030">@khush0030</a> · Powered by
-  <a href="https://github.com/SYSTRAN/faster-whisper">faster-whisper</a> +
-  <a href="https://www.anthropic.com/claude/haiku">Claude Haiku 4.5</a>
+  <a href="https://www.sarvam.ai">Sarvam AI</a>
 </div>
