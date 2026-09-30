@@ -43,6 +43,8 @@ Sarvam pipeline was committed but never deployed.
 
 ## Phase 1 — Widget & Hub UI (our own design, better than Wispr) — NEXT
 
+Flow widget spec: [docs/superpowers/specs/2026-09-30-flow-widget-design.md](docs/superpowers/specs/2026-09-30-flow-widget-design.md) · mockup: [docs/design/flow-widget-mockup.html](docs/design/flow-widget-mockup.html)
+
 Wispr's surface is a small bottom-centre pill plus a hub window. Ours should
 match it for polish and add more to both.
 

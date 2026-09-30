@@ -46,3 +46,7 @@ test.wav
 # Plan PDF (already represented in PROJECT_PLAN.md)
 # (uncomment to exclude)
 # OpenFlow_Project_Plan.pdf
+
+# Brainstorm mockups
+.superpowers/
+.playwright-mcp/

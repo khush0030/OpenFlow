@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>OpenFlow widget — real size</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&family=Geist:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  /* ── themes: OpenFlow brand vs Wispr look (for comparison) ── */
+  body{
+    --idle:#B8492C; --idleB:rgba(255,255,255,.9);
+    --pill:#FAF7F2; --pillB:#E8E2D9; --pillShadow:0 10px 28px rgba(60,40,25,.18),0 1px 2px rgba(60,40,25,.10);
+    --bx:#EFEAE1; --bxT:#1A1814; --bc:#B8492C; --bcT:#FAF7F2;
+    --dot:#1A1814; --lbl:#8A7F73;
+    --uBg:#1A1814; --uT:#FAF7F2; --uHover:#3D3832; --hbHover:#F2EEE5;
+    --card:#FAF7F2; --cardT:#1A1814; --cardMuted:#8A7F73; --cardB:#E8E2D9;
+    --btn:#1A1814; --btnT:#FAF7F2; --ghostB:#E8E2D9; --ring:#B8492C; --ringTrack:#E8E2D9;
+    --mono:"JetBrains Mono",Menlo,monospace; --ui:"Geist",-apple-system,system-ui,sans-serif; --serif:"Fraunces",Georgia,serif;
+    --ctFont:var(--ui); --ctTransform:none; --ctLs:0; --ctSize:12px;
+    --textFont:var(--serif); --textSize:15px;
+    --msgFont:var(--serif); --msgSize:15.5px; --msgWeight:400;
+    --tip:#1A1814; --tipT:#FAF7F2;
+  }
+  body.ink{
+    --pill:#1A1814; --pillB:rgba(184,73,44,.6); --pillShadow:0 6px 18px rgba(60,30,15,.35);
+    --bx:#3D3832; --bxT:#FAF7F2; --dot:#FAF7F2; --lbl:#E8D5C8; --idleB:rgba(250,247,242,.85);
+    --uBg:rgba(250,247,242,.12); --uT:#FAF7F2; --uHover:rgba(250,247,242,.2); --hbHover:#3D3832;
+    --card:#1A1814; --cardT:#FAF7F2; --cardMuted:#A39A8E; --cardB:rgba(250,247,242,.10);
+    --btn:#FAF7F2; --btnT:#1A1814; --ghostB:rgba(250,247,242,.18); --ringTrack:rgba(250,247,242,.14);
+  }
+  body.wispr{
+    --uBg:rgba(255,255,255,.12); --uT:#fff; --uHover:rgba(255,255,255,.2); --hbHover:#2a2a2a;
+    --idle:#8e8e8e; --idleB:#d6d6d6;
+    --pill:#0b0b0b; --pillB:rgba(255,255,255,.08); --pillShadow:0 6px 18px rgba(0,0,0,.28);
+    --bx:#4a4743; --bxT:#fff; --bc:#fff; --bcT:#111;
+    --dot:#fff; --lbl:#d8d2c8;
+    --card:#0b0b0b; --cardT:#f2efe9; --cardMuted:#8f8a82; --cardB:rgba(255,255,255,.07);
+    --btn:#6d6a64; --btnT:#fff; --ghostB:#3a3733; --ring:#8f8a82; --ringTrack:#2c2a27;
+    --mono:ui-monospace,Menlo,monospace; --ui:-apple-system,system-ui,sans-serif;
+    --ctFont:var(--ui); --ctTransform:none; --ctLs:0; --ctSize:11px;
+    --textFont:var(--ui); --textSize:14px;
+    --msgFont:var(--ui); --msgSize:14px; --msgWeight:500;
+    --tip:#0b0b0b; --tipT:#f2efe9;
+  }
+  .of-only{display:inline-flex}.wf-only{display:none}
+  body.wispr .of-only{display:none} body.wispr .wf-only{display:inline-flex}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+  body{background:linear-gradient(135deg,#243149 0%,#5d4a6d 45%,#c4876a 100%)}
+
+  /* ── fake macOS ─────────────────────────────── */
+  .menubar{position:fixed;top:0;left:0;right:0;height:24px;background:rgba(246,244,240,.6);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);display:flex;align-items:center;justify-content:space-between;padding:0 14px;font-size:13px;color:#111;z-index:5}
+  .menubar .l span{margin-right:18px}.menubar .l b{margin-right:20px}
+  .menubar .r span{margin-left:16px}
+  .dock{position:fixed;bottom:5px;left:50%;transform:translateX(-50%);height:62px;padding:6px 8px;border-radius:18px;background:rgba(255,255,255,.25);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.3);display:flex;gap:8px;z-index:4}
+  .dock i{width:50px;height:50px;border-radius:12px;display:block}
+  .window{position:fixed;top:56px;left:50%;transform:translateX(-50%);width:min(880px,66vw);height:calc(100vh - 160px);background:#fff;border-radius:12px;box-shadow:0 22px 60px rgba(0,0,0,.35);overflow:hidden;display:flex;flex-direction:column;z-index:2}
+  .titlebar{height:38px;display:flex;align-items:center;padding:0 14px;gap:8px;border-bottom:1px solid #eee;font-size:13px;color:#555}
+  .tl{width:12px;height:12px;border-radius:50%}
+  .msgs{flex:1;padding:18px 22px;overflow:hidden;font-size:15px;line-height:1.5;color:#1d1c1d}
+  .msg{margin-bottom:16px}.msg .n{font-weight:700}.msg .t{color:#8a8a8a;font-size:12px;margin-left:6px}
+  .composer{margin:0 16px 16px;border:1px solid #bdbdbd;border-radius:8px;padding:10px 12px;font-size:15px;min-height:84px;color:#1d1c1d}
+  .caret{display:inline-block;width:1.5px;height:18px;background:#1d1c1d;vertical-align:-3px;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+
+  /* ── widget ─────────────────────────────────── */
+  #w{position:fixed;z-index:10;transition:all .22s cubic-bezier(.2,.8,.2,1)}
+  .idle{background:var(--idle);border:1px solid var(--idleB);border-radius:4px;cursor:pointer;opacity:.9}
+  .pill{background:var(--pill);border-radius:999px;display:flex;align-items:center;justify-content:space-between;box-shadow:var(--pillShadow);border:1px solid var(--pillB)}
+  .v{flex-direction:column}
+  .btn{border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;cursor:pointer;flex:none;font-family:var(--ui)}
+  .bx{background:var(--bx);color:var(--bxT)}.bc{background:var(--bc);color:var(--bcT)}
+  .rec{background:#b8492c;box-shadow:0 0 0 3px rgba(184,73,44,.3)}
+  .lbl{font:600 8px/1 var(--ui);color:var(--lbl);letter-spacing:.04em}
+  .dots{display:flex;align-items:center;justify-content:center;gap:3px}
+  .dots i{display:block;background:var(--dot);border-radius:2px;transition:width .06s linear,height .06s linear,opacity .2s}
+  .silent .dots i{opacity:.3}
+  .tip{position:fixed;z-index:11;display:flex;align-items:baseline;gap:9px;background:var(--pill);color:var(--dot);border:1px solid var(--pillB);font:500 14px var(--ui);padding:9px 16px;border-radius:999px;white-space:nowrap;box-shadow:var(--pillShadow)}
+
+  .tip b{font-weight:600}
+
+  /* card */
+  .card{position:fixed;z-index:11;width:340px;background:var(--card);color:var(--cardT);font-family:var(--ui);border-radius:18px;padding:14px 16px 14px;-webkit-font-smoothing:antialiased;box-shadow:0 14px 36px rgba(40,25,15,.3);border:1px solid var(--cardB)}
+   .ct{display:flex;align-items:center;gap:9px;font:500 var(--ctSize)/1 var(--ctFont);letter-spacing:var(--ctLs);text-transform:var(--ctTransform);color:var(--cardMuted)}
+  .ct .sp{flex:1}
+  .logo{gap:1.5px;align-items:flex-end;height:11px}.logo i{width:2px;background:var(--cardT);border-radius:1px;display:block}
+  .mark{width:16px;height:16px;color:var(--cardT)}
+  .xr{position:relative;width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--cardT);cursor:pointer;font-family:var(--ui)}
+  .xr svg{position:absolute;inset:0}
+  .ring{animation:dash 15s linear forwards}@keyframes dash{to{stroke-dashoffset:66}}
+  .ctext{font-family:var(--textFont);font-size:var(--textSize);font-weight:400;line-height:1.5;letter-spacing:-.005em;margin:12px 0 14px;font-variation-settings:"opsz" 18}
+  body:not(.wispr) .ctext{font-size:16px}
+  body:not(.wispr) .cb{border-top:1px solid var(--cardB);padding-top:11px}
+  .cb{display:flex;gap:6px;align-items:center;justify-content:flex-end}
+  .watch{margin-right:auto;font:400 12px/1.2 var(--ui);color:var(--cardMuted);display:flex;align-items:center;gap:7px}
+  .pulse{width:7px;height:7px;border-radius:50%;background:#b8492c;animation:p 1.6s infinite}
+  @keyframes p{0%{box-shadow:0 0 0 0 rgba(184,73,44,.6)}70%{box-shadow:0 0 0 6px rgba(184,73,44,0)}100%{box-shadow:0 0 0 0 rgba(184,73,44,0)}}
+  .cbtn{border-radius:999px;background:var(--btn);color:var(--btnT);font:600 12.5px/1 var(--ui);letter-spacing:.01em;padding:8px 16px;cursor:pointer}
+  body.wispr .cbtn{border-radius:8px}
+  .cbtn.g{background:transparent;border:1px solid var(--ghostB);color:var(--cardT)}
+
+  /* hover: Dictate only */
+  .hovergroup{display:flex;align-items:center;gap:6px}
+  .hovergroup.v{flex-direction:column}
+  .hb{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:999px;background:var(--pill);border:1px solid var(--pillB);box-shadow:var(--pillShadow);color:var(--dot);flex:none;transition:background .12s}
+  .hb:hover{background:var(--hbHover)}
+  body:not(.wispr) .hb.main:hover{background:#B8492C;color:#FAF7F2;border-color:#B8492C}
+  .hb svg{width:14px;height:14px}
+  .hb.main svg{width:20px;height:20px}
+  body:not(.wispr) .hb .accent{fill:#B8492C}
+  .tip kbd{font:400 14px var(--ui);margin-left:2px;opacity:.55;letter-spacing:.01em}
+
+  /* headline message on each pop-up: Fraunces (content voice); controls stay Geist */
+  /* (class is .hl, not .msg: the fake Slack window below already uses .msg with a bottom margin) */
+  .hl{font-family:var(--msgFont);font-size:var(--msgSize);font-weight:var(--msgWeight);letter-spacing:-.005em;font-variation-settings:"opsz" 18;line-height:1;margin:0}
+
+  /* cancelled toast with undo window */
+  .toast{position:fixed;z-index:12;display:flex;align-items:center;gap:14px;background:var(--pill);color:var(--dot);border:1px solid var(--pillB);border-radius:999px;padding:5px 5px 5px 16px;font:500 14px var(--ui);box-shadow:var(--pillShadow);overflow:hidden;white-space:nowrap}
+  .toast .u{background:var(--uBg);color:var(--uT);border-radius:999px;padding:6px 13px;cursor:pointer;font-weight:600}
+  .toast .u:hover{background:var(--uHover)}
+  .toast .bar{position:absolute;left:0;right:0;bottom:0;height:2px;opacity:.75;background:#B8492C;transform-origin:left;animation:undo 5s linear forwards}
+  body.wispr .toast .bar{display:none}
+  @keyframes undo{to{transform:scaleX(0)}}
+
+  /* right-click menu: Appearance + Position */
+  .menu{position:fixed;z-index:30;min-width:200px;background:var(--card);color:var(--cardT);border:1px solid var(--cardB);border-radius:12px;padding:5px;box-shadow:0 14px 36px rgba(40,25,15,.28);font:400 13px var(--ui);-webkit-font-smoothing:antialiased}
+  .menu .h{font:500 11px var(--ui);color:var(--cardMuted);padding:7px 10px 3px}
+  .menu .it{padding:6px 10px;border-radius:7px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}
+  .menu .it:hover{background:rgba(26,24,20,.06)}
+  body.wispr .menu .it:hover,body.ink .menu .it:hover{background:rgba(250,247,242,.08)}
+  .menu .ck{color:#B8492C;font-weight:600}
+  .menu .sep{height:1px;background:var(--cardB);margin:5px 6px}
+
+  /* drag-to-dock landing zones */
+  .zone{position:fixed;z-index:9;border:1.5px dashed rgba(250,247,242,.75);border-radius:999px;background:rgba(26,24,20,.18);transition:background .12s,border-color .12s,transform .12s;pointer-events:none}
+  .zone.hot{background:rgba(184,73,44,.35);border-color:#B8492C;border-style:solid;transform:scale(1.08)}
+  #w.dragging{cursor:grabbing;opacity:.9}
+  #w:not(.dragging){cursor:grab}
+
+  /* ── control panel (not part of the design) ─── */
+  #panel{position:fixed;top:34px;left:12px;z-index:20;font-family:var(--ui);background:rgba(255,255,255,.92);border-radius:10px;padding:10px 12px;font-size:12px;color:#222;box-shadow:0 8px 24px rgba(0,0,0,.25);width:250px}
+  #panel h4{margin:0 0 6px;font-size:12px}
+  #panel .row{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}
+  #panel button{font:12px var(--ui);border:1px solid #ccc;background:#fff;border-radius:6px;padding:3px 7px;cursor:pointer}
+  #panel button.on{background:#1a1814;color:#fff;border-color:#1a1814}
+  #panel .hint{color:#777;font-size:11px;line-height:1.35}
+  #panel.min{width:auto}#panel.min > :not(.keep){display:none}
+</style>
+</head>
+<body>
+<div class="menubar"><div class="l"><b></b><b>Slack</b><span>File</span><span>Edit</span><span>View</span><span>Window</span><span>Help</span></div><div class="r"><span>🔋</span><span>Wi‑Fi</span><span id="clock"></span></div></div>
+
+<div class="window">
+  <div class="titlebar"><span class="tl" style="background:#ff5f57"></span><span class="tl" style="background:#febc2e"></span><span class="tl" style="background:#28c840"></span><span style="margin-left:10px"># launch-team</span></div>
+  <div class="msgs">
+    <div class="msg"><span class="n">Priya</span><span class="t">10:42 AM</span><div>Are we still good for the Friday launch? Need the final copy for the landing page.</div></div>
+    <div class="msg"><span class="n">Rahul</span><span class="t">10:44 AM</span><div>Design is locked. Waiting on the pricing section and the FAQ.</div></div>
+    <div class="msg"><span class="n">Priya</span><span class="t">10:51 AM</span><div>@Khush can you send a quick update on where things are?</div></div>
+  </div>
+  <div class="composer" id="composer">Message #launch-team <span class="caret"></span></div>
+</div>
+
+<div class="dock"><i style="background:#3b82f6"></i><i style="background:#4a154b"></i><i style="background:#22c55e"></i><i style="background:#f59e0b"></i><i style="background:#0ea5e9"></i><i style="background:#ef4444"></i><i style="background:#1a1814"></i></div>
+
+<div id="w"></div>
+<div id="extra"></div>
+
+<div id="panel">
+  <h4 class="keep" style="display:flex;justify-content:space-between;align-items:center">Mockup controls <button id="minbtn" class="keep">hide</button></h4>
+  <div class="row" id="states"></div>
+  <div class="row" id="places"></div>
+  <div class="row" id="themes"><button data-t="paper" class="on">Paper (OpenFlow)</button><button data-t="ink">Ink (OpenFlow dark)</button><button data-t="wf">Wispr</button></div>
+  <div class="row"><button id="fs">⤢ Full screen (F)</button><button id="mic">🎤 Use my mic</button></div>
+  <div class="hint">Real size at browser zoom 100% (⌘0). Put this window on your <b>laptop screen</b> and press F. Keys: 1–7 states · Esc cancels a recording · L / B / R placement · T cycle style · H hide panel. <b>Right-click the widget</b> for Appearance &amp; Position. Idle handle: hover it.</div>
+</div>
+
+<script>
+const STATES=[["idle","1 Idle"],["hover","2 Hover"],["recording","3 Recording"],["silent","4 Can't hear"],["processing","5 Processing"],["card","6 Couldn't paste"],["cancelled","7 Cancelled"]];
+const PLACES=[["left","Left"],["bottom","Bottom"],["right","Right"]];
+let state="idle", place="right", level=0, micOn=false, analyser=null, buf=null, silentSince=null;
+const W=document.getElementById("w"), EX=document.getElementById("extra");
+const vertical=()=>place!=="bottom";
+const N=7, SHAPE=[.45,.7,.9,1,.85,.65,.4];
+
+function mkButtons(id,list,get,set){const el=document.getElementById(id);el.innerHTML="";list.forEach(([k,t])=>{const b=document.createElement("button");b.textContent=t;b.className=get()===k?"on":"";b.onclick=()=>{set(k);render()};el.appendChild(b)})}
+
+function pos(w,h){ // place the widget box on the chosen edge
+  const vw=innerWidth,vh=innerHeight;
+  if(place==="right") return {left:vw-w-4, top:(vh-h)/2};
+  if(place==="left")  return {left:4, top:(vh-h)/2};
+  return {left:(vw-w)/2, top:vh-h-76}; // just above the dock
+}
+function box(w,h){const p=pos(w,h);Object.assign(W.style,{left:p.left+"px",top:p.top+"px",width:w+"px",height:h+"px"});return p}
+
+function dotsHTML(){return `<div class="dots" style="flex-direction:${vertical()?"column":"row"};margin:${vertical()?"7px 0":"0 7px"}">${Array.from({length:N},()=>"<i></i>").join("")}</div>`}
+
+function render(){
+  mkButtons("states",STATES,()=>state,k=>state=k);
+  mkButtons("places",PLACES,()=>place,k=>place=k);
+  hideTip(); closeMenu(); EX.innerHTML=""; W.className=""; W.onmouseenter=W.onmouseleave=null;
+  const v=vertical();
+  if(state==="idle"){
+    W.className="idle"; W.innerHTML=""; v?box(8,46):box(46,8);
+    W.onmouseenter=()=>{state="hover";render()};
+  } else if(state==="hover"){
+    W.className="hovergroup"+(v?" v":""); v?box(36,56):box(56,36);
+    W.style.padding="0";
+    W.innerHTML=`<span class="hb main" data-act="dictate" data-tip="Dictate" data-key="Hold ⌘ right" style="${v?"width:36px;height:56px":"width:56px;height:36px"}">${ICON.mic}</span>`;
+    W.querySelectorAll(".hb").forEach(b=>{b.onmouseenter=()=>showTip(b);b.onmouseleave=hideTip});
+    showTip(W.querySelector(".hb")); // pointer is already over it on the first hover
+    W.onmouseleave=()=>{if(dragging)return;hideTip();state="idle";render()};
+  } else if(state==="recording"||state==="silent"||state==="processing"){
+    W.className="pill"+(v?" v":"")+(state==="silent"?" silent":""); v?box(26,102):box(102,26);
+    W.style.padding="3px";
+    W.innerHTML=`<span class="btn bx" style="width:20px;height:20px">✕</span>${dotsHTML()}<span class="btn bc" style="width:20px;height:20px">✓</span>`;
+    W.querySelector(".bx").onclick=()=>{clearTimeout(flowTimer);state="cancelled";render()};
+    W.querySelector(".bc").onclick=finishDictation;
+    if(state==="silent"){
+      const t=document.createElement("div");t.className="toast";t.innerHTML="<span class='hl'>Can't hear you</span><span class='u'>Mic settings</span>";EX.appendChild(t);
+      besideWidget(t);
+    }
+  } else if(state==="cancelled"){
+    W.className="idle"; W.innerHTML=""; v?box(8,46):box(46,8);
+    const t=document.createElement("div");t.className="toast";
+    t.innerHTML=`<span class="hl">Transcript cancelled</span><span class="u">Undo</span><span class="bar"></span>`;
+    EX.appendChild(t); besideWidget(t);
+    t.querySelector(".u").onclick=finishDictation;
+    clearTimeout(flowTimer); flowTimer=setTimeout(()=>{if(state==="cancelled"){state="idle";render()}},5000);
+  } else if(state==="card"){
+    W.className="idle"; W.innerHTML=""; v?box(8,46):box(46,8);
+    const c=document.createElement("div");c.className="card";
+    c.innerHTML=`<div class="ct"><svg class="mark of-only" viewBox="0 0 100 100"><g transform="translate(50,50)"><circle r="34" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-dasharray="180 40" transform="rotate(-30)"/><circle r="22" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-dasharray="110 30" transform="rotate(80)"/><circle r="9" fill="#B8492C"/></g></svg><span class="logo wf-only"><i style="height:5px"></i><i style="height:10px"></i><i style="height:7px"></i><i style="height:11px"></i><i style="height:4px"></i></span><span class="sp">No text box selected</span>
+      <span class="xr" id="cx"><svg viewBox="0 0 22 22"><circle cx="11" cy="11" r="10.5" fill="none" stroke="var(--ringTrack)" stroke-width="1.5"/><circle class="ring" cx="11" cy="11" r="10.5" fill="none" stroke="var(--ring)" stroke-width="1.5" stroke-dasharray="66" transform="rotate(-90 11 11)"/></svg>✕</span></div>
+      <div class="ctext">Quick update: design is locked, pricing and FAQ copy land tomorrow, and we're on track for Friday.</div>
+      <div class="cb"><span class="watch"><span class="pulse"></span>Click any text box to paste</span><span class="cbtn" id="copy">Copy</span></div>`;
+    EX.appendChild(c);
+    besideWidget(c);
+    c.querySelector("#cx").onclick=()=>{state="idle";render()};
+    c.querySelector("#copy").onclick=e=>{e.target.textContent="Copied ✓"};
+    document.getElementById("composer").onclick=()=>{ if(state==="card"){document.getElementById("composer").innerHTML="Quick update: design is locked, pricing and FAQ copy land tomorrow, and we're on track for Friday. <span class='caret'></span>";state="idle";render()} };
+  }
+}
+
+const ICON={
+  mic:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>`,
+  rec:`<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><circle class="accent" cx="12" cy="12" r="4.2" fill="currentColor"/></svg>`,
+};
+let tipEl=null;
+function hideTip(){tipEl?.remove();tipEl=null}
+function showTip(b){
+  hideTip(); tipEl=document.createElement("div"); tipEl.className="tip";
+  tipEl.innerHTML=`<span class="hl">${b.dataset.tip}</span>`+(b.dataset.key?`<kbd>${b.dataset.key}</kbd>`:""); document.body.appendChild(tipEl);
+  besideWidget(tipEl,10,W.contains(b)?targetRect():b.getBoundingClientRect());
+}
+function hbAction(act){
+  hideTip();
+  if(act==="dictate"||act==="handsfree"){state="recording";render();return}
+}
+
+let flowTimer=null;
+const SAID="Quick update: design is locked, pricing and FAQ copy land tomorrow, and we're on track for Friday.";
+function finishDictation(){ // ✓ or Undo: process, then paste into the focused composer
+  clearTimeout(flowTimer); state="processing"; render();
+  flowTimer=setTimeout(()=>{document.getElementById("composer").innerHTML=SAID+" <span class='caret'></span>";state="idle";render()},1300);
+}
+// Final (target) geometry of the widget. It animates between states, so reading
+// getBoundingClientRect() mid-transition would place pop-ups on top of it.
+function targetRect(){const l=parseFloat(W.style.left),t=parseFloat(W.style.top),w=parseFloat(W.style.width),h=parseFloat(W.style.height);
+  return {left:l,top:t,width:w,height:h,right:l+w,bottom:t+h}}
+// Anchor a pop-up to the widget's edge with a fixed gap; its own width never matters.
+function besideWidget(el,gap=10,r=targetRect()){
+  el.style.left=el.style.right=el.style.top=el.style.bottom="";
+  if(place==="right") Object.assign(el.style,{right:innerWidth-r.left+gap+"px",top:r.top+r.height/2+"px",transform:"translateY(-50%)"});
+  else if(place==="left") Object.assign(el.style,{left:r.right+gap+"px",top:r.top+r.height/2+"px",transform:"translateY(-50%)"});
+  else Object.assign(el.style,{left:r.left+r.width/2+"px",bottom:innerHeight-r.top+gap+"px",transform:"translateX(-50%)"});
+}
+
+// ── Appearance (user setting) + right-click menu ────────────
+let appearance="paper"; // paper | ink | auto (match macOS light/dark)
+const darkMQ=matchMedia("(prefers-color-scheme: dark)");
+function applyAppearance(){setTheme(appearance==="auto"?(darkMQ.matches?"ink":"paper"):appearance)}
+darkMQ.addEventListener?.("change",()=>{if(appearance==="auto")applyAppearance()});
+let menuEl=null;
+function closeMenu(){menuEl?.remove();menuEl=null}
+function showMenu(x,y){
+  closeMenu(); hideTip();
+  const ck=on=>on?'<span class="ck">✓</span>':'';
+  menuEl=document.createElement("div"); menuEl.className="menu";
+  menuEl.innerHTML=`<div class="h">Appearance</div>
+    <div class="it" data-a="paper">Paper${ck(appearance==="paper")}</div>
+    <div class="it" data-a="ink">Ink${ck(appearance==="ink")}</div>
+    <div class="it" data-a="auto">Match system${ck(appearance==="auto")}</div>
+    <div class="sep"></div><div class="h">Position</div>
+    <div class="it" data-p="left">Left edge${ck(place==="left")}</div>
+    <div class="it" data-p="bottom">Bottom centre${ck(place==="bottom")}</div>
+    <div class="it" data-p="right">Right edge${ck(place==="right")}</div>`;
+  document.body.appendChild(menuEl);
+  const mw=menuEl.offsetWidth, mh=menuEl.offsetHeight;
+  Object.assign(menuEl.style,{left:Math.max(8,Math.min(x,innerWidth-mw-8))+"px",top:Math.max(30,Math.min(y,innerHeight-mh-8))+"px"});
+  menuEl.querySelectorAll(".it").forEach(it=>it.onclick=()=>{
+    if(it.dataset.a){appearance=it.dataset.a;applyAppearance()}
+    if(it.dataset.p){place=it.dataset.p;state="idle";render()}
+    closeMenu()});
+}
+W.addEventListener("contextmenu",e=>{e.preventDefault();showMenu(e.clientX,e.clientY)});
+addEventListener("pointerdown",e=>{if(menuEl&&!menuEl.contains(e.target))closeMenu()},true);
+addEventListener("keydown",e=>{if(e.key==="Escape")closeMenu()});
+
+// ── drag to dock: left / bottom / right ─────────────────────
+let dragging=false, zones=[];
+function zoneRects(){ // landing spots, sized like the widget's current footprint
+  const r=W.getBoundingClientRect(), long=Math.max(r.width,r.height,46), short=Math.min(r.width,r.height,32)||8;
+  const vw=innerWidth, vh=innerHeight, pad=10;
+  return {
+    left:  {left:4, top:(vh-long)/2, width:Math.max(short,8), height:long},
+    right: {left:vw-Math.max(short,8)-4, top:(vh-long)/2, width:Math.max(short,8), height:long},
+    bottom:{left:(vw-long)/2, top:vh-Math.max(short,8)-76, width:long, height:Math.max(short,8)},
+  };
+}
+function nearest(x,y){
+  let best=null,bd=1e9;
+  for(const [k,z] of Object.entries(zoneRects())){const cx=z.left+z.width/2,cy=z.top+z.height/2,d=Math.hypot(x-cx,y-cy);if(d<bd){bd=d;best=k}}
+  return best;
+}
+W.addEventListener("pointerdown",e=>{
+  if(e.button!==0) return;                      // right-click opens the menu instead
+  if(e.target.closest(".btn")) return;          // buttons stay clickable
+  e.preventDefault();
+  const r=W.getBoundingClientRect(), ox=e.clientX-r.left, oy=e.clientY-r.top, sx=e.clientX, sy=e.clientY;
+  const hb=e.target.closest(".hb"); let started=false;
+  const begin=()=>{ // only a real drag (>4px) moves it; a plain click presses the button
+    started=true; dragging=true; hideTip(); W.classList.add("dragging"); W.style.transition="none"; EX.innerHTML="";
+    zones=Object.entries(zoneRects()).map(([k,z])=>{const d=document.createElement("div");d.className="zone";d.dataset.k=k;Object.assign(d.style,{left:z.left-3+"px",top:z.top-3+"px",width:z.width+6+"px",height:z.height+6+"px"});document.body.appendChild(d);return d});
+  };
+  const move=ev=>{
+    if(!started){ if(Math.hypot(ev.clientX-sx,ev.clientY-sy)<4) return; begin(); }
+    W.style.left=ev.clientX-ox+"px";W.style.top=ev.clientY-oy+"px";const k=nearest(ev.clientX,ev.clientY);zones.forEach(z=>z.classList.toggle("hot",z.dataset.k===k))};
+  const up=ev=>{removeEventListener("pointermove",move);removeEventListener("pointerup",up);
+    if(!started){ if(hb) hbAction(hb.dataset.act); return; }
+    place=nearest(ev.clientX,ev.clientY); zones.forEach(z=>z.remove()); zones=[];
+    dragging=false; W.classList.remove("dragging"); W.style.transition=""; state="idle"===state?"idle":state; render()};
+  addEventListener("pointermove",move); addEventListener("pointerup",up);
+});
+
+function frame(t){
+  if(micOn&&analyser){analyser.getFloatTimeDomainData(buf);let s=0;for(const x of buf)s+=x*x;const rms=Math.sqrt(s/buf.length);level=Math.min(1,rms*9);
+    if(state==="recording"&&rms<0.004){silentSince??=t;if(t-silentSince>2000){state="silent";render()}}else if(state==="silent"&&rms>0.01){state="recording";silentSince=null;render()}else if(rms>=0.004)silentSince=null;}
+  else level=.35+.3*Math.sin(t/190)+.25*Math.sin(t/77);
+  const dots=W.querySelectorAll(".dots i"),v=vertical();
+  dots.forEach((d,i)=>{let s;
+    if(state==="recording"){s=3+Math.max(0,level)*10*SHAPE[i]*(0.75+0.25*Math.sin(t/60+i));d.style.opacity=1}
+    else if(state==="silent"){s=3;d.style.opacity=.3}
+    else if(state==="processing"){s=3;d.style.opacity=.25+.75*Math.max(0,Math.sin(t/140-i*.7))}
+    else s=3;
+    if(v){d.style.width=s+"px";d.style.height="2.5px"}else{d.style.height=s+"px";d.style.width="2.5px"}});
+  requestAnimationFrame(frame);
+}
+
+const THEMES=["paper","ink","wf"];
+function setTheme(t){document.body.classList.toggle("wispr",t==="wf");document.body.classList.toggle("ink",t==="ink");document.querySelectorAll("#themes button").forEach(b=>b.className=b.dataset.t===t?"on":"")}
+document.querySelectorAll("#themes button").forEach(b=>b.onclick=()=>setTheme(b.dataset.t));
+addEventListener("keydown",e=>{if(e.key.toLowerCase()==="t"){const cur=document.body.classList.contains("wispr")?"wf":document.body.classList.contains("ink")?"ink":"paper";setTheme(THEMES[(THEMES.indexOf(cur)+1)%3])}});
+document.getElementById("fs").onclick=()=>document.documentElement.requestFullscreen?.();
+document.getElementById("minbtn").onclick=()=>{const p=document.getElementById("panel");p.classList.toggle("min");document.getElementById("minbtn").textContent=p.classList.contains("min")?"controls":"hide"};
+document.getElementById("mic").onclick=async e=>{try{const s=await navigator.mediaDevices.getUserMedia({audio:true});const ctx=new AudioContext();const src=ctx.createMediaStreamSource(s);analyser=ctx.createAnalyser();analyser.fftSize=1024;buf=new Float32Array(analyser.fftSize);src.connect(analyser);micOn=true;e.target.textContent="🎤 Mic on";e.target.className="on";state="recording";render()}catch(err){e.target.textContent="Mic blocked"}};
+addEventListener("keydown",e=>{const k=e.key.toLowerCase();if(k>="1"&&k<="7"){state=STATES[+k-1][0];render()}if(e.key==="Escape"&&(state==="recording"||state==="silent")){state="cancelled";render()}if(k==="l")place="left",render();if(k==="b")place="bottom",render();if(k==="r")place="right",render();if(k==="f")document.documentElement.requestFullscreen?.();if(k==="h")document.getElementById("minbtn").click()});
+addEventListener("resize",render);
+setInterval(()=>{document.getElementById("clock").textContent=new Date().toLocaleString([], {weekday:"short",hour:"numeric",minute:"2-digit"})},1000);
+render();requestAnimationFrame(frame);
+</script>
+</body>
+</html>
