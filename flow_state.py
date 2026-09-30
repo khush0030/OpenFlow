@@ -64,8 +64,9 @@ class FlowController:
 
     # -- outgoing ---------------------------------------------------------
     def message(self) -> dict:
-        return {"type": "state", "state": self.state,
-                "text": self.text if self.state == CARD else ""}
+        with self._lock:
+            return {"type": "state", "state": self.state,
+                    "text": self.text if self.state == CARD else ""}
 
     def _set(self, state: str, text: str = "") -> None:
         self.state = state
@@ -157,7 +158,11 @@ class FlowController:
                     self.done()
                 else:
                     self._set(PROCESSING)
-                    self._hooks.rerun(kept.audio, kept.target)
+                    try:
+                        self._hooks.rerun(kept.audio, kept.target)
+                    except Exception:
+                        # Keep the audio so Retry works again.
+                        self.failed(kept.audio, kept.target)
             elif action == "copy" and self.state == CARD:
                 text = self.text
                 self._hooks.copy_text(text)

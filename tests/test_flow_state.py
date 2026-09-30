@@ -142,3 +142,54 @@ def test_done_and_dismiss_return_to_idle():
     fc.show_card("x")
     fc.handle_action({"action": "dismiss"})
     assert fc.state == IDLE
+
+
+def test_message_reflects_latest_card_text():
+    fc, _, _, _ = make()
+    fc.show_card("first")
+    fc.show_card("second")
+    assert fc.message() == {"type": "state", "state": CARD, "text": "second"}
+
+
+def test_message_waits_for_the_lock():
+    import threading
+
+    fc, _, _, _ = make()
+    got: list[dict] = []
+    fc._lock.acquire()
+    try:
+        t = threading.Thread(target=lambda: got.append(fc.message()))
+        t.start()
+        t.join(0.2)
+        assert got == []  # blocked: a mid-update snapshot cannot be read
+    finally:
+        fc._lock.release()
+    t.join(2)
+    assert got == [fc.message()]
+
+
+def test_rerun_failure_goes_to_error_and_retry_still_works():
+    fc, calls, _, _ = make()
+    attempts = []
+
+    def boom(audio, target):
+        attempts.append((audio, target))
+        if len(attempts) == 1:
+            raise RuntimeError("pipeline down")
+
+    fc._hooks.rerun = boom
+    fc.failed("AUDIO", "TARGET")
+    fc.handle_action({"action": "retry"})
+    assert fc.state == ERROR
+    fc.handle_action({"action": "retry"})
+    assert attempts == [("AUDIO", "TARGET"), ("AUDIO", "TARGET")]
+    assert fc.state == PROCESSING
+
+
+def test_undo_after_window_before_tick_goes_idle_without_rerun():
+    fc, calls, _, clock = make()
+    fc.cancelled("AUDIO", "TARGET")
+    clock.t += 5.1
+    fc.handle_action({"action": "undo"})
+    assert fc.state == IDLE
+    assert not any(c[0] == "rerun" for c in calls)
