@@ -7,9 +7,9 @@ connection is the liveness signal for both sides (no polling, no pgrep).
 from __future__ import annotations
 
 import errno
+import fcntl
 import json
 import os
-import select
 import socket
 import threading
 import time
@@ -115,50 +115,50 @@ class WidgetServer:
         self._sock: Optional[socket.socket] = None
         self._stopped = threading.Event()
         self._ino: Optional[int] = None
+        self._lock_fd: Optional[int] = None
 
     def start(self) -> None:
         Path(self.path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._clear_stale_path()
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        old_umask = os.umask(0o177)  # socket is created 0600, never wider
+        self._acquire_lock()
         try:
-            s.bind(self.path)
-        finally:
-            os.umask(old_umask)
+            # Holding the lock means any existing socket file is stale.
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # umask is process-wide: it is held only around bind().
+            old_umask = os.umask(0o177)  # socket is created 0600, never wider
+            try:
+                s.bind(self.path)
+            finally:
+                os.umask(old_umask)
+        except BaseException:
+            self._release_lock()
+            raise
         self._ino = os.stat(self.path).st_ino
         s.listen(2)
         self._sock = s
         threading.Thread(target=self._accept_loop, name="widget-channel-accept",
                          daemon=True).start()
 
-    def _clear_stale_path(self) -> None:
-        """Refuse to steal a live server's path; unlink it only if stale."""
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    def _acquire_lock(self) -> None:
+        """Take the exclusive single-server lock (held until stop())."""
+        fd = os.open(self.path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            probe.connect(self.path)
-        except FileNotFoundError:
-            return
-        except ConnectionRefusedError:
-            os.unlink(self.path)  # nobody listening: stale
-            return
-        finally:
-            probe.close()
-        # The probe connects and closes without sending; _accept_loop ignores
-        # such connections, so it does not evict the live server's widget.
-        raise OSError(errno.EADDRINUSE, f"widget server already running at {self.path}")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                raise OSError(errno.EADDRINUSE,
+                              f"widget server already running at {self.path}") from exc
+            raise
+        self._lock_fd = fd
 
-    @staticmethod
-    def _is_probe(client: socket.socket) -> bool:
-        """True if the peer closed right after connecting (a liveness probe).
-
-        A real widget never closes without talking; it stays connected, so
-        the short wait times out and it is treated as real.
-        """
-        try:
-            readable, _, _ = select.select([client], [], [], 0.05)
-            return bool(readable) and client.recv(1, socket.MSG_PEEK) == b""
-        except OSError:
-            return True
+    def _release_lock(self) -> None:
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)  # closing drops the flock
+            self._lock_fd = None
 
     def _accept_loop(self) -> None:
         while not self._stopped.is_set():
@@ -169,9 +169,6 @@ class WidgetServer:
                     break
                 log_exception("widget_channel", "accept failed; retrying", exc)
                 time.sleep(0.1)
-                continue
-            if self._is_probe(client):
-                client.close()
                 continue
             conn = _Conn(client, self._dispatch, self._closed)
             with self._lock:
@@ -218,6 +215,7 @@ class WidgetServer:
                 os.unlink(self.path)
         except OSError:
             pass
+        self._release_lock()
 
 
 class WidgetClient:

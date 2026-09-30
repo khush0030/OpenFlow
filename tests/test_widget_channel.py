@@ -152,7 +152,7 @@ import pytest
 import widget_channel
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def logged(monkeypatch):
     calls = []
     monkeypatch.setattr(widget_channel, "log_exception",
@@ -351,3 +351,29 @@ def test_new_dir_is_0700_and_existing_dir_untouched():
     srv.start()
     assert stat.S_IMODE(os.stat(root).st_mode) == 0o755
     srv.stop()
+
+
+def test_lock_not_socket_file_decides_ownership():
+    path = sock_path()
+    a = WidgetServer(path)
+    a.start()
+    os.unlink(path)  # even with the socket file gone, A still holds the lock
+    b = WidgetServer(path)
+    with pytest.raises(OSError) as ei:
+        b.start()
+    assert ei.value.errno == errno.EADDRINUSE
+    a.stop()
+
+
+def test_new_server_can_start_after_first_stops():
+    path = sock_path()
+    a = WidgetServer(path)
+    a.start()
+    a.stop()
+    b = WidgetServer(path)
+    b.start()
+    cli = WidgetClient(path)
+    assert cli.connect()
+    assert wait_for(lambda: b.connected)
+    cli.close()
+    b.stop()
