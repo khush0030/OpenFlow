@@ -1,6 +1,7 @@
 """Config loader for ~/.openflow/config.toml."""
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from dataclasses import dataclass, field, asdict
@@ -62,11 +63,19 @@ DEFAULTS: dict[str, Any] = {
         "fuzzy_threshold": 85,
         "inject_into_cleanup": True,
     },
+    "widget": {
+        # Flow widget dock position and look (spec 2026-09-30-flow-widget-design).
+        "position": "right",
+        "appearance": "paper",
+    },
 }
+
+WIDGET_POSITIONS = ("left", "bottom", "right")
+WIDGET_APPEARANCES = ("paper", "ink", "auto")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    out = dict(base)
+    out = copy.deepcopy(base)
     for k, v in override.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, dict):
             out[k] = _deep_merge(out[k], v)
@@ -121,7 +130,7 @@ def load() -> dict[str, Any]:
     load_env()
     if not CONFIG_PATH.exists():
         save(DEFAULTS)
-        return DEFAULTS
+        return copy.deepcopy(DEFAULTS)
     with open(CONFIG_PATH, "rb") as f:
         user = _toml_read.load(f)
     if _migrate(user):
@@ -133,3 +142,17 @@ def save(cfg: dict[str, Any]) -> None:
     ensure_dirs()
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump(cfg, f)
+
+
+def save_widget_setting(key: str, value: str) -> None:
+    """Persist one [widget] setting, leaving the rest of the file as-is."""
+    allowed = {"position": WIDGET_POSITIONS, "appearance": WIDGET_APPEARANCES}
+    if value not in allowed.get(key, ()):
+        raise ValueError(f"invalid widget setting {key}={value!r}")
+    ensure_dirs()
+    user: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "rb") as f:
+            user = _toml_read.load(f)
+    user.setdefault("widget", {})[key] = value
+    save(user)
