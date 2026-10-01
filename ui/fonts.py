@@ -1,7 +1,7 @@
 """Bundled font registration for OpenFlow.
 
-Loads Geist (UI) and Fraunces (headlines, transcripts) from assets/fonts/
-into Qt's font database. Both are variable fonts under the SIL OFL (licences
+Loads Geist (UI), Fraunces (headlines, transcripts) and JetBrains Mono (keys,
+labels) from assets/fonts/ into Qt's font database. All are variable fonts under the SIL OFL (licences
 alongside). Call load_fonts() once at app startup, before constructing any
 QWidget.
 
@@ -21,6 +21,7 @@ _ASSETS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 FONT_FILES: tuple[str, ...] = (
     "Geist[wght].ttf",
     "Fraunces[SOFT,WONK,opsz,wght].ttf",
+    "JetBrainsMono[wght].ttf",
 )
 
 

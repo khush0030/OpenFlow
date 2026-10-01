@@ -23,3 +23,4 @@ def test_fonts_register_with_qt():
     families = load_fonts()
     assert "Geist" in families
     assert "Fraunces" in families
+    assert "JetBrains Mono" in families
