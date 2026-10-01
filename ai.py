@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from prompts import PROMPTS, context_note
+from prompts import PROMPTS, SELF_CORRECTION, SELF_CORRECTION_TONES, context_note
 from sarvam import chat_complete, resolve_api_key
 
 
@@ -51,6 +51,8 @@ class AIProcessor:
             return text
         system = PROMPTS.get(mode) or PROMPTS["verbatim"]
         extras: list[str] = []
+        if mode in SELF_CORRECTION_TONES:
+            extras.append(SELF_CORRECTION)
         # The app being dictated into (prompts.CONTEXT_HINTS).
         note = context_note(context_app, mode)
         if note:

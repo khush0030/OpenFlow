@@ -46,6 +46,27 @@ Apply the instruction. Return ONLY the edited text, no preamble or quotes.""",
 }
 
 
+# Spoken self-corrections (ROADMAP Phase 2). Appended to every tone that
+# rewrites (not verbatim: that one may not drop a single word).
+SELF_CORRECTION_TONES = ("casual", "professional", "bullets", "email", "slack")
+
+SELF_CORRECTION = """Speakers correct themselves mid-sentence. When they do, keep
+only the corrected version: drop the words they took back and the correction
+cue itself. Cues include "no wait", "wait no", "scratch that", "I mean",
+"actually", "sorry", "make that", "rather", "let me rephrase", and in Hinglish
+"nahi nahi", "nahi", "matlab", "mera matlab", "galti se", "ek minute",
+"ruko". "Scratch that" or "delete that" on its own removes the sentence
+before it. Only treat a cue as a correction when it clearly replaces what was
+just said; "I actually liked it" or "matlab kya hai" are ordinary speech and
+stay. Examples:
+- "let's meet at 2pm, no wait, make it 3pm" -> "Let's meet at 3pm."
+- "send it to Rahul, sorry, I mean Rohit" -> "Send it to Rohit."
+- "kal 5 baje milte hain, nahi nahi, 6 baje" -> "Kal 6 baje milte hain."
+- "the budget is 50k, matlab 60k" -> "The budget is 60k."
+- "We'll order pizza. Scratch that. Let's get biryani." -> "Let's get biryani."
+"""
+
+
 # Per-app context (ROADMAP Phase 2). The app being dictated into, by the
 # name macOS shows for it (lowercase), -> what kind of app it is.
 APP_KINDS = {
