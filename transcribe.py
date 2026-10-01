@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,6 +42,9 @@ class Transcriber:
         self.model = model
         self.api_key_env = api_key_env
         self._api_key: str | None = None
+        # Seconds spent in the last transcribe call: "encode" (WAV) and
+        # "stt" (Sarvam round trips). Read by the daemon for stage timing.
+        self.last_timings: dict[str, float] = {}
 
     def preload(self) -> None:
         """Resolve the API key early so the first dictation isn't the one that fails."""
@@ -62,6 +66,7 @@ class Transcriber:
     def transcribe_detailed(
         self, audio: np.ndarray, opts: TranscribeOptions | None = None
     ) -> STTResult:
+        self.last_timings = {}
         if audio.size == 0:
             return STTResult(transcript="")
         opts = opts or TranscribeOptions()
@@ -70,8 +75,12 @@ class Transcriber:
         chunks = _split_audio(audio, sr, STT_MAX_SECONDS)
         parts: list[str] = []
         last = STTResult(transcript="")
+        encode_s = stt_s = 0.0
         for chunk in chunks:
+            t0 = time.monotonic()
             wav = audio_to_wav_bytes(chunk, sr)
+            t1 = time.monotonic()
+            encode_s += t1 - t0
             last = speech_to_text(
                 wav,
                 api_key=key,
@@ -79,8 +88,10 @@ class Transcriber:
                 mode=opts.mode,
                 language_code=opts.language_code,
             )
+            stt_s += time.monotonic() - t1
             if last.transcript:
                 parts.append(last.transcript)
+        self.last_timings = {"encode": encode_s, "stt": stt_s}
         return STTResult(
             transcript=" ".join(parts).strip(),
             language_code=last.language_code,

@@ -39,3 +39,46 @@ def test_history_disabled_saves_nothing_but_still_pastes(env):
 
 def test_history_defaults():
     assert dm.cfg_mod.DEFAULTS["history"] == {"enabled": True, "size_cap": 500}
+
+
+# -- per-stage latency (ROADMAP Phase 2 latency pass) -------------------------
+
+class TimedTranscriber:
+    def __init__(self):
+        self.last_timings = {}
+
+    def transcribe(self, audio, opts):
+        self.last_timings = {"encode": 0.003, "stt": 0.8}
+        return "hello world"
+
+
+def test_live_run_records_every_stage(env):
+    d = make_daemon()
+    d.transcriber = TimedTranscriber()
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.on_record_stop()                       # inline worker (make_daemon)
+    [row] = d.history.rows
+    t = row["timings"]
+    assert list(t) == ["record", "encode", "stt", "cleanup", "paste", "total"]
+    assert t["encode"] == 0.003 and t["stt"] == 0.8
+    assert all(v >= 0 for v in t.values())
+    assert t["total"] >= t["record"] + t["cleanup"] + t["paste"]
+
+
+def test_untimed_transcriber_still_gets_stt_wall_time(env):
+    d = make_daemon()                        # FakeTranscriber: no last_timings
+    work(d, d._flow.processing())
+    t = d.history.rows[0]["timings"]
+    assert "encode" not in t and "record" not in t
+    assert t["stt"] >= 0 and t["total"] >= t["stt"]
+
+
+def test_retry_does_not_count_time_spent_on_the_card(env):
+    d = make_daemon()
+    seen = []
+    d._start_worker = lambda audio, ctx, run: seen.append(ctx)
+    ctx = dm.RunContext(target=None, keyup_at=1.0, record_s=0.02)
+    d._rerun(None, ctx, 1)
+    assert seen[0].keyup_at is None and seen[0].record_s is None
+    assert ctx.keyup_at == 1.0               # original left alone

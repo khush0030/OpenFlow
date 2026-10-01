@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -209,6 +209,9 @@ class RunContext:
     target: object = None          # paste target captured at key-down
     edit_mode: bool = False
     selection: str = ""            # edit-mode selection the run applies to
+    # Latency bookkeeping for the live run only (Undo/Retry clear it):
+    keyup_at: float | None = None  # time.monotonic() when recording stopped
+    record_s: float | None = None  # key-up -> audio in hand (recorder.stop)
 
 
 class _WidgetWatchdog:
@@ -646,6 +649,9 @@ class Daemon:
     def _rerun(self, audio, ctx: RunContext, run: int) -> None:
         """Undo / Retry: run the pipeline again on kept audio, in the same
         mode and against the same paste target / selection."""
+        if isinstance(ctx, RunContext):
+            # The user waited on the card: key-up time no longer means anything.
+            ctx = replace(ctx, keyup_at=None, record_s=None)
         self._start_worker(audio, ctx, run)
 
     def _save_widget_setting(self, key: str, value: str) -> None:
@@ -811,7 +817,9 @@ class Daemon:
     def on_record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
+        keyup_at = time.monotonic()
         audio = self.recorder.stop()
+        record_s = time.monotonic() - keyup_at
         if audio.size == 0:
             # Either another thread (✓/✕ racing the key release) already
             # stopped this recording — only that winner drives the flow — or
@@ -822,7 +830,8 @@ class Daemon:
             return
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
-                         selection=getattr(self, "_edit_selection", "") if edit_mode else "")
+                         selection=getattr(self, "_edit_selection", "") if edit_mode else "",
+                         keyup_at=keyup_at, record_s=record_s)
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
@@ -897,8 +906,14 @@ class Daemon:
             return
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
+        # Stage timings (seconds) for the log line and the history row.
+        # Total runs from key-up for a live run, else from here (Undo/Retry).
+        timings: dict[str, float] = {}
+        if ctx.record_s is not None:
+            timings["record"] = ctx.record_s
+        start = ctx.keyup_at if ctx.keyup_at is not None else time.monotonic()
         try:
-            t0 = time.time()
+            t0 = time.monotonic()
             opts = self._stt_opts()
             try:
                 raw = self.transcriber.transcribe(audio, opts)
@@ -906,7 +921,12 @@ class Daemon:
                 log_exception("daemon.pipeline", "transcription failed — offering Retry", e)
                 self._flow.failed(audio, ctx, run=run) or self._stale(run)
                 return
-            t1 = time.time()
+            t1 = time.monotonic()
+            stt_t = getattr(self.transcriber, "last_timings", None) or {}
+            encode_s = stt_t.get("encode")
+            if encode_s is not None:
+                timings["encode"] = encode_s
+            timings["stt"] = stt_t.get("stt", (t1 - t0) - (encode_s or 0.0))
             print(
                 f"[daemon] sarvam-stt {t1-t0:.2f}s mode={opts.mode} "
                 f"lang={opts.language_code!r}: {raw!r}",
@@ -923,7 +943,8 @@ class Daemon:
             else:
                 final = self._post_process(raw)
 
-            t2 = time.time()
+            t2 = time.monotonic()
+            timings["cleanup"] = t2 - t1
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
                 self._flow.done(run=run) or self._stale(run)
@@ -944,6 +965,11 @@ class Daemon:
                     self._flow.show_card(final, run=run) or self._stale(run)
                 else:
                     self._flow.done(run=run) or self._stale(run)
+            t3 = time.monotonic()
+            timings["paste"] = t3 - t2
+            timings["total"] = t3 - start
+            print("[daemon] timing " + " ".join(
+                f"{k}={v:.2f}s" for k, v in timings.items()), flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
             if hist_cfg["enabled"]:
                 self.history.add(
@@ -954,6 +980,7 @@ class Daemon:
                     duration=audio.size / self.cfg["audio"]["sample_rate"],
                     app=getattr(target, "name", None) or None,
                     cap=int(hist_cfg["size_cap"]),
+                    timings=timings,
                 )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
