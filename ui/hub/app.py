@@ -366,13 +366,16 @@ class AppKitBridge:
 
 
 class DockPresence:
-    """Dock icon and ⌘-Tab only while the window is visible; quit the
-    process after `quit_after_ms` hidden."""
+    """Dock icon and ⌘-Tab only while the window is visible (and Settings ›
+    Show in Dock is on); quit the process after `quit_after_ms` hidden."""
 
     def __init__(self, appkit, quit: Callable[[], None], icon_path: Path = DOCK_ICON,
-                 quit_after_ms: int = QUIT_AFTER_HIDDEN_MS) -> None:
+                 quit_after_ms: int = QUIT_AFTER_HIDDEN_MS,
+                 wanted: Callable[[], bool] = lambda: True) -> None:
         self.appkit = appkit
         self.icon_path = icon_path
+        self.wanted = wanted
+        self.visible = False
         self.quit_timer = QTimer()
         self.quit_timer.setSingleShot(True)
         self.quit_timer.setInterval(quit_after_ms)
@@ -380,13 +383,30 @@ class DockPresence:
 
     def shown(self) -> None:
         self.quit_timer.stop()
+        self.visible = True
         try:
-            self.appkit.set_regular(self.icon_path)
+            self.apply()
             self.appkit.activate()
         except Exception as e:
             log_exception("hub", "could not show the Dock icon", e)
 
+    def apply(self) -> None:
+        """Set the activation policy from the current state and setting."""
+        try:
+            want = self.visible and bool(self.wanted())
+        except Exception as e:
+            log_exception("hub", "could not read show_in_dock", e)
+            want = self.visible
+        try:
+            if want:
+                self.appkit.set_regular(self.icon_path)
+            else:
+                self.appkit.set_accessory()
+        except Exception as e:
+            log_exception("hub", "could not update the Dock icon", e)
+
     def hidden(self) -> None:
+        self.visible = False
         try:
             self.appkit.set_accessory()
         except Exception as e:
@@ -474,6 +494,11 @@ class HubServer:
 
 
 # ── entry point ───────────────────────────────────────────────────────────
+def _show_in_dock() -> bool:
+    import config as cfg_mod
+    return bool(cfg_mod.load().get("hub", {}).get("show_in_dock", True))
+
+
 def main(page: str = "home", *, sock_path: Path | None = None,
          geometry_path: Path | None = None) -> int:
     sock_path = Path(sock_path) if sock_path else HUB_SOCK
@@ -487,7 +512,8 @@ def main(page: str = "home", *, sock_path: Path | None = None,
     app.setFont(style.sans(13))
 
     win = HubWindow(geometry_path=geometry_path)
-    win.dock = DockPresence(AppKitBridge(), quit=app.quit)
+    win.dock = DockPresence(AppKitBridge(), quit=app.quit, wanted=_show_in_dock)
+    win.ctx.apply_dock = win.dock.apply
     server = HubServer(sock_path, lambda p: win.present(p))
     app.aboutToQuit.connect(win.save_geometry)
     win.present(page)

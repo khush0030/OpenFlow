@@ -327,3 +327,19 @@ def test_second_launch_hands_off_and_exits(sock_path, monkeypatch):
         assert got == ["dictionary"]
     finally:
         server.close()
+
+
+def test_dock_presence_honours_show_in_dock():
+    kit = FakeAppKit()
+    wanted = [False]
+    dock = hub.DockPresence(kit, quit=lambda: None, wanted=lambda: wanted[0])
+    dock.shown()
+    assert kit.calls == [("accessory",), ("activate",)]
+    # Toggled on while the window is open: the icon appears at once.
+    wanted[0] = True
+    dock.apply()
+    assert kit.calls[-1][0] == "regular"
+    dock.hidden()
+    kit.calls.clear()
+    dock.apply()  # hidden window: never brings the icon back
+    assert kit.calls == [("accessory",)]
