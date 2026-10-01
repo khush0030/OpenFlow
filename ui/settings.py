@@ -99,6 +99,8 @@ class SettingsDialog(QDialog):
 
     def _flush_config(self) -> None:
         try:
+            # The widget process owns [widget]; never write back a stale copy.
+            self.cfg["widget"] = cfg_mod.read_widget_settings()
             cfg_mod.save(self.cfg)
             self._flash_saved()
         except Exception as e:

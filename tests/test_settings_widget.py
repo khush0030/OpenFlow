@@ -5,6 +5,8 @@ import copy
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,14 +18,45 @@ import config as cfg_mod
 from ui.settings_tabs.general import GeneralTab
 
 
-def test_widget_settings_write_config():
-    cfg = copy.deepcopy(cfg_mod.DEFAULTS)
+@pytest.fixture
+def tmp_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(cfg_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg_mod, "CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr(cfg_mod, "load_env", lambda: None)
+    return tmp_path
+
+
+def test_widget_settings_write_config(tmp_config):
+    cfg = cfg_mod.load()
     saves = []
     tab = GeneralTab(cfg, lambda: saves.append(1))
     tab.appearance.setCurrentIndex(tab.appearance.findData("ink"))
+    assert cfg_mod.load()["widget"]["appearance"] == "ink"  # on disk immediately
     tab.position.setCurrentIndex(tab.position.findData("left"))
     assert cfg["widget"] == {"position": "left", "appearance": "ink"}
-    assert len(saves) == 2
+    assert cfg_mod.load()["widget"] == {"position": "left", "appearance": "ink"}
+    assert saves == []  # widget keys bypass the debounced full save
+
+
+def test_full_save_does_not_clobber_newer_widget_values(tmp_config):
+    from ui.settings import SettingsDialog
+
+    dlg = SettingsDialog()
+    assert dlg.cfg["widget"]["position"] == "right"
+    cfg_mod.save_widget_setting("position", "left")  # widget docked elsewhere
+    dlg.cfg["general"]["default_tone"] = "casual"
+    dlg._flush_config()
+    loaded = cfg_mod.load()
+    assert loaded["widget"]["position"] == "left"
+    assert loaded["general"]["default_tone"] == "casual"
+
+
+def test_invalid_stored_value_falls_back_to_default():
+    cfg = copy.deepcopy(cfg_mod.DEFAULTS)
+    cfg["widget"] = {"position": "diagonal", "appearance": "neon"}
+    tab = GeneralTab(cfg, lambda: None)
+    assert tab.position.currentText() == "Right edge"
+    assert tab.appearance.currentData() == "paper"
 
 
 def test_widget_settings_show_current_values():

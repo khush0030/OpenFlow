@@ -4,6 +4,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import QComboBox, QVBoxLayout, QWidget
 from ui.widgets import ToggleSwitch
 
+import config as cfg_mod
 from ui.settings_tabs._common import SectionTitle, SettingsRow
 from ui.widget_copy import APPEARANCE_LABELS, POSITION_LABELS
 
@@ -86,7 +87,7 @@ class GeneralTab(QWidget):
         for value, label in APPEARANCE_LABELS.items():
             self.appearance.addItem(label, value)
         self.appearance.setCurrentIndex(
-            max(0, self.appearance.findData(widget_cfg.get("appearance", "paper"))))
+            self._widget_index(self.appearance, "appearance", widget_cfg))
         self.appearance.currentIndexChanged.connect(
             lambda _i: self._on_widget("appearance", self.appearance.currentData()))
         outer.addWidget(SettingsRow(
@@ -99,7 +100,7 @@ class GeneralTab(QWidget):
         for value, label in POSITION_LABELS.items():
             self.position.addItem(label, value)
         self.position.setCurrentIndex(
-            max(0, self.position.findData(widget_cfg.get("position", "right"))))
+            self._widget_index(self.position, "position", widget_cfg))
         self.position.currentIndexChanged.connect(
             lambda _i: self._on_widget("position", self.position.currentData()))
         outer.addWidget(SettingsRow(
@@ -115,4 +116,12 @@ class GeneralTab(QWidget):
     def _on_script(self, v): self.cfg["general"]["hindi_script"] = v; self.save_cb()
     def _on_always_en(self, v): self.cfg["general"]["always_english_output"] = bool(v); self.save_cb()
     def _on_autolaunch(self, v): self.cfg["general"]["auto_launch"] = bool(v); self.save_cb()
-    def _on_widget(self, key, v): self.cfg.setdefault("widget", {})[key] = v; self.save_cb()
+    @staticmethod
+    def _widget_index(combo, key, widget_cfg):
+        i = combo.findData(widget_cfg.get(key))
+        return i if i >= 0 else combo.findData(cfg_mod.DEFAULTS["widget"][key])
+
+    def _on_widget(self, key, v):
+        # config.toml is the source of truth for [widget]: persist at once (validates), then mirror.
+        cfg_mod.save_widget_setting(key, v)
+        self.cfg.setdefault("widget", {})[key] = v

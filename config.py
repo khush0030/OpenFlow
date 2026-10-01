@@ -144,6 +144,15 @@ def save(cfg: dict[str, Any]) -> None:
         tomli_w.dump(cfg, f)
 
 
+def read_widget_settings() -> dict[str, Any]:
+    """Current [widget] table from disk, merged over defaults."""
+    user: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "rb") as f:
+            user = _toml_read.load(f)
+    return {**DEFAULTS["widget"], **user.get("widget", {})}
+
+
 def save_widget_setting(key: str, value: str) -> None:
     """Persist one [widget] setting, leaving the rest of the file as-is."""
     allowed = {"position": WIDGET_POSITIONS, "appearance": WIDGET_APPEARANCES}
