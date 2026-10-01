@@ -90,7 +90,7 @@ from dictionary import Dictionary
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
-from flow_state import CARD, RECORDING, SILENT, FlowController, FlowHooks
+from flow_state import CARD, FlowController, FlowHooks
 from widget_channel import WidgetServer
 
 
@@ -617,10 +617,9 @@ class Daemon:
             # Either another thread (✓/✕ racing the key release) already
             # stopped this recording — only that winner drives the flow — or
             # the tap was too short to capture a single block.
-            if self._flow.state in (RECORDING, SILENT):
+            if self._flow.idle_if_recording():
                 self.state.recording = RecordingState.IDLE
                 self.state.notify()
-                self._flow.done()
             return
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,

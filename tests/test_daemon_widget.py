@@ -528,3 +528,28 @@ def test_second_dictation_waits_for_the_first_and_then_pastes(env):
 
 def test_busy_wait_is_generous():
     assert dm.Daemon._BUSY_WAIT_S >= 60
+
+
+# -- Final review 5: double-stop race --------------------------------------
+
+def test_losing_stop_race_widget_wins(env):
+    """Widget ✓ (holding the flow lock) wins recorder.stop; the hotkey
+    release loses with an empty buffer and must not idle the widget."""
+    import time
+    d = make_daemon()
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.recorder.stop = lambda: np.zeros(0, dtype=np.float32)   # B loses the stop
+    out = {}
+
+    def winner():
+        with d._flow._lock:                 # handle_action holds the RLock
+            time.sleep(0.2)                 # ...recorder.stop, notify...
+            out["run"] = d._flow.processing()
+    a = threading.Thread(target=winner)
+    a.start()
+    time.sleep(0.05)
+    d.on_record_stop()                      # B: empty stop while A holds the lock
+    a.join()
+    assert d._flow.state == PROCESSING
+    assert d._flow.show_card("text", run=out["run"])

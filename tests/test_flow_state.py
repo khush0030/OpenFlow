@@ -281,3 +281,21 @@ def test_a_new_card_gets_a_fresh_sixty_seconds():
     clock.t += 20
     fc.tick()
     assert fc.state == CARD and fc.text == "second"
+
+
+# -- Final review 5: a losing stop only idles a still-recording widget -----
+
+def test_idle_if_recording_only_leaves_recording_states():
+    fc, _, _, clock = make()
+    fc.recording_started()
+    assert fc.idle_if_recording() is True and fc.state == IDLE
+    fc.recording_started()
+    fc.level(0.0)
+    clock.t += 2.1
+    fc.level(0.0)
+    assert fc.state == SILENT
+    assert fc.idle_if_recording() is True and fc.state == IDLE
+    for enter in (fc.processing, lambda: fc.cancelled("A", "T")):
+        enter()
+        before = fc.state
+        assert fc.idle_if_recording() is False and fc.state == before

@@ -125,6 +125,16 @@ class FlowController:
             self._set(IDLE)
             return True
 
+    def idle_if_recording(self) -> bool:
+        """A stop that captured nothing: back to IDLE, but only if the widget
+        still shows the recording. Checked under the lock so a concurrent
+        winning stop (PROCESSING / CANCELLED) is never overwritten."""
+        with self._lock:
+            if self.state not in (RECORDING, SILENT):
+                return False
+            self.done()
+            return True
+
     def show_card(self, text: str, run: Optional[int] = None) -> bool:
         with self._lock:
             if not self._owns(run):
