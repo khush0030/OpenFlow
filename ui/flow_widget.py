@@ -272,15 +272,16 @@ class Tooltip(Surface):
         super().__init__(theme)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.enter_delay_ms = TOOLTIP_DELAY_MS  # the mic grows in first
+        # Not scaled with the widget: at 86% "Dictate" was too small to read
+        # (user decision 2026-10-01), so it's larger than the original 15.5.
         lay = QHBoxLayout(self)
-        px, py = round(M + 16 * S), round(M + 9 * S)
-        lay.setContentsMargins(px, py, px, py)
-        lay.setSpacing(round(9 * S))
+        lay.setContentsMargins(M + 16, M + 9, M + 16, M + 9)
+        lay.setSpacing(9)
         title_label = headline(title, theme)
-        title_label.setFont(serif_font(15.5 * S))
+        title_label.setFont(serif_font(18))
         lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignBaseline)
         self.hint_label = QLabel(hint)
-        self.hint_label.setFont(ui_font(14 * S))
+        self.hint_label.setFont(ui_font(14))
         faded = theme.text[:3] + (140,)
         self.hint_label.setStyleSheet(f"color:{css(faded)};background:transparent;")
         lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignBaseline)

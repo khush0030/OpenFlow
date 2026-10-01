@@ -658,3 +658,13 @@ def test_hands_free_hint_goes_when_the_session_ends(fa):
 def test_held_recording_shows_no_hint(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
     assert fa.popup is None
+
+
+def test_tooltip_text_is_large_enough_to_read(fa):
+    # User decision 2026-10-01: at the widget's 86% scale "Dictate" was too
+    # small to read; the tooltip text doesn't shrink with the widget.
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa.set_hover(True)
+    title = fa.popup.findChildren(fw.QLabel)[0]
+    assert title.font().pointSizeF() >= 18
+    assert fa.popup.hint_label.font().pointSizeF() >= 14
