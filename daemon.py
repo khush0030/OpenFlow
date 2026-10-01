@@ -397,6 +397,7 @@ class Daemon:
         always_en = self.cfg["general"].get("always_english_output", True)
         sr = int(self.cfg["audio"].get("sample_rate", 16000))
         tone_raw = self.state.tone.value == "raw"
+        silence = float(self.cfg["audio"].get("silence_threshold", 0.01))
 
         def _opts(language_code: str | None, mode: str) -> TranscribeOptions:
             if tone_raw and mode == "transcribe":
@@ -405,6 +406,7 @@ class Daemon:
                 language_code=language_code,
                 mode=mode,
                 sample_rate=sr,
+                silence_threshold=silence,
             )
 
         # Global override: collapse every input language to English, except
@@ -929,7 +931,8 @@ class Daemon:
             timings["stt"] = stt_t.get("stt", (t1 - t0) - (encode_s or 0.0))
             print(
                 f"[daemon] sarvam-stt {t1-t0:.2f}s mode={opts.mode} "
-                f"lang={opts.language_code!r}: {raw!r}",
+                f"lang={opts.language_code!r} "
+                f"trimmed={getattr(self.transcriber, 'last_trimmed_s', 0.0):.2f}s: {raw!r}",
                 flush=True,
             )
             if not raw.strip():

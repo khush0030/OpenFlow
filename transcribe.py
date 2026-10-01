@@ -24,6 +24,41 @@ class TranscribeOptions:
     # transcribe | translate | verbatim | translit | codemix
     mode: str = "transcribe"
     sample_rate: int = 16000
+    # RMS below this is silence: leading/trailing silence is trimmed before
+    # upload ([audio].silence_threshold). None leaves the audio as recorded.
+    silence_threshold: float | None = None
+
+
+# Kept on each side of the speech so soft word edges (fricatives, trailing
+# consonants) under the threshold aren't clipped.
+TRIM_PAD_S = 0.25
+_TRIM_FRAME_S = 0.02
+
+
+def trim_silence(
+    audio: np.ndarray,
+    sample_rate: int,
+    threshold: float,
+    pad_s: float = TRIM_PAD_S,
+) -> np.ndarray:
+    """Drop leading/trailing silence (20 ms frames with RMS < threshold),
+    keeping `pad_s` around the speech. Audio with no frame at or above the
+    threshold comes back unchanged: a quiet mic is for STT to judge, and an
+    empty upload would only fail."""
+    frame = max(1, int(sample_rate * _TRIM_FRAME_S))
+    n = audio.size // frame
+    if n == 0 or threshold <= 0:
+        return audio
+    frames = np.asarray(audio[: n * frame], dtype=np.float32).reshape(n, frame)
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    loud = np.flatnonzero(rms >= threshold)
+    if loud.size == 0:
+        return audio
+    pad = int(pad_s * sample_rate)
+    start = max(0, int(loud[0]) * frame - pad)
+    end = audio.size if loud[-1] == n - 1 else (int(loud[-1]) + 1) * frame
+    end = min(audio.size, end + pad)
+    return audio[start:end]
 
 
 def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
@@ -46,6 +81,7 @@ class Transcriber:
         # Seconds spent in the last transcribe call: "encode" (WAV) and
         # "stt" (Sarvam round trips). Read by the daemon for stage timing.
         self.last_timings: dict[str, float] = {}
+        self.last_trimmed_s = 0.0     # silence cut from the last clip
 
     def preload(self) -> None:
         """Resolve the API key early so the first dictation isn't the one that fails."""
@@ -68,13 +104,18 @@ class Transcriber:
         self, audio: np.ndarray, opts: TranscribeOptions | None = None
     ) -> STTResult:
         self.last_timings = {}
+        self.last_trimmed_s = 0.0
         if audio.size == 0:
             return STTResult(transcript="")
         opts = opts or TranscribeOptions()
         key = self._ensure_key()
         sr = opts.sample_rate
-        chunks = _split_audio(audio, sr, STT_MAX_SECONDS)
         t0 = time.monotonic()
+        if opts.silence_threshold is not None:
+            trimmed = trim_silence(audio, sr, opts.silence_threshold)
+            self.last_trimmed_s = (audio.size - trimmed.size) / sr
+            audio = trimmed
+        chunks = _split_audio(audio, sr, STT_MAX_SECONDS)
         wavs = [audio_to_wav_bytes(chunk, sr) for chunk in chunks]
         t1 = time.monotonic()
 
