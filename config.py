@@ -112,6 +112,13 @@ DEFAULTS: dict[str, Any] = {
         # Spoken trigger -> stored text, from snippets.json (snippets.py).
         "enabled": True,
     },
+    "formatting": {
+        # Auto-formatting in every tone but raw (formatting.py): spoken
+        # numbered/bulleted lists, "new line" / "new paragraph", paragraphs
+        # in long dictation, email greeting/sign-off lines. Verbatim keeps
+        # every word and only calls a model when Python can't do the layout.
+        "auto": True,
+    },
 }
 
 WIDGET_POSITIONS = ("left", "bottom", "right")

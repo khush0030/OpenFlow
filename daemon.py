@@ -90,6 +90,8 @@ from llm import make_cleanup_provider
 from sarvam import STT_URL, warm
 from dictionary import Dictionary
 from snippets import Snippets
+import formatting
+from prompts import app_kind as prompts_app_kind
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
@@ -499,6 +501,30 @@ class Daemon:
             "skip_max_words", cfg_mod.DEFAULTS["cleanup"]["skip_max_words"]))
         return tone != "bullets" and 0 < len(text.split()) <= limit
 
+    def _auto_format(self) -> bool:
+        return bool((self.cfg.get("formatting") or {}).get(
+            "auto", cfg_mod.DEFAULTS["formatting"]["auto"]))
+
+    def _format_verbatim(self, text: str, *, email: bool = False) -> str:
+        """Verbatim auto-formatting: Python lays out what it can; a model
+        is called only for what it can't (paragraphs in a long dictation, a
+        list whose end is unclear), and its result is kept only if it has
+        exactly the transcript's words, less the spoken list cues."""
+        local = formatting.format_local(text, email=email)
+        if not local.model_tasks:
+            return local.text
+        src = local.text
+        try:
+            out = self.ai.format_only(src, local.model_tasks)
+        except Exception as e:
+            log_exception("daemon.pipeline", "formatting call failed — pasting unformatted", e)
+            return src
+        if out and formatting.same_words(src, out, formatting.removable_spans(src)):
+            print(f"[daemon] formatted ({', '.join(local.model_tasks)})", flush=True)
+            return out.strip()
+        print("[daemon] formatting changed words — pasting unformatted", flush=True)
+        return src
+
     def _post_process(self, raw: str, tone: ToneMode | None = None,
                       language: LanguageMode | None = None, target=None,
                       *, skip_trivial: bool = True) -> str:
@@ -547,9 +573,21 @@ class Daemon:
             except Exception as e:
                 log_exception("daemon.pipeline", "transliterate failed", e)
                 return done(corrected)
-        if m_tone in ("raw", "verbatim"):
+        if m_tone == "raw":
+            return done(corrected)   # raw is never formatted
+        # Auto-formatting (formatting.py): before the short-transcript skip,
+        # so structure always gets laid out.
+        email = False
+        structure = None
+        if self._auto_format():
+            if formatting.has_email_parts(corrected):
+                email = prompts_app_kind(self._context_app(target)) == "email"
+            structure = formatting.detect(corrected, email=email)
+        if m_tone == "verbatim":
+            if structure:
+                return done(self._format_verbatim(corrected, email=email))
             return done(corrected)
-        if skip_trivial and self._trivial(corrected, m_tone):
+        if not structure and skip_trivial and self._trivial(corrected, m_tone):
             print(f"[daemon] {len(corrected.split())}-word transcript — "
                   "skipping cleanup", flush=True)
             return done(corrected)
@@ -558,6 +596,11 @@ class Daemon:
         if self._inject_glossary():
             lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
             glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
+        extra = {}
+        if structure:
+            # Spoken line breaks are applied here, not left to the model.
+            corrected = formatting.apply_commands(corrected)
+            extra["format_notes"] = formatting.notes(structure)
         try:
             return done(self.ai.cleanup(
                 corrected,
@@ -566,6 +609,7 @@ class Daemon:
                 language=m_lang,
                 glossary=glossary,
                 examples=self._style_examples(),
+                **extra,
             ))
         except Exception as e:
             log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
@@ -786,6 +830,8 @@ class Daemon:
             self.cfg["apps"] = ch.apps         # per-app tones / context hints
         if ch.snippets is not None:
             self.cfg["snippets"] = ch.snippets
+        if ch.formatting is not None:
+            self.cfg["formatting"] = ch.formatting   # read per dictation
         # Only a changed config value moves the daemon's tone/language, so a
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:

@@ -167,6 +167,21 @@ def detect(text: str, *, email: bool = False) -> Structure:
     return s
 
 
+def notes(s: Structure) -> list[str]:
+    """Prompt notes (prompts.FORMAT_NOTES) for a cleanup tone's model call."""
+    from prompts import FORMAT_NOTES
+    out = []
+    if s.spoken_list is not None:
+        out.append(FORMAT_NOTES[s.spoken_list.kind])
+    elif s.long and not s.commands:
+        out.append(FORMAT_NOTES["paragraphs"])
+    if s.commands:
+        out.append(FORMAT_NOTES["breaks"])
+    if s.email:
+        out.append(FORMAT_NOTES["email"])
+    return out
+
+
 @dataclass
 class Local:
     text: str          # the deterministic result
