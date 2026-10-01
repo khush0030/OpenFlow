@@ -35,7 +35,8 @@ def _install_file_logger() -> None:
     aren't real fds). We monkey-patch the builtin print to also write to file.
     Each line is timestamped; the file rotates at 5MB.
     """
-    log_path = Path(os.path.expanduser("~/.openflow")) / "openflow.log"
+    import openflow_logger  # one source for the log path (tests redirect it)
+    log_path = Path(openflow_logger._MAIN_LOG)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     _rotate_log(log_path)
 

@@ -6,7 +6,19 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import tempfile
+from pathlib import Path
+
 import pytest
+
+import openflow_logger
+
+# Log into a throwaway dir, never the user's ~/.openflow/openflow.log: tests
+# log fake errors ("nope", "device gone") that would read like real failures.
+_TEST_LOG_DIR = Path(tempfile.mkdtemp(prefix="openflow-test-logs-"))
+openflow_logger._LOG_DIR = _TEST_LOG_DIR
+openflow_logger._MAIN_LOG = _TEST_LOG_DIR / "openflow.log"
+openflow_logger._ERROR_LOG = _TEST_LOG_DIR / "errors.log"
 
 import login_item
 import sounds
