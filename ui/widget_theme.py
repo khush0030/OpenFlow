@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 FONT_UI = "Geist"
 FONT_SERIF = "Fraunces"
-ACCENT = (184, 73, 44, 255)          # #B8492C terracotta
+ACCENT = (229, 64, 47, 255)          # #E5402F bright red (widget only; brand terracotta stays in ui/tokens.py)
 APPEARANCES = ("paper", "ink", "auto")
 
 RGBA = tuple[int, int, int, int]

@@ -43,7 +43,7 @@ Set from the right-click menu (§5) or Settings. Stored as `[widget] appearance`
 | Hairline border | `#E8E2D9` | `rgba(250,247,242,.10)` |
 | Solid button (Copy, Undo, Mic settings) | ink `#1A1814` / paper text | paper `#FAF7F2` / ink text |
 | Secondary button (✕) | `#EFEAE1` / ink | `#3D3832` / paper |
-| Accent (idle handle, ✓, timers, pulse, Dictate hover) | `#B8492C` | `#B8492C` |
+| Accent (idle handle, ✓, timers, pulse, Dictate hover) | `#E5402F` | `#E5402F` |
 | Shadow | `0 10 28 rgba(60,40,25,.18)` + `0 1 2 rgba(60,40,25,.10)` | `0 6 18 rgba(60,30,15,.35)` |
 
 ### Typography

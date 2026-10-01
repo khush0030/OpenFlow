@@ -116,3 +116,11 @@ def test_hold_label():
     assert copy.hold_label("cmd_r") == "Hold ⌘ right"
     assert copy.hold_label("alt_r") == "Hold ⌥ right"
     assert copy.hold_label("f5") == "Hold F5"
+
+
+def test_widget_accent_is_the_brighter_red():
+    # User decision 2026-10-01: the widget uses a brighter red than the
+    # brand terracotta so it reads clearly at the screen edge.
+    from ui.widget_theme import ACCENT, PAPER, INK
+    assert ACCENT == (229, 64, 47, 255)  # #E5402F
+    assert PAPER.accent == ACCENT and INK.accent == ACCENT

@@ -404,3 +404,13 @@ def test_overlay_windows_stay_visible_when_openflow_is_not_frontmost():
     w = QWidget()
     fw.make_overlay(w)
     assert w.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+
+
+def test_overlay_windows_have_no_native_shadow():
+    # macOS traces a shadow around a transparent window's painted pixels,
+    # which shows up as a grey ghost outline under our own soft shadow.
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QWidget
+    w = QWidget()
+    fw.make_overlay(w)
+    assert w.windowFlags() & Qt.WindowType.NoDropShadowWindowHint

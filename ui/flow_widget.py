@@ -74,9 +74,12 @@ def serif_font(size: float) -> QFont:
 
 def make_overlay(w: QWidget) -> None:
     """Frameless, always-on-top, never takes focus."""
+    # NoDropShadowWindowHint: we paint our own soft shadow; macOS's native one
+    # traces the transparent window's pixels into a grey ghost outline.
     w.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
                      | Qt.WindowType.WindowStaysOnTopHint
-                     | Qt.WindowType.WindowDoesNotAcceptFocus)
+                     | Qt.WindowType.WindowDoesNotAcceptFocus
+                     | Qt.WindowType.NoDropShadowWindowHint)
     w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
     # Qt.Tool becomes an NSPanel that hides whenever the app is inactive, and
