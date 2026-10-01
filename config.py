@@ -175,6 +175,17 @@ def save(cfg: dict[str, Any]) -> None:
         raise
 
 
+def save_setting(section: str, key: str, value: Any) -> None:
+    """Persist one setting, leaving the rest of the file as-is."""
+    ensure_dirs()
+    user: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "rb") as f:
+            user = _toml_read.load(f)
+    user.setdefault(section, {})[key] = value
+    save(user)
+
+
 def read_widget_settings() -> dict[str, Any]:
     """Current [widget] table from disk, merged over defaults."""
     user: dict[str, Any] = {}

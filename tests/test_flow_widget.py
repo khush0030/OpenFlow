@@ -704,3 +704,67 @@ def test_tooltip_is_red_with_white_text_and_key_chip(fa):
     assert "#ffffff" in title.styleSheet().lower() or "255,255,255" in title.styleSheet().replace(" ", "")
     chip = tip.hint_label.styleSheet().replace(" ", "").lower()
     assert "background:rgba(255,255,255," in chip and "border-radius" in chip
+
+
+# ── right-click menu (user-approved mockup 2026-10-01) ─────────────────────
+def _labels(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def _sub(menu, title):
+    return next(a.menu() for a in menu.actions() if a.text() == title)
+
+
+def _act(menu, text):
+    return next(a for a in menu.actions() if a.text() == text)
+
+
+def test_menu_has_the_approved_items(fa, monkeypatch):
+    monkeypatch.setattr(fw, "input_devices", lambda: ["Mic A", "Mic B"])
+    m = fa.build_menu()
+    assert _labels(m) == ["Hide for 1 hour", "Settings", "Microphone", "Tone",
+                          "Position", "Appearance", "Transcript history",
+                          "Paste last transcript"]
+    assert _labels(_sub(m, "Microphone")) == ["System default", "Mic A", "Mic B"]
+    assert len(_labels(_sub(m, "Tone"))) == 7
+
+
+def test_menu_items_send_actions(fa, monkeypatch):
+    monkeypatch.setattr(fw, "input_devices", lambda: ["Mic A"])
+    m = fa.build_menu()
+    _act(m, "Settings").trigger()
+    assert fa.client.sent[-1] == {"action": "open_settings"}
+    _act(m, "Transcript history").trigger()
+    assert fa.client.sent[-1] == {"action": "open_history"}
+    _act(m, "Paste last transcript").trigger()
+    assert fa.client.sent[-1] == {"action": "paste_last"}
+    _act(_sub(m, "Tone"), "Casual").trigger()
+    assert fa.client.sent[-1] == {"action": "set_tone", "value": "casual"}
+    _act(_sub(m, "Microphone"), "Mic A").trigger()
+    assert fa.client.sent[-1] == {"action": "set_mic", "value": "Mic A"}
+    _act(_sub(m, "Microphone"), "System default").trigger()
+    assert fa.client.sent[-1] == {"action": "set_mic", "value": "default"}
+
+
+def test_menu_ticks_the_current_choices(fa, monkeypatch):
+    monkeypatch.setattr(fw, "input_devices", lambda: ["Mic A", "Mic B"])
+    fa._on_message({"type": "config", "position": "right", "appearance": "paper",
+                    "hold_key": "cmd_r", "tone": "professional", "mic": "Mic B"})
+    m = fa.build_menu()
+    assert _act(_sub(m, "Tone"), "Professional").isChecked()
+    assert not _act(_sub(m, "Tone"), "Casual").isChecked()
+    assert _act(_sub(m, "Microphone"), "Mic B").isChecked()
+    assert _act(_sub(m, "Position"), "Right edge").isChecked()
+
+
+def test_hide_for_an_hour_hides_idle_but_not_recording(fa):
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    assert fa.widget.isVisible()
+    fa.hide_for(60 * 60 * 1000)
+    assert not fa.widget.isVisible()
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget.isVisible()
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    assert not fa.widget.isVisible()
+    fa._unhide()
+    assert fa.widget.isVisible()

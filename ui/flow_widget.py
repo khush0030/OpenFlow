@@ -22,7 +22,7 @@ from PyQt6.QtCore import (QAbstractAnimation, QEasingCurve, QObject, QParallelAn
                           QSequentialAnimationGroup, Qt, QTimer, QUrl, QVariantAnimation,
                           pyqtSignal)
 from PyQt6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QGuiApplication,
-                         QPainter, QPainterPath, QPen)
+                         QIcon, QPainter, QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                              QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                              QVBoxLayout, QWidget)
@@ -177,6 +177,51 @@ def open_mic_settings() -> None:
     for url in MIC_SETTINGS_URLS:
         if QDesktopServices.openUrl(QUrl(url)):
             return
+
+
+# ── right-click menu ─────────────────────────────────────────────────────
+HIDE_MS = 60 * 60 * 1000  # "Hide for 1 hour"
+# 24-unit line icons, as in the approved menu mockup (2026-10-01).
+_MENU_ICONS = {
+    "clock": '<circle cx="12" cy="13" r="7"/><path d="M12 10v3l2 2"/><path d="M5 4L3 6M19 4l2 2"/>',
+    "gear": '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/>',
+    "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>',
+    "tone": '<path d="M5 7h14"/><path d="M5 12h10"/><path d="M5 17h6"/>',
+    "dock": '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 19v-6"/>',
+    "palette": '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16"/>',
+    "list": '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 9h6M9 13h6M9 17h4"/>',
+    "paste": '<rect x="5" y="5" width="12" height="16" rx="2"/><path d="M9 3h4a1 1 0 0 1 1 1v2H8V4a1 1 0 0 1 1-1z"/><path d="M13 13h7M17 10l3 3-3 3"/>',
+    "tick": '<path d="M5 12.5l4.5 4.5L19 7"/>',
+}
+
+
+def menu_icon(name: str | None, rgba, size: int = 18) -> QIcon:
+    """A line icon in the given colour, drawn at 2x for Retina; None = blank
+    (keeps labels aligned in a list where only the current item is ticked)."""
+    pix = QPixmap(size * 2, size * 2)
+    pix.setDevicePixelRatio(2.0)
+    pix.fill(Qt.GlobalColor.transparent)
+    if name is not None:
+        from PyQt6.QtCore import QByteArray
+        from PyQt6.QtSvg import QSvgRenderer
+        r, g, b = rgba[:3]
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+               f'stroke="rgb({r},{g},{b})" stroke-width="1.8" stroke-linecap="round" '
+               f'stroke-linejoin="round">{_MENU_ICONS[name]}</svg>')
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        QSvgRenderer(QByteArray(svg.encode())).render(p, QRectF(0, 0, size, size))
+        p.end()
+    return QIcon(pix)
+
+
+def input_devices() -> list[str]:
+    """Names of the Mac's microphones, as CoreAudio (and so the recorder) knows them."""
+    try:
+        from PyQt6.QtMultimedia import QMediaDevices
+        return [d.description() for d in QMediaDevices.audioInputs()]
+    except Exception:
+        return []
 
 
 # ── pop-ups ───────────────────────────────────────────────────────────────
@@ -898,6 +943,12 @@ class FlowApp(QObject):
         self.position = "right"
         self.appearance = "paper"
         self.hold_key = "cmd_r"
+        self.tone = "verbatim"   # ticks in the right-click menu
+        self.mic = "default"
+        self._hidden = False      # "Hide for 1 hour"
+        self._unhide_timer = QTimer(self)
+        self._unhide_timer.setSingleShot(True)
+        self._unhide_timer.timeout.connect(self._unhide)
         self.state = "idle"
         self.text = ""
         self.hands_free = False
@@ -986,7 +1037,7 @@ class FlowApp(QObject):
                 return  # e.g. the daemon echoing a drop: keep the 220 ms morph
             self._apply_config(m)
             self.relayout(animate=False)
-            self.widget.show_pinned()
+            self._show_widget()
         elif kind == "state":
             self.state = m.get("state", "idle")
             self.text = m.get("text", "")
@@ -995,13 +1046,14 @@ class FlowApp(QObject):
                 return  # don't yank the widget mid-drag; end_drag applies it
             self._apply_state_view()
             self.relayout()
-            self.widget.show_pinned()
+            self._show_widget()
 
     def _config_unchanged(self, m: dict) -> bool:
         pos = m["position"] if m.get("position") in POSITIONS else self.position
         look = m["appearance"] if m.get("appearance") in APPEARANCES else self.appearance
-        return (pos, look, m.get("hold_key") or self.hold_key) == \
-            (self.position, self.appearance, self.hold_key)
+        return (pos, look, m.get("hold_key") or self.hold_key,
+                m.get("tone") or self.tone, m.get("mic") or self.mic) == \
+            (self.position, self.appearance, self.hold_key, self.tone, self.mic)
 
     def _apply_config(self, m: dict) -> None:
         if m.get("position") in POSITIONS:
@@ -1009,6 +1061,8 @@ class FlowApp(QObject):
         if m.get("appearance") in APPEARANCES:
             self.appearance = m["appearance"]
         self.hold_key = m.get("hold_key") or self.hold_key
+        self.tone = m.get("tone") or self.tone
+        self.mic = m.get("mic") or self.mic
         self.theme = resolve(self.appearance, self._system_dark())
         add_shadow(self.widget, self.theme)
         self.widget.sync_shadow()
@@ -1169,34 +1223,88 @@ class FlowApp(QObject):
             zone.deleteLater()
         self.zones.clear()
 
-    # right-click menu
-    def show_menu(self, gpos: QPoint) -> None:
+    # widget visibility ("Hide for 1 hour")
+    def _show_widget(self) -> None:
+        """Show the widget unless it's hidden and there's nothing to show:
+        recordings and results still appear while hidden."""
+        if self._hidden and self.state == "idle":
+            self._close_popup()
+            self.widget.hide()
+        else:
+            self.widget.show_pinned()
+
+    def hide_for(self, ms: int) -> None:
+        self._hidden = True
+        self._unhide_timer.start(ms)
+        self._show_widget()
+
+    def _unhide(self) -> None:
+        self._hidden = False
+        self._unhide_timer.stop()
+        if self.client.connected:
+            self.relayout(animate=False)
+            self._show_widget()
+
+    # right-click menu (user-approved mockup, 2026-10-01)
+    def _style_menu(self, menu: QMenu) -> None:
         th = self.theme
-        menu = QMenu()
         menu.setWindowFlags(menu.windowFlags() | Qt.WindowType.FramelessWindowHint
                             | Qt.WindowType.NoDropShadowWindowHint)
         menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         menu.setStyleSheet(
             f'QMenu{{background:{css(th.surface)};color:{css(th.text)};'
-            f'border:1px solid {css(th.hairline)};border-radius:12px;padding:5px;'
-            f'font-family:"{FONT_UI}";font-size:13px;}}'
-            f'QMenu::item{{padding:6px 22px 6px 10px;border-radius:7px;}}'
+            f'border:1px solid {css(th.hairline)};border-radius:14px;padding:6px;'
+            f'font-family:"{FONT_UI}";font-size:14px;}}'
+            f'QMenu::item{{padding:7px 28px 7px 8px;border-radius:8px;background:transparent;}}'
             f'QMenu::item:selected{{background:{css(th.text[:3] + (15,))};}}'
-            f'QMenu::item:disabled{{color:{css(th.muted)};font-size:11px;font-weight:500;'
-            f'padding:7px 10px 3px;}}'
-            f'QMenu::separator{{height:1px;background:{css(th.hairline)};margin:5px 6px;}}')
+            f'QMenu::icon{{padding-left:8px;}}'
+            f'QMenu::indicator{{width:0;height:0;}}'
+            f'QMenu::separator{{height:1px;background:{css(th.hairline)};margin:5px 8px;}}')
 
-        def section(title: str, kind: str, labels: dict[str, str], current: str) -> None:
-            header = menu.addAction(title)
-            header.setEnabled(False)
-            for value, label in labels.items():
-                act = menu.addAction(f"{label}\t✓" if value == current else label)
-                act.triggered.connect(lambda _=False, k=kind, v=value: self.choose(k, v))
+    def _choice_menu(self, parent: QMenu, title: str, icon: str,
+                     options: list[tuple[str, str]], current: str, on_pick) -> QMenu:
+        """A submenu of choices, the current one ticked in terracotta."""
+        sub = QMenu(title, parent)
+        self._style_menu(sub)
+        sub.setIcon(menu_icon(icon, self.theme.text))
+        tick = menu_icon("tick", self.theme.accent)
+        blank = menu_icon(None, self.theme.text)
+        for value, label in options:
+            act = sub.addAction(tick if value == current else blank, label)
+            act.setCheckable(True)
+            act.setChecked(value == current)
+            act.triggered.connect(lambda _=False, v=value: on_pick(v))
+        parent.addMenu(sub)
+        return sub
 
-        section(copy.MENU_APPEARANCE, "appearance", copy.APPEARANCE_LABELS, self.appearance)
+    def build_menu(self) -> QMenu:
+        menu = QMenu()
+        self._style_menu(menu)
+        ink = self.theme.text
+
+        def item(icon: str, label: str, fn) -> None:
+            menu.addAction(menu_icon(icon, ink), label).triggered.connect(lambda _=False: fn())
+
+        item("clock", copy.MENU_HIDE, lambda: self.hide_for(HIDE_MS))
+        item("gear", copy.MENU_SETTINGS, lambda: self.send("open_settings"))
         menu.addSeparator()
-        section(copy.MENU_POSITION, "position", copy.POSITION_LABELS, self.position)
-        menu.exec(gpos)
+        mics = [("default", copy.MENU_MIC_DEFAULT)] + [(n, n) for n in input_devices()]
+        self._choice_menu(menu, copy.MENU_MIC, "mic", mics, self.mic,
+                          lambda v: self.send("set_mic", v))
+        self._choice_menu(menu, copy.MENU_TONE, "tone", list(copy.TONE_LABELS.items()),
+                          self.tone, lambda v: self.send("set_tone", v))
+        self._choice_menu(menu, copy.MENU_POSITION, "dock", list(copy.POSITION_LABELS.items()),
+                          self.position, lambda v: self.choose("position", v))
+        self._choice_menu(menu, copy.MENU_APPEARANCE, "palette",
+                          list(copy.APPEARANCE_LABELS.items()), self.appearance,
+                          lambda v: self.choose("appearance", v))
+        menu.addSeparator()
+        item("list", copy.MENU_HISTORY, lambda: self.send("open_history"))
+        item("paste", copy.MENU_PASTE_LAST, lambda: self.send("paste_last"))
+        return menu
+
+    def show_menu(self, gpos: QPoint) -> None:
+        self.build_menu().exec(gpos)
 
     def choose(self, kind: str, value: str) -> None:
         if kind == "appearance" and value in APPEARANCES:

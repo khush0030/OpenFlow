@@ -90,6 +90,7 @@ from dictionary import Dictionary
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
+from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, FlowController, FlowHooks
 from widget_channel import WidgetServer
 from control_channel import ControlServer
@@ -525,6 +526,7 @@ class Daemon:
                 rerun=self._rerun,
                 copy_text=set_clipboard,
                 save_setting=self._save_widget_setting,
+                menu_action=self._on_widget_menu,
             ),
             silence_threshold=float(self.cfg["audio"].get("silence_threshold", 0.01)),
         )
@@ -572,7 +574,41 @@ class Daemon:
         return {"type": "config",
                 "position": w.get("position", "right"),
                 "appearance": w.get("appearance", "paper"),
-                "hold_key": self.cfg["hotkeys"].get("record_hold", "")}
+                "hold_key": self.cfg["hotkeys"].get("record_hold", ""),
+                "tone": self.state.tone.value,
+                "mic": (self.cfg.get("audio") or {}).get("device") or "default"}
+
+    def _on_widget_menu(self, action: str, value) -> None:
+        """Right-click menu on the widget. Runs on the widget socket's
+        thread; never raises (a menu click must not take the channel down)."""
+        try:
+            if action == "set_tone":
+                try:
+                    tone = ToneMode(value)
+                except ValueError:
+                    return
+                self.set_tone(tone)
+                self._send_widget(self._widget_config())
+            elif action == "set_mic":
+                device = value or "default"
+                cfg_mod.save_setting("audio", "device", device)
+                self.cfg.setdefault("audio", {})["device"] = device
+                # The recorder opens a fresh stream per take, so the next
+                # recording uses it; None = the system default input.
+                self.recorder.cfg.device = None if device == "default" else device
+                print(f"[daemon] microphone -> {device}", flush=True)
+                self._send_widget(self._widget_config())
+            elif action == "open_settings":
+                spawn_ui("ui.settings")
+            elif action == "open_history":
+                spawn_ui("ui.history")
+            elif action == "paste_last":
+                last = self.history.recent(1)
+                if last and last[0].final.strip():
+                    status = paste(last[0].final, target=capture_front_app() or self._paste_target)
+                    print(f"[daemon] paste last transcript -> {status}", flush=True)
+        except Exception as e:
+            log_exception("daemon.widget", f"widget menu {action!r} failed", e)
 
     def _on_widget_connect(self) -> None:
         print("[daemon] flow widget connected", flush=True)

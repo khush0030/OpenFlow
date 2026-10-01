@@ -399,7 +399,8 @@ def test_external_settings_change_is_pushed(env):
     d._reload_widget_config()
     assert d.cfg["widget"]["appearance"] == "ink"
     assert d._widget.sent[-1] == {"type": "config", "position": "right",
-                                  "appearance": "ink", "hold_key": "cmd_r"}
+                                  "appearance": "ink", "hold_key": "cmd_r",
+                                  "tone": d.state.tone.value, "mic": "default"}
 
 
 @pytest.mark.parametrize("error", [ValueError("bad"), OSError("disk full")])

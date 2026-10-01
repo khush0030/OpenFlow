@@ -34,6 +34,9 @@ _SETTINGS = {
     "set_position": ("position", ("left", "bottom", "right")),
     "set_appearance": ("appearance", ("paper", "ink", "auto")),
 }
+# Right-click menu items that don't depend on the flow state; the daemon
+# handles them (user-approved menu, 2026-10-01).
+MENU_ACTIONS = ("set_tone", "set_mic", "open_settings", "open_history", "paste_last")
 
 
 @dataclass
@@ -45,6 +48,7 @@ class FlowHooks:
     rerun: Callable[[Any, Any, int], None]   # (audio, target, run id)
     copy_text: Callable[[str], None]
     save_setting: Callable[[str, str], None]
+    menu_action: Callable[[str, Any], None] = lambda action, value: None
 
 
 @dataclass
@@ -190,6 +194,10 @@ class FlowController:
     def handle_action(self, msg: dict) -> None:
         action = msg.get("action")
         value = msg.get("value")
+        if action in MENU_ACTIONS:
+            # Outside the lock: pasting or opening a window can take a moment.
+            self._hooks.menu_action(action, value)
+            return
         with self._lock:
             if action == "start":
                 if self.state in (CARD, CANCELLED, ERROR):

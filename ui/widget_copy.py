@@ -13,6 +13,16 @@ CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"
 COPY = "Copy"
 MENU_APPEARANCE = "Appearance"
+MENU_HIDE = "Hide for 1 hour"
+MENU_SETTINGS = "Settings"
+MENU_MIC = "Microphone"
+MENU_MIC_DEFAULT = "System default"
+MENU_TONE = "Tone"
+MENU_HISTORY = "Transcript history"
+MENU_PASTE_LAST = "Paste last transcript"
+TONE_LABELS = {"raw": "Raw", "verbatim": "Verbatim", "casual": "Casual",
+               "professional": "Professional", "email": "Email", "slack": "Slack",
+               "bullets": "Bullet points"}
 MENU_POSITION = "Position"
 
 APPEARANCE_LABELS = {"paper": "Paper", "ink": "Ink", "auto": "Match system"}
