@@ -93,6 +93,7 @@ from autolearn import AutoLearner, Correction, PasteWatch
 from paste import MAX_FIELD_CHARS, ax_field_text, ax_same_element
 from snippets import Snippets
 import formatting
+import screen_context
 from prompts import app_kind as prompts_app_kind
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
@@ -227,6 +228,8 @@ class RunContext:
     keyup_at: float | None = None  # time.monotonic() when recording stopped
     record_s: float | None = None  # key-up -> audio in hand (recorder.stop)
     stream: object = None          # the take's StreamingSession, if streamed
+    # Names on screen at key-down (screen_context.py); in memory only.
+    screen_terms: tuple[str, ...] = ()
 
 
 class _WidgetWatchdog:
@@ -359,6 +362,7 @@ class Daemon:
         print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
+        self._screen_enabled = True   # see _start_screen_capture
         self.dictionary = Dictionary.load()
         self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
         self._autolearner = AutoLearner(cfg_mod.SUGGESTIONS_PATH, cfg_mod.DICT_PATH,
@@ -544,7 +548,8 @@ class Daemon:
 
     def _post_process(self, raw: str, tone: ToneMode | None = None,
                       language: LanguageMode | None = None, target=None,
-                      *, skip_trivial: bool = True) -> str:
+                      *, skip_trivial: bool = True,
+                      screen_terms: tuple[str, ...] = ()) -> str:
         """Dictionary + cleanup for the current modes, or the given ones
         (control `rerun`, which always cleans up: the user asked for it).
         target: the paste target, for the app context."""
@@ -552,6 +557,8 @@ class Daemon:
             return ""
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
+        if screen_terms:
+            corrected = screen_context.correct(corrected, list(screen_terms), threshold)
 
         # Snippets (snippets.py): a dictation that is only a trigger pastes
         # the stored text; otherwise triggers ride through as placeholders
@@ -613,6 +620,9 @@ class Daemon:
         if self._inject_glossary():
             lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
             glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
+        screen_line = screen_context.glossary_line(list(screen_terms))
+        if screen_line:
+            glossary = f"{glossary}\n\n{screen_line}" if glossary else screen_line
         extra = {}
         if structure:
             # Spoken line breaks are applied here, not left to the model.
@@ -654,6 +664,7 @@ class Daemon:
                 flush=True,
             )
         self._open_stream()
+        self._start_screen_capture(remembered)
         self.recorder.start()
         self._warm_up()
         self.state.recording = RecordingState.RECORDING
@@ -697,6 +708,32 @@ class Daemon:
         stream = self._take_stream()
         if stream is not None:
             stream.abort()
+
+    def _start_screen_capture(self, target) -> None:
+        """Key-down: read the names on screen in the background (never
+        delays recording). Only a daemon built by __init__ reads the screen."""
+        self._screen = None
+        if (not getattr(self, "_screen_enabled", False) or target is None
+                or self._edit_pending
+                or not (self.cfg.get("context") or {}).get("screen_names", True)):
+            return
+        try:
+            self._screen = screen_context.Capture(
+                target.pid, getattr(target, "ax_element", None)).start()
+        except Exception as e:
+            print(f"[daemon] screen names skipped: {e}", flush=True)
+
+    def _screen_terms(self) -> tuple[str, ...]:
+        """Key-up: the names if the read finished; never waits. Logs counts
+        and timing only, never the text or the names."""
+        cap, self._screen = getattr(self, "_screen", None), None
+        if cap is None:
+            return ()
+        terms = tuple(cap.terms())
+        ms = f"{cap.elapsed_s * 1000:.0f}ms" if cap.elapsed_s is not None else "-"
+        print(f"[daemon] screen names: {len(terms)} terms ({cap.nodes} nodes, {ms}"
+              + (f", {cap.skipped}" if cap.skipped else "") + ")", flush=True)
+        return terms
 
     def _warm_up(self) -> None:
         """Key-down: open the STT connection (and the cleanup LLM's, when this
@@ -888,6 +925,8 @@ class Daemon:
             self.cfg["snippets"] = ch.snippets
         if ch.formatting is not None:
             self.cfg["formatting"] = ch.formatting   # read per dictation
+        if ch.context is not None:
+            self.cfg["context"] = ch.context         # screen_names, read per dictation
         # Only a changed config value moves the daemon's tone/language, so a
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:
@@ -1044,7 +1083,8 @@ class Daemon:
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
                          selection=getattr(self, "_edit_selection", "") if edit_mode else "",
-                         keyup_at=keyup_at, record_s=record_s, stream=stream)
+                         keyup_at=keyup_at, record_s=record_s, stream=stream,
+                         screen_terms=self._screen_terms())
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
@@ -1252,6 +1292,8 @@ class Daemon:
             if tone != self.state.tone:
                 print(f"[daemon] tone for {getattr(target, 'name', '?')}: {tone.value}", flush=True)
             opts = self._stt_opts(tone)
+            if ctx.screen_terms and not ctx.edit_mode:
+                opts.keyterms = tuple(screen_context.keyterms(list(ctx.screen_terms)))
             try:
                 if ctx.stream is not None:
                     raw = self.transcriber.transcribe(audio, opts, stream=ctx.stream)
@@ -1282,7 +1324,8 @@ class Daemon:
                 instruction = raw.strip()
                 final = self.ai.edit_selection(ctx.selection, instruction)
             else:
-                final = self._post_process(raw, tone=tone, target=target)
+                final = self._post_process(raw, tone=tone, target=target,
+                                           screen_terms=ctx.screen_terms)
 
             t2 = time.monotonic()
             timings["cleanup"] = t2 - t1

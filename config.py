@@ -131,6 +131,14 @@ DEFAULTS: dict[str, Any] = {
         # every word and only calls a model when Python can't do the layout.
         "auto": True,
     },
+    "context": {
+        # Names on screen (screen_context.py): at key-down, read the front
+        # window's visible text over Accessibility and pass the names,
+        # @handles and product terms in it to transcription (Saaras
+        # keyterms), cleanup and a conservative respelling. The text stays
+        # in memory for that one dictation; only the short term list is sent.
+        "screen_names": True,
+    },
 }
 
 WIDGET_POSITIONS = ("left", "bottom", "right")

@@ -38,6 +38,7 @@ class ConfigChanges:
               dictation.
     dictionary: the new [dictionary] table; auto_learn starts / stops the
               post-paste correction watch.
+    context:  the new [context] table (screen_names), read per dictation.
     """
     hotkeys: dict[str, str] | None = None
     sounds: dict[str, Any] | None = None
@@ -50,12 +51,13 @@ class ConfigChanges:
     cleanup: dict[str, Any] | None = None
     formatting: dict[str, Any] | None = None
     dictionary: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
 
     def __bool__(self) -> bool:
         return any(v is not None for v in (self.hotkeys, self.sounds, self.tone,
                                            self.language, self.general, self.widget,
                                            self.apps, self.snippets, self.cleanup,
-                                           self.formatting, self.dictionary))
+                                           self.formatting, self.dictionary, self.context))
 
 
 def _section(cfg: dict, name: str) -> dict:
@@ -104,6 +106,8 @@ def plan_changes(old: dict, new: dict) -> ConfigChanges:
         out["formatting"] = dict(_section(new, "formatting"))
     if _section(old, "dictionary") != _section(new, "dictionary"):
         out["dictionary"] = dict(_section(new, "dictionary"))
+    if _section(old, "context") != _section(new, "context"):
+        out["context"] = dict(_section(new, "context"))
 
     return ConfigChanges(**out)
 
