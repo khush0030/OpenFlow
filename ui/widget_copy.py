@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 DICTATE = "Dictate"
+HANDS_FREE = "Hands-free"
 CANT_HEAR = "Can't hear you"
 MIC_SETTINGS = "Mic settings"
 CANCELLED = "Transcript cancelled"
@@ -26,10 +27,20 @@ _KEY_NAMES = {
 }
 
 
-def hold_label(key: str) -> str:
-    """Tooltip hint for the configured hold-to-talk key, e.g. 'Hold ⌘ right'."""
+def key_name(key: str) -> str:
+    """Display name for a configured key, e.g. '⌘ right', 'F5'."""
     k = (key or "").strip().lower()
     name = _KEY_NAMES.get(k)
     if name is None:
         name = k.upper() if k.startswith("f") and k[1:].isdigit() else k
-    return f"Hold {name}"
+    return name
+
+
+def hold_label(key: str) -> str:
+    """Tooltip hint for the configured hold-to-talk key, e.g. 'Hold ⌘ right'."""
+    return f"Hold {key_name(key)}"
+
+
+def finish_label(key: str) -> str:
+    """Hands-free hint after HANDS_FREE, e.g. '· tap ⌘ right to finish'."""
+    return f"· tap {key_name(key)} to finish"

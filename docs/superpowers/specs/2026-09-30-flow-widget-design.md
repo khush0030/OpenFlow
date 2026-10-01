@@ -117,6 +117,20 @@ Pill **26 × 102**: ✕ (20 pt, secondary) · waveform · ✓ (20 pt, terracotta
   shaped louder in the middle. 7 pt gap between the dots and each button.
 - ✓ → finish (same as releasing the hotkey). ✕ or **Esc** → state 7.
 
+#### Hands-free (double-tap)
+A double-tap of the hold key records without holding; the next tap finishes.
+The state message carries `"hands_free": true` (states 3 and 4 only).
+- Same pill, size, ✕ / waveform / ✓ and Esc behaviour as state 3.
+- Marker: a thin accent ring (1.5 pt × scale) 2.5 pt × scale outside the pill,
+  breathing 0.45 ↔ 1 opacity over 1.6 s. It stays through state 4.
+- The first hands-free session after launch shows a tooltip (same surface as
+  Hover's): **"Hands-free"** in Fraunces + **"· tap ⌘ right to finish"** in
+  Geist (key from `record_hold`). It dismisses itself after **2.5 s**, or when
+  the session ends or "Can't hear you" takes its place.
+- Sound: only the hands-free start cue plays. A hold's start tick waits
+  200 ms and is skipped if the key is already up (a tap); a longer first tap's
+  tick is cut off when the hands-free cue starts.
+
 ### 4 · Can't hear you
 Triggered when mic level stays below the silence threshold for **2 s** while
 recording; returns to state 3 as soon as audio arrives.
@@ -206,7 +220,7 @@ to native later is not wasted work.
 ### Messages
 
 Daemon → widget:
-- `{"type":"state","state":"idle|recording|silent|processing|card|cancelled|error","text":"…"}`. `text` is set only for `card`.
+- `{"type":"state","state":"idle|recording|silent|processing|card|cancelled|error","text":"…"}`. `text` is set only for `card`. `"hands_free":true` is added (otherwise omitted) to `recording` / `silent` during a double-tap session.
 - `{"type":"level","rms":0.0}` carries the mic level, sent at ~20 Hz only while recording.
 - `{"type":"config","position":"right","appearance":"paper","hold_key":"cmd_r"}` is sent on connect and whenever `[widget]` changes, including the echo after a drag-to-dock or menu choice.
 - `{"type":"exit"}` is sent when the daemon shuts down.

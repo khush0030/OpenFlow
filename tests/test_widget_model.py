@@ -118,6 +118,12 @@ def test_hold_label():
     assert copy.hold_label("f5") == "Hold F5"
 
 
+def test_hands_free_hint_names_the_key():
+    assert copy.HANDS_FREE == "Hands-free"
+    assert copy.finish_label("cmd_r") == "· tap ⌘ right to finish"
+    assert copy.finish_label("f5") == "· tap F5 to finish"
+
+
 def test_widget_accent_is_the_brighter_red():
     # User decision 2026-10-01: the widget uses a brighter red than the
     # brand terracotta so it reads clearly at the screen edge.

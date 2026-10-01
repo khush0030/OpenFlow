@@ -53,7 +53,13 @@ def level_from_rms(rms: float) -> float:
         return 0.0
     db = 20 * math.log10(rms)
     return max(0.0, min(1.0, (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)))
+def hands_free_breath(t: float) -> float:
+    """Hands-free ring opacity at t seconds: 0.45 → 1 → 0.45 every BREATH_S."""
+    return 0.45 + 0.55 * (0.5 - 0.5 * math.cos(2 * math.pi * t / BREATH_S))
+
+
 RECORDING_VIEWS = ("recording", "silent", "processing")
+HANDS_FREE_VIEWS = ("recording", "silent")  # where a hands-free session shows its ring
 ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
 FOLLOW_MS = 250  # how often the widget checks which display the cursor is on
 # Motion (user decision 2026-10-01): the widget morphs and its contents grow in
@@ -64,6 +70,12 @@ POPUP_IN_MS = 200
 POPUP_OUT_MS = 140
 TOOLTIP_DELAY_MS = 150
 SLIDE = 8  # how far a pop-up slides in from the widget, in points
+# Hands-free (double-tap) sessions: an accent ring around the recording pill
+# breathes 0.45 ↔ 1 opacity, and the first session per run shows a hint.
+BREATH_S = 1.6
+RING_GAP = 2.5    # ring ↔ pill, × S
+RING_WIDTH = 1.5  # × S
+HANDS_FREE_HINT_MS = 2500
 MIC_SETTINGS_URLS = (
     "x-apple.systempreferences:com.apple.Sound-Settings.extension?input",
     "x-apple.systempreferences:com.apple.preference.sound",
@@ -556,6 +568,7 @@ class FlowWidget(QWidget):
         self.setMouseTracking(True)
         self.app = app
         self.view = "idle"
+        self.hands_free = False  # recording without holding the key (double-tap)
         self.target_rect: Rect | None = None
         self.dragging = False
         self._hot: str | None = None
@@ -598,6 +611,15 @@ class FlowWidget(QWidget):
         self.sync_shadow()
         self.update()
 
+    def set_hands_free(self, on: bool) -> None:
+        if on != self.hands_free:
+            self.hands_free = on
+            self._sync_frames()
+            self.update()
+
+    def _ring_on(self) -> bool:
+        return self.hands_free and self.view in HANDS_FREE_VIEWS
+
     def sync_shadow(self) -> None:
         # The idle bar is flat (user decision 2026-10-01); the larger pills
         # keep their soft shadow so they lift off the content beneath.
@@ -606,7 +628,7 @@ class FlowWidget(QWidget):
             eff.setEnabled(self.view != "idle")
 
     def _sync_frames(self) -> None:
-        want = self.isVisible() and self.view in ANIMATED_VIEWS
+        want = self.isVisible() and (self.view in ANIMATED_VIEWS or self._ring_on())
         if want and not self._frames.isActive():
             self._frames.start(33)
         elif not want and self._frames.isActive():
@@ -776,6 +798,18 @@ class FlowWidget(QWidget):
             else:
                 dot = QRectF(c.x() + offset, c.y() - length / 2, thick, length)
             p.drawRoundedRect(dot, thick / 2, thick / 2)
+        if self._ring_on():
+            self._paint_ring(p, r, th, t)
+
+    def _paint_ring(self, p: QPainter, r: QRectF, th: Theme, t: float) -> None:
+        """Hands-free marker: a thin accent ring just outside the pill."""
+        g = RING_GAP * S
+        ring = r.adjusted(-g, -g, g, g)
+        rad = min(ring.width(), ring.height()) / 2
+        p.setOpacity(self.reveal * hands_free_breath(t))
+        p.setPen(QPen(qc(th.accent), RING_WIDTH * S))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(ring, rad, rad)
 
     # mouse
     def mousePressEvent(self, e) -> None:
@@ -853,6 +887,14 @@ class FlowApp(QObject):
         self.hold_key = "cmd_r"
         self.state = "idle"
         self.text = ""
+        self.hands_free = False
+        # The hands-free hint shows for the first session after launch only.
+        self._hint_seen = False
+        self._hint_on = False
+        self._hint_timer = QTimer(self)
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.setInterval(HANDS_FREE_HINT_MS)
+        self._hint_timer.timeout.connect(self._end_hint)
         self.theme = resolve(self.appearance, self._system_dark())
         self.widget = FlowWidget(self)
         self.popup: Surface | None = None
@@ -935,6 +977,7 @@ class FlowApp(QObject):
         elif kind == "state":
             self.state = m.get("state", "idle")
             self.text = m.get("text", "")
+            self._set_hands_free(bool(m.get("hands_free")))
             if self.widget.dragging:
                 return  # don't yank the widget mid-drag; end_drag applies it
             self._apply_state_view()
@@ -965,8 +1008,25 @@ class FlowApp(QObject):
         self._apply_state_view()
 
     def _apply_state_view(self) -> None:
+        self.widget.set_hands_free(self.hands_free)
         if not (self.widget.view == "hover" and self.state == "idle"):
             self.widget.set_view(self.state)
+
+    def _set_hands_free(self, on: bool) -> None:
+        self.hands_free = on
+        if on and not self._hint_seen and self.state == "recording":
+            self._hint_seen = True
+            self._hint_on = True
+            self._hint_timer.start()
+        elif not on or self.state != "recording":
+            # Session over, or "Can't hear you" takes the pop-up slot.
+            self._hint_on = False
+            self._hint_timer.stop()
+
+    def _end_hint(self) -> None:
+        self._hint_on = False
+        if self.widget.target_rect is not None and not self.widget.dragging:
+            self._sync_popup(self.widget.target_rect)
 
     # placement
     def _system_dark(self) -> bool:
@@ -1020,6 +1080,8 @@ class FlowApp(QObject):
         v, th = self.widget.view, self.theme
         if v == "hover":
             return Tooltip(th, copy.DICTATE, copy.hold_label(self.hold_key))
+        if v == "recording" and self._hint_on:
+            return Tooltip(th, copy.HANDS_FREE, copy.finish_label(self.hold_key))
         if v == "silent":
             return Toast(th, copy.CANT_HEAR, copy.MIC_SETTINGS, open_mic_settings)
         if v == "cancelled":
@@ -1037,7 +1099,7 @@ class FlowApp(QObject):
         screen = self._screen or self._screen_rect()
         max_h = popup_max_height(anchor, screen, self.position)
         key = (self.widget.view, self.text, self.theme.name, self.hold_key,
-               self.position, max_h)
+               self.position, max_h, self._hint_on)
         if self.popup is None or key != self._popup_key:
             self._close_popup()
             popup = self._make_popup(max_h)

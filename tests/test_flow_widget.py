@@ -572,3 +572,89 @@ def test_state_change_reveals_new_contents(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
     assert fa.widget.reveal < 1.0
     assert _settles(lambda: fa.widget.reveal == 1.0)
+
+
+# ── hands-free (double-tap) sessions ─────────────────────────────────────
+HANDS_FREE = {"type": "state", "state": "recording", "text": "", "hands_free": True}
+
+
+def _accent_pixels_outside_pill(fa) -> int:
+    w = fa.widget
+    w._anim.stop()
+    w._reveal.stop()
+    w.reveal = 1.0
+    w.setGeometry(fw.window_geometry(w.target_rect))
+    img = w.grab().toImage()
+    pill = fw.shape_rect(w)
+    n = 0
+    for x in range(img.width()):
+        for y in range(img.height()):
+            if pill.contains(QPointF(x + 0.5, y + 0.5)):
+                continue
+            c = img.pixelColor(x, y)
+            if c.alpha() > 60 and c.red() - c.green() > 60:
+                n += 1
+    return n
+
+
+def test_hands_free_keeps_the_recording_pill_and_its_buttons(fa):
+    fa._on_message(HANDS_FREE)
+    w = fa.widget
+    assert w.view == "recording" and w.hands_free
+    assert (w.target_rect.w, w.target_rect.h) == (22, 88)
+    assert w.hit(QPointF(fw.M + 11, fw.M + 11)) == "x"
+    assert w.hit(QPointF(fw.M + 11, fw.M + 88 - 11)) == "ok"
+    w.click(QPointF(fw.M + 11, fw.M + 88 - 11))
+    assert fa.client.sent[-1] == {"action": "confirm"}
+    w.click(QPointF(fw.M + 11, fw.M + 11))
+    assert fa.client.sent[-1] == {"action": "cancel"}
+
+
+def test_hands_free_draws_an_accent_ring_a_held_recording_does_not(fa):
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert not fa.widget.hands_free
+    assert _accent_pixels_outside_pill(fa) == 0
+    fa._on_message(HANDS_FREE)
+    assert _accent_pixels_outside_pill(fa) > 40
+
+
+def test_hands_free_ring_breathes():
+    b = fw.hands_free_breath
+    assert b(0.0) == pytest.approx(0.45)
+    assert b(fw.BREATH_S / 2) == pytest.approx(1.0)
+    assert b(fw.BREATH_S) == pytest.approx(0.45)
+    assert all(0.45 - 1e-9 <= b(t / 10) <= 1.0 + 1e-9 for t in range(40))
+
+
+def test_hands_free_ring_animates_even_while_silent(fa):
+    fa._on_message({**HANDS_FREE, "state": "silent"})
+    assert fa.widget.hands_free and fa.widget._frames.isActive()
+    fa._on_message({"type": "state", "state": "silent", "text": ""})
+    assert not fa.widget.hands_free and not fa.widget._frames.isActive()
+
+
+def test_hands_free_hint_shows_once_and_dismisses_itself(fa):
+    fa._on_message(HANDS_FREE)
+    tip = fa.popup
+    assert isinstance(tip, fw.Tooltip)
+    assert tip.hint_label.text() == "· tap ⌘ right to finish"
+    assert fa._hint_timer.isActive() and fa._hint_timer.interval() == fw.HANDS_FREE_HINT_MS
+    fa._hint_timer.timeout.emit()            # 2.5 s later
+    assert fa.popup is None
+    assert fa.widget.hands_free              # the ring stays for the session
+    fa._on_message({"type": "state", "state": "processing", "text": ""})
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa._on_message(HANDS_FREE)               # the next hands-free session
+    assert fa.popup is None
+
+
+def test_hands_free_hint_goes_when_the_session_ends(fa):
+    fa._on_message(HANDS_FREE)
+    assert isinstance(fa.popup, fw.Tooltip)
+    fa._on_message({"type": "state", "state": "processing", "text": ""})
+    assert fa.popup is None and not fa.widget.hands_free
+
+
+def test_held_recording_shows_no_hint(fa):
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.popup is None
