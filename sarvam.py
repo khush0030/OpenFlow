@@ -110,11 +110,21 @@ def _error_message(resp: httpx.Response) -> str:
 
 _client: httpx.Client | None = None
 
+# How long an idle pooled connection is kept. httpx's default (5s) dropped
+# it between almost every pair of dictations, so each one paid a fresh
+# TCP + TLS handshake. A connection the server has closed in the meantime
+# is detected and replaced before reuse.
+KEEPALIVE_S = 120.0
+
 
 def _http() -> httpx.Client:
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.Client(timeout=25.0)
+        _client = httpx.Client(
+            timeout=25.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                                keepalive_expiry=KEEPALIVE_S),
+        )
     return _client
 
 
