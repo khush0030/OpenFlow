@@ -414,3 +414,16 @@ def test_overlay_windows_have_no_native_shadow():
     w = QWidget()
     fw.make_overlay(w)
     assert w.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+
+
+def test_hover_works_while_another_app_is_active(fa, monkeypatch):
+    # Qt sends no Enter/Move to an inactive app's windows; the relay does.
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa.widget._anim.stop()
+    fa.widget.setGeometry(fw.window_geometry(fa.widget.target_rect))
+    monkeypatch.setattr(fa._hover, "_buttons_down", lambda: False)
+    fa._hover.update(QPointF(fa.widget.frameGeometry().center()))
+    assert fa.widget.view == "hover"
+    assert isinstance(fa.popup, fw.Tooltip)
+    fa._hover.update(QPointF(400, 400))
+    assert fa.widget.view == "idle"

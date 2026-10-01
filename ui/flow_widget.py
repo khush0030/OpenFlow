@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
 from openflow_logger import get_logger, log_exception
 from ui import widget_copy as copy
 from ui.fonts import load_fonts
+from ui.hover_relay import HoverRelay
 from ui.vibrancy import pin_overlay
 from ui.widget_geometry import (DRAG_THRESHOLD, POSITIONS, Rect, clamp_to_screen,
                                 nearest_dock, popup_max_height, popup_rect, widget_rect)
@@ -751,6 +752,11 @@ class FlowApp(QObject):
         self._pending_config: dict | None = None  # config that arrived mid-drag
         self.zones: dict[str, DockZone] = {}
         self._screen: Rect | None = None
+        # OpenFlow is never the active app, so Qt sends no hover events;
+        # the relay feeds them from a global mouse monitor (ui/hover_relay.py).
+        self._hover = HoverRelay(lambda: [w for w in (self.widget, self.popup) if w is not None])
+        if QGuiApplication.platformName() == "cocoa" and not self._hover.install():
+            _log.warning("hover relay unavailable; hover only works while OpenFlow is active")
         # Socket callbacks arrive on a background thread; the signal hops to the UI thread.
         self.message.connect(self._on_message)
         self.client = WidgetClient(
