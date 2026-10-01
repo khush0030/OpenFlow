@@ -278,6 +278,9 @@ def test_frame_timer_runs_only_while_animating(fa):
 
 def test_toast_and_countdown_timers_stop_when_expired():
     t = fw.Toast(PAPER, "Transcript cancelled", "Undo", lambda: None, timer_s=5.0)
+    # Same look as the Dictate tooltip: the widget's red, a white chip button.
+    assert t.fill == fw.qc(PAPER.accent)
+    assert "rgba(255,255,255,0.2)" in t.button.styleSheet()
     assert t._timer.isActive()
     t._t0 -= 6
     t._tick()

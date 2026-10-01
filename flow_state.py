@@ -76,6 +76,9 @@ class FlowController:
         # the mic gave nothing (Mic settings). Only ever set with ERROR.
         self.reason = ""
         self._quiet_since: Optional[float] = None
+        # The mic has picked up speech this take: later quiet is a pause, not
+        # a muted / wrong mic, so "Can't hear you" never shows.
+        self._heard = False
         self._retained: Optional[_Retained] = None
         self._card_expires_at = 0.0
         # Id of the pipeline run that owns PROCESSING. Results passed with
@@ -106,6 +109,7 @@ class FlowController:
         with self._lock:
             self._retained = None
             self._quiet_since = None
+            self._heard = False
             self.hands_free = hands_free
             self._set(RECORDING)
 
@@ -115,11 +119,14 @@ class FlowController:
                 return
             now = self._clock()
             if rms < self._threshold:
+                if self._heard:
+                    return
                 if self._quiet_since is None:
                     self._quiet_since = now
                 if self.state == RECORDING and now - self._quiet_since >= SILENCE_AFTER_S:
                     self._set(SILENT)
             else:
+                self._heard = True
                 self._quiet_since = None
                 if self.state == SILENT:
                     self._set(RECORDING)

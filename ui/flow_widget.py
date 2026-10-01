@@ -341,17 +341,38 @@ class Tooltip(Surface):
         lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
+def chip_button(text: str, on_click) -> QPushButton:
+    """A soft white chip on the widget's red, like the Dictate tooltip's key."""
+    b = QPushButton(text)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    b.setFont(ui_font(14, 600))
+    b.setStyleSheet(
+        "QPushButton{background:rgba(255,255,255,0.2);color:#FFFFFF;"
+        "border:none;border-radius:13px;padding:4px 12px;}"
+        "QPushButton:hover{background:rgba(255,255,255,0.32);}"
+        "QPushButton:pressed{background:rgba(255,255,255,0.42);}")
+    b.clicked.connect(on_click)
+    return b
+
+
 class Toast(Surface):
-    """Headline + one solid button; optional shrinking timer line on the bottom edge."""
+    """Headline + one chip button, styled like the Tooltip (white Fraunces on
+    the widget's red, user feedback 2026-10-02: the cream toast with a black
+    button didn't match); optional shrinking timer line on the bottom edge."""
 
     def __init__(self, theme: Theme, title: str, button_text: str, on_button,
                  timer_s: float | None = None) -> None:
         super().__init__(theme)
+        self.fill = qc(theme.accent)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(M + 16, M + 5, M + 5, M + 5)
-        lay.setSpacing(14)
-        lay.addWidget(headline(title, theme), 0, Qt.AlignmentFlag.AlignVCenter)
-        self.button = solid_button(button_text, theme, on_button)
+        lay.setContentsMargins(M + 16, M + 6, M + 7, M + 6)
+        lay.setSpacing(10)
+        title_label = headline(title, theme)
+        title_label.setFont(serif_font(18))
+        title_label.setStyleSheet("color:#FFFFFF;background:transparent;")
+        lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.button = chip_button(button_text, on_button)
         lay.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
         self._timer_s = timer_s
         self._t0 = time.monotonic()
@@ -372,8 +393,7 @@ class Toast(Surface):
         clip = QPainterPath()
         clip.addRoundedRect(r, r.height() / 2, r.height() / 2)
         p.setClipPath(clip)
-        bar = qc(self.theme.accent)
-        bar.setAlpha(190)
+        bar = QColor(255, 255, 255, 150)
         p.fillRect(QRectF(r.left(), r.bottom() - 2, r.width() * frac, 2), bar)
 
 
