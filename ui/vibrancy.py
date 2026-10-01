@@ -31,6 +31,21 @@ _BLEND_BEHIND_WINDOW = 1
 _STATE_ACTIVE = 1
 
 
+def _native() -> bool:
+    """True only when Qt runs on Cocoa, where winId() is an NSView*.
+
+    Under other platforms (offscreen in tests) winId() is not an NSView, and
+    casting it with objc_object segfaults the whole process.
+    """
+    if sys.platform != "darwin":
+        return False
+    try:
+        from PyQt6.QtGui import QGuiApplication
+    except Exception:
+        return False
+    return QGuiApplication.platformName() == "cocoa"
+
+
 def apply_vibrancy(widget, material: Material = "hud") -> bool:
     """Attach an NSVisualEffectView to widget's NSWindow content view.
 
@@ -38,7 +53,7 @@ def apply_vibrancy(widget, material: Material = "hud") -> bool:
     the widget's native window can't be resolved. Failure is non-fatal:
     callers should keep a sensible solid background as fallback.
     """
-    if sys.platform != "darwin":
+    if not _native():
         return False
     try:
         from AppKit import NSVisualEffectView, NSMakeRect  # type: ignore
@@ -103,7 +118,7 @@ def pin_overlay(widget) -> bool:
     macOS hides whenever a fullscreen app is frontmost — the overlay only
     exists on the desktop Space. Call AFTER the widget is shown.
     """
-    if sys.platform != "darwin":
+    if not _native():
         return False
     try:
         import objc  # type: ignore
