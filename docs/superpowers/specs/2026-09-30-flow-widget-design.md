@@ -185,20 +185,26 @@ to native later is not wasted work.
 | `widget_channel.py` (new) | Unix socket `~/.openflow/widget.sock`, newline-delimited JSON, used by both sides. Replaces `/tmp/openflow-pill.*.json` polling and the `pgrep` watchdog (the widget process holds a live connection; a closed socket = dead peer). |
 | `ui/flow_widget.py` (replaces `recording_pill.py`) | Renders states 1–7, tooltip, menu, drag-to-dock, placement; sends user actions. No business logic. |
 | `ui/widget_theme.py` (new) | Paper/Ink tokens + Match-system detection; extends `ui/tokens.py`. |
-| `daemon.py` | Owns the state machine (§4), audio retention for Undo/Retry, silence detection, emits events, handles actions. |
-| `paste.py` | Adds `focused_editable()` (§7) and a focus watcher for click-to-paste. |
+| `flow_state.py` (new) | The state machine (§4): Undo/Retry audio retention and windows, silence detection, run ownership, and a 60 s backstop that clears an unattended card. |
+| `daemon.py` | Feeds the state machine events, handles widget actions, and runs the widget pump: mic level, timers, config-change pushes, widget respawn, and click-to-paste (polls `focused_editable()` at 4 Hz only while a card is showing and the widget is connected). |
+| `paste.py` | Adds `focused_editable()` (§7). It has no watcher of its own; the daemon pump polls it. |
 | `config.py` | New `[widget]` section: `position = "right"`, `appearance = "paper"`. |
 
 `ui/result_overlay.py` is deleted (never launched today).
 
 ### Messages
 
-Daemon → widget: `{"type":"state","state":"idle|recording|silent|processing|card|cancelled|error","rms":0.0,"elapsed":0.0,"text":"…","hold_key":"cmd_r"}`
-plus `{"type":"config","position":"right","appearance":"paper"}`.
+Daemon → widget:
+- `{"type":"state","state":"idle|recording|silent|processing|card|cancelled|error","text":"…"}`. `text` is set only for `card`.
+- `{"type":"level","rms":0.0}` carries the mic level, sent at ~20 Hz only while recording.
+- `{"type":"config","position":"right","appearance":"paper","hold_key":"cmd_r"}` is sent on connect and whenever `[widget]` changes, including the echo after a drag-to-dock or menu choice.
+- `{"type":"exit"}` is sent when the daemon shuts down.
 
-Widget → daemon: `{"action":"start|confirm|cancel|undo|retry|copy|dismiss|set_position|set_appearance","value":"…"}`.
+There is no `elapsed` field. The widget times its own animations and the card countdown.
 
-RMS is sent at ~20 Hz only while recording; otherwise messages are event-driven.
+Widget → daemon: `{"action":"start|confirm|cancel|undo|retry|copy|dismiss|set_position|set_appearance","value":"…"}`. Only the `set_*` actions carry `value`.
+
+Apart from `level`, messages are event-driven.
 
 ## 7. "Is there a text box?" detection
 
