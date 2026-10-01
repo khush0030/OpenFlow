@@ -55,6 +55,9 @@ DEFAULTS: dict[str, Any] = {
         "sample_rate": 16000,
         "device": "default",
         "silence_threshold": 0.01,
+        # A take whose loudest 50 ms stays under this is not sent to
+        # transcription: the widget says it can't hear you (audio.py).
+        "no_input_rms": 0.002,
     },
     "sarvam": {
         "stt_model": "saaras:v4",

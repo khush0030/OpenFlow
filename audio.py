@@ -83,6 +83,31 @@ class Recorder:
         return self._recording
 
 
+# Below this the loudest moment of a take is still silence (float32 full
+# scale = 1.0): a muted mic or a wrong / idle input reads 0 to ~1e-4, a
+# quiet room's noise floor typically stays under 1e-3, and speech peaks
+# well above 0.01. Overridable as [audio] no_input_rms.
+NO_INPUT_RMS = 0.002
+
+
+def loudest_rms(audio: np.ndarray, sample_rate: int = 16000,
+                window_s: float = 0.05) -> float:
+    """RMS of the loudest `window_s` stretch: one spoken word is enough to
+    lift it, however long the rest of the take is silent."""
+    if audio.size == 0:
+        return 0.0
+    n = max(1, int(sample_rate * window_s))
+    x = np.asarray(audio, dtype=np.float32).reshape(-1)
+    usable = (x.size // n) * n
+    frames = x[:usable].reshape(-1, n) if usable else x.reshape(1, -1)
+    return float(np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1)).max())
+
+
+def heard_nothing(audio: np.ndarray, sample_rate: int = 16000,
+                  threshold: float = NO_INPUT_RMS) -> bool:
+    return loudest_rms(audio, sample_rate) < threshold
+
+
 def save_wav(path: str, audio: np.ndarray, sample_rate: int = 16000) -> None:
     from scipy.io import wavfile
     pcm = np.clip(audio, -1.0, 1.0)

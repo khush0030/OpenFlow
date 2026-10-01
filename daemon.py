@@ -73,7 +73,7 @@ import config as cfg_mod
 from openflow_logger import get_logger, log_exception
 
 _log = get_logger("daemon")
-from audio import Recorder, RecorderConfig
+from audio import NO_INPUT_RMS, Recorder, RecorderConfig, heard_nothing, loudest_rms
 from transcribe import Transcriber, TranscribeOptions
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
@@ -900,6 +900,16 @@ class Daemon:
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             self._flow.done()
+            return
+        no_input = float(self.cfg["audio"].get("no_input_rms", NO_INPUT_RMS))
+        if heard_nothing(audio, sr, no_input):
+            # Muted or wrong input: transcribing silence only costs a round
+            # trip (or comes back as a made-up phrase). Say so instead.
+            print(f"[daemon] can't hear you: loudest {loudest_rms(audio, sr):.5f} < "
+                  f"{no_input} — mic muted or wrong input? Not transcribing.", flush=True)
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            self._flow.no_audio(audio, ctx)
             return
         self._edit_pending = False
         # Mark processing before the worker starts so the widget never
