@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QComboBox, QVBoxLayout, QWidget
 from ui.widgets import ToggleSwitch
 
 import config as cfg_mod
+from openflow_logger import log_exception
 from ui.settings_tabs._common import SectionTitle, SettingsRow
 from ui.widget_copy import APPEARANCE_LABELS, POSITION_LABELS
 
@@ -123,5 +124,10 @@ class GeneralTab(QWidget):
 
     def _on_widget(self, key, v):
         # config.toml is the source of truth for [widget]: persist at once (validates), then mirror.
-        cfg_mod.save_widget_setting(key, v)
+        # Never raise here: PyQt6 aborts the process on an unhandled slot exception.
+        try:
+            cfg_mod.save_widget_setting(key, v)
+        except (OSError, ValueError) as e:  # ValueError covers TOMLDecodeError
+            log_exception("settings", f"could not save widget {key}={v!r}", e)
+            return
         self.cfg.setdefault("widget", {})[key] = v

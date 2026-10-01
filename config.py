@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -139,9 +140,28 @@ def load() -> dict[str, Any]:
 
 
 def save(cfg: dict[str, Any]) -> None:
+    """Write atomically: a temp file in the same directory, fsynced, then
+    renamed over config.toml. Readers in other processes (Settings, the
+    daemon's watcher) see the old file or the new one, never a truncated one."""
     ensure_dirs()
-    with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump(cfg, f)
+    path = CONFIG_PATH
+    fd, tmp = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(cfg, f)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, path.stat().st_mode & 0o777)  # keep the file's mode
+        except FileNotFoundError:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def read_widget_settings() -> dict[str, Any]:

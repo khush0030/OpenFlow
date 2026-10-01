@@ -66,3 +66,25 @@ def test_widget_settings_show_current_values():
     assert tab.appearance.currentData() == "auto"
     assert tab.position.currentData() == "bottom"
     assert tab.appearance.currentText() == "Match system"
+
+
+# -- Final review 3: a failed widget save must not abort Settings -----------
+
+@pytest.mark.parametrize("bad", ["oserror", "toml"])
+def test_widget_save_failure_is_logged_not_raised(tmp_config, monkeypatch, bad):
+    import ui.settings_tabs.general as general
+    cfg = cfg_mod.load()
+    tab = GeneralTab(cfg, lambda: None)
+    logged = []
+    monkeypatch.setattr(general, "log_exception",
+                        lambda comp, msg="", exc=None: logged.append((comp, exc)),
+                        raising=False)
+    if bad == "oserror":
+        def fail(key, value):
+            raise PermissionError("read-only")
+        monkeypatch.setattr(cfg_mod, "save_widget_setting", fail)
+    else:
+        cfg_mod.CONFIG_PATH.write_text("this is = = not toml")
+    tab._on_widget("position", "left")          # must not raise
+    assert len(logged) == 1
+    assert cfg["widget"]["position"] == "right"  # mirror skipped
