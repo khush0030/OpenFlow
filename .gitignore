@@ -50,3 +50,4 @@ test.wav
 # Brainstorm mockups
 .superpowers/
 .playwright-mcp/
+!assets/sounds/*.wav

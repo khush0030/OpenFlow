@@ -1,14 +1,14 @@
-"""NSSound wrapper for OpenFlow's record start/end ticks.
+"""NSSound wrapper for OpenFlow's dictation cues.
 
-Two short cues:
-  start.wav — 60ms soft tick on hotkey press
-  end.wav   — 80ms softer tick on hotkey release
+Four short cues, rendered by scripts/make_sounds.py into assets/sounds/:
+  start  — rising tick when recording starts
+  stop   — falling tick when recording stops and transcription begins
+  cancel — muted thud when a recording is cancelled (✕ / Esc)
+  error  — low double tone when transcription fails
 
-Both bundled in assets/sounds/. We use NSSound via pyobjc instead of
-pulling in a heavy audio library — the recorder already owns sounddevice
-and we don't want to compete for the output device.
-
-Toggleable via config [general].play_sounds.
+We use NSSound via pyobjc instead of pulling in a heavy audio library — the
+recorder already owns sounddevice and we don't want to compete for the
+output device. Configured from config [sounds] enabled / volume.
 """
 from __future__ import annotations
 
@@ -16,13 +16,39 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-Cue = Literal["start", "end"]
+Cue = Literal["start", "stop", "cancel", "error"]
+CUES: tuple[Cue, ...] = ("start", "stop", "cancel", "error")
+DEFAULT_VOLUME = 0.35
 
 _ASSETS = Path(__file__).resolve().parent / "assets" / "sounds"
+
+_RECORDING = ("recording", "silent")
 
 # Cached NSSound instances; NSSound caches its own decoded buffer so the
 # second play is sub-millisecond.
 _cache: dict[Cue, object] = {}
+_enabled = True
+_volume = DEFAULT_VOLUME
+
+
+def configure(enabled: bool, volume: float) -> None:
+    global _enabled, _volume
+    _enabled = bool(enabled)
+    _volume = min(1.0, max(0.0, float(volume)))
+
+
+def cue_for_transition(prev: str, new: str) -> Cue | None:
+    """Which cue a widget state change plays. Undo/Retry re-runs kept audio,
+    so cancelled/error → processing is silent (no recording just ended)."""
+    if new == "recording" and prev not in _RECORDING:
+        return "start"
+    if new == "processing" and prev in _RECORDING:
+        return "stop"
+    if new == "cancelled" and prev in _RECORDING:
+        return "cancel"
+    if new == "error" and prev != "error":
+        return "error"
+    return None
 
 
 def _load(cue: Cue):
@@ -34,7 +60,6 @@ def _load(cue: Cue):
 
     path = _ASSETS / f"{cue}.wav"
     if not path.exists():
-        # Missing sound files aren't fatal — first run before assets land.
         return None
 
     try:
@@ -52,13 +77,15 @@ def _load(cue: Cue):
 
 
 def play(cue: Cue) -> None:
-    """Fire-and-forget play. No-op on failure (never raises)."""
+    """Fire-and-forget play. No-op when disabled or on failure (never raises)."""
+    if not _enabled:
+        return
     snd = _load(cue)
     if snd is None:
         return
     try:
-        # Stop first to allow rapid re-trigger
-        snd.stop()
+        snd.stop()  # allow rapid re-trigger
+        snd.setVolume_(_volume)
         snd.play()
     except Exception as e:
         print(f"[sounds] play({cue}) failed: {e}", flush=True)

@@ -69,6 +69,11 @@ DEFAULTS: dict[str, Any] = {
         "position": "right",
         "appearance": "paper",
     },
+    "sounds": {
+        # Soft cues on start / stop / cancel / error (sounds.py).
+        "enabled": True,
+        "volume": 0.35,
+    },
 }
 
 WIDGET_POSITIONS = ("left", "bottom", "right")

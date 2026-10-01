@@ -553,3 +553,26 @@ def test_losing_stop_race_widget_wins(env):
     a.join()
     assert d._flow.state == PROCESSING
     assert d._flow.show_card("text", run=out["run"])
+
+
+# -- dictation sounds ---------------------------------------------------------
+
+def test_flow_transitions_play_dictation_cues(env, monkeypatch):
+    played = []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    d = make_daemon()
+    d._flow.recording_started()          # idle → recording
+    run = d._flow.processing()           # recording → processing
+    d._flow.failed(AUDIO, None, run=run)  # processing → error
+    d._flow.recording_started()          # error → recording
+    d._flow.cancelled(AUDIO, None)       # recording → cancelled
+    assert played == ["start", "stop", "error", "start", "cancel"]
+
+
+def test_level_and_config_messages_play_nothing(env, monkeypatch):
+    played = []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    d = make_daemon()
+    d._send_widget({"type": "level", "rms": 0.5})
+    d._send_widget({"type": "config", "position": "left"})
+    assert played == []

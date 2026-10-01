@@ -92,6 +92,7 @@ from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from flow_state import CARD, FlowController, FlowHooks
 from widget_channel import WidgetServer
+import sounds
 
 
 # Cycling order — preserve pre-refactor sequence.
@@ -286,6 +287,9 @@ class Daemon:
 
     def __init__(self) -> None:
         self.cfg = cfg_mod.load()
+        snd = self.cfg.get("sounds") or {}
+        sounds.configure(enabled=snd.get("enabled", True),
+                         volume=snd.get("volume", sounds.DEFAULT_VOLUME))
         self.state = DaemonState(
             tone=_coerce_tone(self.cfg["general"]["default_tone"]),
             language=_coerce_lang(self.cfg["general"]["default_language"]),
@@ -515,6 +519,14 @@ class Daemon:
         threading.Thread(target=self._widget_pump, name="widget-pump", daemon=True).start()
 
     def _send_widget(self, msg: dict) -> None:
+        if msg.get("type") == "state":
+            # Every way of starting/stopping (hotkey, widget, Esc) passes
+            # through here, so the cues stay consistent.
+            new = msg.get("state", "idle")
+            cue = sounds.cue_for_transition(getattr(self, "_last_flow_state", "idle"), new)
+            self._last_flow_state = new
+            if cue:
+                sounds.play(cue)
         server = getattr(self, "_widget", None)
         if server is not None:
             server.send(msg)
