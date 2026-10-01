@@ -37,6 +37,19 @@ from widget_channel import SOCKET_PATH, WidgetClient
 
 M = 16  # transparent margin around every shape: room for the drop shadow
 DOT_SHAPE = (0.45, 0.7, 0.9, 1.0, 0.85, 0.65, 0.4)
+# Mic loudness window for the waveform, in dBFS: below FLOOR the dots stay
+# flat, at CEIL they're full height. Speech into a laptop mic sits around
+# 0.005–0.05 RMS (-46…-26 dB), so a linear scale barely moved for soft voices.
+LEVEL_FLOOR_DB = -55.0
+LEVEL_CEIL_DB = -18.0
+
+
+def level_from_rms(rms: float) -> float:
+    """Mic RMS (0–1) → waveform level (0–1) on a loudness (dB) scale."""
+    if rms <= 0:
+        return 0.0
+    db = 20 * math.log10(rms)
+    return max(0.0, min(1.0, (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)))
 RECORDING_VIEWS = ("recording", "silent", "processing")
 ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
 MIC_SETTINGS_URLS = (
@@ -536,7 +549,10 @@ class FlowWidget(QWidget):
         self.app.cancel_drag()  # a hidden widget never gets its mouse release
 
     def set_level(self, rms: float) -> None:
-        self._level = 0.6 * self._level + 0.4 * max(0.0, min(1.0, rms * 9))
+        # Rise fast so a syllable shows at once; fall slowly so it reads.
+        target = level_from_rms(rms)
+        k = 0.7 if target > self._level else 0.25
+        self._level += k * (target - self._level)
 
     def move_to(self, rect: Rect, animate: bool) -> None:
         self.target_rect = rect
@@ -659,7 +675,7 @@ class FlowWidget(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         for i, shape in enumerate(DOT_SHAPE):
             if self.view == "recording":
-                length = 3 + self._level * 10 * shape * (0.75 + 0.25 * math.sin(t * 16 + i))
+                length = 3 + self._level * 13 * shape * (0.8 + 0.2 * math.sin(t * 16 + i))
                 alpha = 255
             elif self.view == "silent":
                 length, alpha = 3.0, 77

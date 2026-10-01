@@ -445,3 +445,27 @@ def test_idle_handle_is_flat_no_shadow_or_rim(fa):
     assert whites == []
     fa._on_message({"type": "state", "state": "recording", "text": ""})
     assert fa.widget.graphicsEffect() is not None and fa.widget.graphicsEffect().isEnabled()
+
+
+def test_voice_level_uses_a_loudness_scale_so_soft_speech_shows():
+    lv = fw.level_from_rms
+    assert lv(0.0) == 0.0 and lv(0.001) == 0.0          # silence stays flat
+    assert 0.2 < lv(0.005) < 0.35                       # soft speech is visible
+    assert 0.35 < lv(0.01) < 0.5
+    assert 0.7 < lv(0.05) < 0.85                        # normal speech
+    assert lv(0.2) == 1.0                               # loud speech tops out
+    xs = [0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128]
+    assert [lv(a) for a in xs] == sorted(lv(a) for a in xs)
+
+
+def test_level_rises_fast_and_falls_slowly(fa):
+    w = fa.widget
+    w._level = 0.0
+    w.set_level(0.05)
+    up = w._level
+    assert up > 0.4                      # one frame of speech already shows
+    for _ in range(3):
+        w.set_level(0.05)
+    peak = w._level
+    w.set_level(0.0)
+    assert peak * 0.6 < w._level < peak  # decays, but not instantly
