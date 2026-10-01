@@ -34,7 +34,7 @@ hidden += ["ui.hub", "ui.hub.app", "ui.hub.page", "ui.hub.style", "ui.hub.contex
            "ui.hub.pages",
            *(f"ui.hub.pages.{p}" for p in
              ("home", "insights", "history", "dictionary", "tones", "settings", "help")),
-           "PyQt6.QtSvg", "PyQt6.QtNetwork"]
+           "ui.first_run", "PyQt6.QtSvg", "PyQt6.QtNetwork"]
 
 datas = []
 datas += collect_data_files("certifi")

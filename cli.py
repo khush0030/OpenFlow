@@ -97,9 +97,9 @@ def _cmd_flow_widget(args: argparse.Namespace) -> int:
 
 
 def _cmd_onboarding(args: argparse.Namespace) -> int:
-    """Launch onboarding wizard."""
-    from ui.onboarding import main as on_main
-    return on_main()
+    """Open the first-run window (permissions, Sarvam key, try it)."""
+    from ui.first_run import main as first_run_main
+    return first_run_main()
 
 
 def _cmd_history(args: argparse.Namespace) -> int:
@@ -215,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="home, insights, history, dictionary, tones, settings or help")
     hb.set_defaults(func=_cmd_hub)
     sub.add_parser("flow-widget", help="(internal) launch the on-screen flow widget").set_defaults(func=_cmd_flow_widget)
-    sub.add_parser("onboarding", help="run first-time onboarding wizard").set_defaults(func=_cmd_onboarding)
+    sub.add_parser("onboarding", help="open the first-run setup window").set_defaults(func=_cmd_onboarding)
 
     h = sub.add_parser("history")
     h.add_argument("--limit", type=int, default=20)

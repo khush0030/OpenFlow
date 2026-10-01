@@ -256,21 +256,25 @@ class _WidgetWatchdog:
 
 _EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
 _ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
+_FIRST_RUN_CONFIG = Path(os.path.expanduser("~/.openflow/config.toml"))
+_FIRST_RUN_POLL_S = 0.25
 
 
 def _maybe_run_onboarding_blocking() -> None:
-    """If first run, launch onboarding subprocess and wait for it to finish.
+    """If first run, open the first-run window (ui/first_run.py) and wait.
 
-    Daemon won't proceed to tray init until onboarding writes the flag,
-    so the user always sees the wizard before any hotkey works.
+    Daemon won't proceed to tray init until setup is done, so the user
+    always sees permissions and the Sarvam key before any hotkey works.
+    The window writes the flag when its last step ("Try it") opens; the
+    daemon starts then, with the window still up, so the user's first
+    dictation lands in its box. Closing the window early also returns.
 
     "First run" = onboarded.flag missing AND no existing config.toml
     (existing users from before the wizard shipped get auto-flagged).
     """
     if _ONBOARD_FLAG.exists():
         return
-    cfg_path = Path(os.path.expanduser("~/.openflow/config.toml"))
-    if cfg_path.exists():
+    if _FIRST_RUN_CONFIG.exists():
         # Existing user predating the wizard — mark them onboarded silently.
         try:
             _ONBOARD_FLAG.parent.mkdir(parents=True, exist_ok=True)
@@ -278,16 +282,19 @@ def _maybe_run_onboarding_blocking() -> None:
         except Exception:
             pass
         return
-    print("[daemon] first run — launching onboarding wizard", flush=True)
+    print("[daemon] first run — opening the first-run window", flush=True)
     try:
         if getattr(sys, "frozen", False):
             cmd = [sys.executable, "onboarding"]
         else:
             repo_root = Path(__file__).resolve().parent
-            cmd = [sys.executable, str(repo_root / "ui" / "onboarding.py")]
-        subprocess.run(cmd, env=_child_env())
+            cmd = [sys.executable, str(repo_root / "ui" / "first_run.py")]
+        proc = subprocess.Popen(cmd, env=_child_env())
     except Exception as e:
-        print(f"[daemon] onboarding launch failed: {e}", flush=True)
+        print(f"[daemon] first-run launch failed: {e}", flush=True)
+        return
+    while proc.poll() is None and not _ONBOARD_FLAG.exists():
+        time.sleep(_FIRST_RUN_POLL_S)
 
 
 def _spawn_edit_overlay(selection: str) -> None:

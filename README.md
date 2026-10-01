@@ -117,11 +117,13 @@ python -m openflow
 OpenFlow auto-loads `.env` from the project root **and** `~/.openflow/.env`.
 Real environment vars win over `.env`. Both files are gitignored.
 
-### First-run wizard (Phase 7)
+### First run
 
-On first launch the PyQt6 onboarding wizard walks you through API key entry,
-mic/accessibility permission grants, and hotkey selection. Re-open it anytime
-from the tray icon → **Settings**.
+On first launch a four-step window (`ui/first_run.py`) walks you through
+Welcome, the three macOS permissions (Microphone, Accessibility, Input
+Monitoring; the rows update as you grant them), your Sarvam key (tested
+against Sarvam, then saved to the Keychain) and a box to try dictating into.
+Re-open it with `python -m openflow onboarding`.
 
 ### macOS permissions
 
@@ -256,7 +258,7 @@ OpenFlow/
 │   ├── install_macos.sh   # copy .app + register LaunchAgent
 │   └── build_dmg.sh       # pyinstaller → codesign → notarize → .dmg
 ├── assets/                # logos, tray icons, fonts, sounds
-├── ui/                    # PyQt6 windows (hub/ main window, onboarding, flow widget, …)
+├── ui/                    # PyQt6 windows (hub/ main window, first run, flow widget, …)
 ├── tests/                 # unit + smoke tests
 ├── daemon.py              # orchestrator
 ├── audio.py               # sounddevice recorder
