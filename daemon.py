@@ -83,8 +83,8 @@ if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
 else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet
     _ESCAPE_CHORD = "escape"
-from paste import (paste, get_active_app, capture_paste_target, focused_editable,
-                   set_clipboard)
+from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
+                   focused_editable, set_clipboard)
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
 from history import History
@@ -92,6 +92,7 @@ from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from flow_state import CARD, FlowController, FlowHooks
 from widget_channel import WidgetServer
+from control_channel import ControlServer
 import sounds
 
 
@@ -438,14 +439,17 @@ class Daemon:
             return bool(d["inject_into_cleanup"])
         return True
 
-    def _post_process(self, raw: str) -> str:
+    def _post_process(self, raw: str, tone: ToneMode | None = None,
+                      language: LanguageMode | None = None) -> str:
+        """Dictionary + cleanup for the current modes, or the given ones
+        (control `rerun`)."""
         if not raw:
             return ""
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
 
-        m_lang = self.state.language.value
-        m_tone = self.state.tone.value
+        m_lang = (language or self.state.language).value
+        m_tone = (tone or self.state.tone).value
 
         # Saaras already punctuates in transcribe/codemix/translate. Skip the
         # chat hop for raw/verbatim — that's the default path and the lag.
@@ -804,6 +808,113 @@ class Daemon:
             self.state.recording = RecordingState.IDLE
             self.state.notify()
 
+    # -- Control socket (app hub, spec 2026-10-01 §3) ----------------------
+    # Each connection is served on its own control-conn thread (never the
+    # main/NSApp thread). paste_text and rerun run there synchronously, as
+    # the pipeline worker already pastes and calls Sarvam off the main thread.
+
+    _CUE_GAP_S = 0.6  # play_cues: let the start tick finish before the stop
+
+    def _control_handlers(self) -> dict:
+        return {
+            "status": self._ctl_status,
+            "set_tone": self._ctl_set_tone,
+            "set_language": self._ctl_set_language,
+            "paste_text": self._ctl_paste_text,
+            "rerun": self._ctl_rerun,
+            "play_cues": self._ctl_play_cues,
+            "check": self._ctl_check,
+        }
+
+    def _start_control_channel(self) -> None:
+        self._control = ControlServer(self._control_handlers())
+        try:
+            self._control.start()
+        except OSError as e:
+            # Another daemon owns the socket: dictation works, the hub's
+            # live controls show "OpenFlow isn't running" for this one.
+            log_exception("daemon.control", "control socket unavailable — hub controls disabled", e)
+            self._control = None
+
+    def _stop_control_channel(self) -> None:
+        server, self._control = getattr(self, "_control", None), None
+        if server is not None:
+            server.stop()
+
+    @staticmethod
+    def _parse_tone(value) -> ToneMode:
+        try:
+            return ToneMode(value)
+        except ValueError:
+            raise ValueError(f"unknown tone: {value!r}") from None
+
+    @staticmethod
+    def _parse_language(value) -> LanguageMode:
+        try:
+            return LanguageMode(value)
+        except ValueError:
+            raise ValueError(f"unknown language: {value!r}") from None
+
+    def _ctl_status(self) -> dict:
+        import permissions
+
+        def probe(name: str):
+            fn = getattr(permissions, name, None)
+            if fn is None:
+                return None
+            try:
+                return fn()
+            except Exception:
+                return None
+        return {
+            "state": self.state.recording.value,
+            "tone": self.state.tone.value,
+            "language": self.state.language.value,
+            "hold_key": self.cfg["hotkeys"].get("record_hold", ""),
+            "paused": bool(self.state.paused),
+            "permissions": {
+                "accessibility": probe("accessibility_trusted"),
+                "input_monitoring": probe("input_monitoring_granted"),
+                "microphone": probe("microphone_granted"),
+            },
+        }
+
+    def _ctl_set_tone(self, value: str) -> dict:
+        self.set_tone(self._parse_tone(value))   # same path as the tray menu
+        return {"tone": self.state.tone.value}
+
+    def _ctl_set_language(self, value: str) -> dict:
+        self.set_language(self._parse_language(value))
+        return {"language": self.state.language.value}
+
+    def _ctl_paste_text(self, text: str) -> dict:
+        """History "Paste again". The hub is frontmost and is our own app,
+        so capture_front_app() is None and the text goes to the app the last
+        dictation pasted into."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("nothing to paste")
+        target = capture_front_app() or self._paste_target
+        status = paste(text, target=target)
+        print(f"[daemon] control paste_text → {status}", flush=True)
+        return {"status": status}
+
+    def _ctl_rerun(self, raw: str, tone: str, language: str | None = None) -> dict:
+        """Cleanup (not STT) of stored raw text in another tone. No paste.
+        Like the pipeline, a failed chat call falls back to the corrected raw text."""
+        t = self._parse_tone(tone)
+        lang = self._parse_language(language) if language else self.state.language
+        text = self._post_process(raw or "", tone=t, language=lang)
+        return {"text": text, "tone": t.value, "language": lang.value}
+
+    def _ctl_play_cues(self) -> dict:
+        sounds.play("start")
+        _after(self._CUE_GAP_S, lambda: sounds.play("stop"))
+        return {"cues": ["start", "stop"]}
+
+    def _ctl_check(self) -> dict:
+        import doctor
+        return {"checks": doctor.run_checks()}
+
     # -- Lifecycle -------------------------------------------------------
 
     def _build_hold(self, hold_key: str) -> HoldToTalk:
@@ -841,6 +952,8 @@ class Daemon:
         # Flow widget: open the socket, then the pump spawns the widget
         # process and keeps it alive.
         self._start_widget_channel()
+        # Hub -> daemon commands (status, Paste again, Run it again as…).
+        self._start_control_channel()
 
         sv = self.cfg.get("sarvam") or {}
         print(
@@ -878,6 +991,7 @@ class Daemon:
             self._send_widget({"type": "exit"})
             if self._widget is not None:
                 self._widget.stop()
+            self._stop_control_channel()
             if self._hold:
                 self._hold.stop()
             if self._chords:
