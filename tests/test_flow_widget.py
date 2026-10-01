@@ -691,3 +691,16 @@ def test_tooltip_text_is_large_enough_to_read(fa):
     title = fa.popup.findChildren(fw.QLabel)[0]
     assert title.font().pointSizeF() >= 18
     assert fa.popup.hint_label.font().pointSizeF() >= 14
+
+
+def test_tooltip_is_red_with_white_text_and_key_chip(fa):
+    # User decision 2026-10-01 (tooltip option C): red like the mic button,
+    # white "Dictate", the shortcut in a soft white chip.
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa.set_hover(True)
+    tip = fa.popup
+    assert tip.fill == fw.qc(fa.theme.accent)
+    title = tip.findChildren(fw.QLabel)[0]
+    assert "#ffffff" in title.styleSheet().lower() or "255,255,255" in title.styleSheet().replace(" ", "")
+    chip = tip.hint_label.styleSheet().replace(" ", "").lower()
+    assert "background:rgba(255,255,255," in chip and "border-radius" in chip

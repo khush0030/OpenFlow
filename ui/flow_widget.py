@@ -188,6 +188,7 @@ class Surface(QWidget):
         make_overlay(self)
         self.theme = theme
         self.radius = radius  # None = fully rounded pill
+        self.fill: QColor | None = None  # None = the theme's surface, with a hairline
         self.target_rect: Rect | None = None
         self.enter_delay_ms = 0
         self._motion: QAbstractAnimation | None = None
@@ -256,8 +257,12 @@ class Surface(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = shape_rect(self)
         rad = r.height() / 2 if self.radius is None else self.radius
-        p.setPen(QPen(qc(self.theme.hairline), 1))
-        p.setBrush(qc(self.theme.surface))
+        if self.fill is None:
+            p.setPen(QPen(qc(self.theme.hairline), 1))
+            p.setBrush(qc(self.theme.surface))
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self.fill)
         p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
         self.paint_extra(p, r)
 
@@ -266,7 +271,7 @@ class Surface(QWidget):
 
 
 class Tooltip(Surface):
-    """'Dictate' (Fraunces) + key hint (Geist, 55%), sharing a baseline."""
+    """'Dictate' (Fraunces) + the key in a chip, white on the widget's red."""
 
     def __init__(self, theme: Theme, title: str, hint: str) -> None:
         super().__init__(theme)
@@ -274,17 +279,21 @@ class Tooltip(Surface):
         self.enter_delay_ms = TOOLTIP_DELAY_MS  # the mic grows in first
         # Not scaled with the widget: at 86% "Dictate" was too small to read
         # (user decision 2026-10-01), so it's larger than the original 15.5.
+        # Red like the mic button, the key in a soft chip (option C, user
+        # decision 2026-10-01).
+        self.fill = qc(theme.accent)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(M + 16, M + 9, M + 16, M + 9)
+        lay.setContentsMargins(M + 16, M + 8, M + 8, M + 8)
         lay.setSpacing(9)
         title_label = headline(title, theme)
         title_label.setFont(serif_font(18))
-        lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignBaseline)
+        title_label.setStyleSheet("color:#FFFFFF;background:transparent;")
+        lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.hint_label = QLabel(hint)
-        self.hint_label.setFont(ui_font(14))
-        faded = theme.text[:3] + (140,)
-        self.hint_label.setStyleSheet(f"color:{css(faded)};background:transparent;")
-        lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignBaseline)
+        self.hint_label.setFont(ui_font(14, 500))
+        self.hint_label.setStyleSheet("color:#FFFFFF;background:rgba(255,255,255,0.2);"
+                                      "border-radius:12px;padding:3px 10px;")
+        lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
 class Toast(Surface):

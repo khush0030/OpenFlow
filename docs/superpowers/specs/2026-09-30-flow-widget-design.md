@@ -110,9 +110,11 @@ Only one control: the **Dictate** pill, **36 × 56**, surface colour, mic icon
   stroked stand and stem (24-unit glyph: capsule 8 × 13 at (8, 2.5), radius 4;
   stand a half circle of radius 7.5 from (4.5, 11); stem (12, 18.5) → (12, 21.5);
   strokes 2.2 with round caps). Theme text colour, white on the hot pill.
-- Tooltip (follows the mic, see Motion): **"Dictate"** in Fraunces +
-  **"Hold ⌘ right"** in Geist 14 pt at 55% opacity, sharing a baseline. The key
-  text reflects the configured `record_hold` key.
+- Tooltip (follows the mic, see Motion): a red pill (widget accent) with
+  **"Dictate"** in white Fraunces 18 pt and **"Hold ⌘ right"** in white Geist
+  14 pt medium inside a soft white chip (20% white). Not scaled with the widget.
+  The key text reflects the configured `record_hold` key (user decision
+  2026-10-01, option C).
 - Click → start recording (click-to-start; finish with ✓ or cancel with ✕).
   Holding the hotkey still works as today.
 

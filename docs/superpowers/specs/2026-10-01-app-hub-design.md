@@ -147,7 +147,8 @@ Try it (a text box to dictate into). Same trigger as today.
 
 ## 7. Icons (user picks 2026-10-01)
 
-- **Menu bar: A, "Mark"**: open ring (dashed arc) + centre dot, 18 pt,
+- **Menu bar: A, "Mark"**: open ring (dashed arc) + centre dot, drawn on an
+  18 pt grid centred in rumps' fixed 20 pt image (PNGs 20/40 px),
   template image (adapts to light/dark). Recording: dot terracotta (non-template
   variant). Processing: smaller dot. Drawn as PNG @1x/@2x into `assets/tray/`
   (replaces the PIL placeholder).
@@ -155,6 +156,8 @@ Try it (a text box to dictate into). Same trigger as today.
   from B to A, 2026-10-01).
 - **Hover mic: B, "Solid mic"**: filled capsule body, stroked stand and stem
   (same 24-unit glyph proportions as today), white on the red hot pill.
+- **Tooltip: C**: red (widget accent) with white Fraunces "Dictate" and the
+  key in a soft white chip; the hands-free hint uses the same style.
 
 ## 8. Error handling
 
