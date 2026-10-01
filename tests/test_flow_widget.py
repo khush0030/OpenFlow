@@ -394,3 +394,13 @@ def test_activation_policy_failure_is_logged(wlog, monkeypatch):
     monkeypatch.setitem(sys.modules, "AppKit", None)   # import fails
     fw._accessory_app()
     assert "activation-policy" in wlog.text()
+
+
+def test_overlay_windows_stay_visible_when_openflow_is_not_frontmost():
+    # Qt.Tool maps to an NSPanel that hides whenever its app is inactive, and
+    # OpenFlow is never the active app, so every overlay must opt out.
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QWidget
+    w = QWidget()
+    fw.make_overlay(w)
+    assert w.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)

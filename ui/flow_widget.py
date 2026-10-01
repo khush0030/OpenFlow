@@ -79,6 +79,9 @@ def make_overlay(w: QWidget) -> None:
                      | Qt.WindowType.WindowDoesNotAcceptFocus)
     w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    # Qt.Tool becomes an NSPanel that hides whenever the app is inactive, and
+    # OpenFlow is never the active app: without this nothing ever shows.
+    w.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
 
 
 # The widget runs under LaunchServices in the app bundle, where print()
