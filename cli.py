@@ -65,7 +65,7 @@ def _cmd_dict_edit(args: argparse.Namespace) -> int:
 def _cmd_edit_overlay(args: argparse.Namespace) -> int:
     """Launch the edit-mode overlay (subprocess target for daemon)."""
     from ui.edit_overlay import main as overlay_main
-    sys.argv = [sys.argv[0], args.selection]
+    sys.argv = [sys.argv[0]]
     return overlay_main()
 
 
@@ -205,7 +205,6 @@ def build_parser() -> argparse.ArgumentParser:
     dsub.add_parser("edit", help="open the Dictionary page").set_defaults(func=_cmd_dict_edit)
 
     eo = sub.add_parser("edit-overlay", help="(internal) launch edit-mode overlay")
-    eo.add_argument("selection", help="path to selection text file")
     eo.set_defaults(func=_cmd_edit_overlay)
 
     sub.add_parser("settings", help="open the Settings page").set_defaults(func=_cmd_settings)
