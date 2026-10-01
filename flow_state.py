@@ -38,7 +38,7 @@ class FlowHooks:
     start_recording: Callable[[], None]
     finish_recording: Callable[[], None]
     cancel_recording: Callable[[], None]
-    rerun: Callable[[Any, Any], None]
+    rerun: Callable[[Any, Any, int], None]   # (audio, target, run id)
     copy_text: Callable[[str], None]
     save_setting: Callable[[str, str], None]
 
@@ -63,6 +63,9 @@ class FlowController:
         self.text = ""
         self._quiet_since: Optional[float] = None
         self._retained: Optional[_Retained] = None
+        # Id of the pipeline run that owns PROCESSING. Results passed with
+        # run= only land if that run still owns the widget.
+        self.run = 0
 
     # -- outgoing ---------------------------------------------------------
     def message(self) -> dict:
@@ -97,28 +100,45 @@ class FlowController:
                 if self.state == SILENT:
                     self._set(RECORDING)
 
-    def processing(self) -> None:
+    def processing(self) -> int:
+        """Enter PROCESSING for a new pipeline run; returns its run id."""
         with self._lock:
+            self.run += 1
             self._set(PROCESSING)
+            return self.run
 
-    def done(self) -> None:
+    def _owns(self, run: Optional[int]) -> bool:
+        """run=None: unconditional (today's behaviour). Otherwise only the
+        run that still owns PROCESSING may change the state."""
+        return run is None or (self.state == PROCESSING and run == self.run)
+
+    def done(self, run: Optional[int] = None) -> bool:
         with self._lock:
+            if not self._owns(run):
+                return False
             self._retained = None
             self._set(IDLE)
+            return True
 
-    def show_card(self, text: str) -> None:
+    def show_card(self, text: str, run: Optional[int] = None) -> bool:
         with self._lock:
+            if not self._owns(run):
+                return False
             self._set(CARD, text)
+            return True
 
     def cancelled(self, audio: Any, target: Any) -> None:
         with self._lock:
             self._retained = _Retained(audio, target, self._clock() + UNDO_WINDOW_S)
             self._set(CANCELLED)
 
-    def failed(self, audio: Any, target: Any) -> None:
+    def failed(self, audio: Any, target: Any, run: Optional[int] = None) -> bool:
         with self._lock:
+            if not self._owns(run):
+                return False
             self._retained = _Retained(audio, target, self._clock() + RETRY_WINDOW_S)
             self._set(ERROR)
+            return True
 
     def dismiss(self) -> None:
         with self._lock:
@@ -159,9 +179,9 @@ class FlowController:
                 if kept is None:
                     self.done()
                 else:
-                    self._set(PROCESSING)
+                    run = self.processing()
                     try:
-                        self._hooks.rerun(kept.audio, kept.target)
+                        self._hooks.rerun(kept.audio, kept.target, run)
                     except Exception as e:
                         log_exception("flow_state", "rerun hook failed — offering Retry", e)
                         # Keep the audio so Retry works again.

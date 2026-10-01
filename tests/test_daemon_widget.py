@@ -17,9 +17,11 @@ import pytest
 
 import daemon as dm
 import flow_state
-from flow_state import CARD, ERROR, IDLE, PROCESSING, RECORDING
+from flow_state import CANCELLED, CARD, ERROR, IDLE, PROCESSING, RECORDING
 from state import DaemonState, LanguageMode, ToneMode
 from transcribe import TranscribeOptions
+
+AUDIO = np.zeros(16000, dtype=np.float32)
 
 
 class FakeServer:
@@ -46,9 +48,16 @@ class FakeServer:
 
 
 class FakeRecorder:
-    def __init__(self):
+    def __init__(self, audio=None):
         self.is_recording = False
         self.current_rms = 0.0
+        self.audio = AUDIO if audio is None else audio
+
+    def stop(self):
+        if not self.is_recording:
+            return np.zeros(0, dtype=np.float32)
+        self.is_recording = False
+        return self.audio
 
 
 class FakeTranscriber:
@@ -115,11 +124,15 @@ def make_daemon():
     d._paste_target = None
     d._stt_opts = lambda: TranscribeOptions(language_code="en-IN", mode="transcribe")
     d._post_process = lambda raw: raw
+    d._edit_selection = ""
+    # Run pipelines inline so Undo/Retry sequences are deterministic.
+    d._start_worker = d._pipeline_worker
     d._build_flow_widget()
     return d
 
 
-AUDIO = np.zeros(16000, dtype=np.float32)
+def work(d, run, ctx=None):
+    d._pipeline_worker(AUDIO, ctx or dm.RunContext(target=None), run)
 
 
 # -- A: a live recording owns the widget --------------------------------------
@@ -127,10 +140,10 @@ AUDIO = np.zeros(16000, dtype=np.float32)
 def test_stale_card_result_sets_clipboard_but_leaves_recording_widget(env, monkeypatch):
     monkeypatch.setattr(dm, "focused_editable", lambda target=None: False)
     d = make_daemon()
-    d._flow.processing()
+    run = d._flow.processing()
     d.recorder.is_recording = True          # user started a new dictation
     d._flow.recording_started()
-    d._pipeline_worker(AUDIO, False)
+    work(d, run)
     assert d._flow.state == RECORDING
     assert ("clipboard", "hello world") in env["calls"]
 
@@ -138,36 +151,200 @@ def test_stale_card_result_sets_clipboard_but_leaves_recording_widget(env, monke
 def test_stale_failure_does_not_flip_live_recording_to_error(env):
     d = make_daemon()
     d.transcriber = FakeTranscriber(error=RuntimeError("sarvam down"))
+    run = d._flow.processing()
     d.recorder.is_recording = True
     d._flow.recording_started()
-    d._pipeline_worker(AUDIO, False)
+    work(d, run)
     assert d._flow.state == RECORDING
 
 
 def test_stale_paste_result_does_not_idle_live_recording(env):
     d = make_daemon()
+    run = d._flow.processing()
     d.recorder.is_recording = True
     d._flow.recording_started()
-    d._pipeline_worker(AUDIO, False)
+    work(d, run)
     assert ("paste", "hello world") in env["calls"]
     assert d._flow.state == RECORDING
 
 
 def test_fresh_results_still_drive_the_widget(env, monkeypatch):
     d = make_daemon()
-    d._flow.processing()
-    d._pipeline_worker(AUDIO, False)
+    work(d, d._flow.processing())
     assert d._flow.state == IDLE
 
     monkeypatch.setattr(dm, "focused_editable", lambda target=None: False)
-    d._flow.processing()
-    d._pipeline_worker(AUDIO, False)
+    work(d, d._flow.processing())
     assert d._flow.state == CARD and d._flow.text == "hello world"
 
     d.transcriber = FakeTranscriber(error=RuntimeError("sarvam down"))
-    d._flow.processing()
-    d._pipeline_worker(AUDIO, False)
+    work(d, d._flow.processing())
     assert d._flow.state == ERROR
+
+
+# -- Review fix 1: an older result never wipes a newer Undo window ---------
+
+def test_older_pipeline_result_keeps_newer_undo_window(env, monkeypatch):
+    for editable in (None, False):           # paste path and card path
+        monkeypatch.setattr(dm, "focused_editable", lambda target=None, e=editable: e)
+        d = make_daemon()
+        run1 = d._flow.processing()          # dictation 1 in flight
+        d.recorder.is_recording = True       # dictation 2 recorded...
+        d._flow.recording_started()
+        d._cancel_recording()                # ...and cancelled with X
+        assert d._flow.state == CANCELLED
+        work(d, run1)                        # dictation 1 finishes
+        assert d._flow.state == CANCELLED
+        d._flow.handle_action({"action": "undo"})
+        assert d._flow.state == (IDLE if editable is None else CARD)  # undo ran dictation 2
+
+
+# -- Review fix 2: Undo/Retry while another pipeline is busy ---------------
+
+def test_undo_while_busy_offers_retry_and_keeps_audio(env):
+    d = make_daemon()
+    d._busy.acquire()                        # dictation 1 still in flight
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d._cancel_recording()
+    d._flow.handle_action({"action": "undo"})
+    assert d._flow.state == ERROR            # not stuck in PROCESSING
+    assert not any(c[0] == "paste" for c in env["calls"])
+    d._busy.release()
+    d._flow.handle_action({"action": "retry"})
+    assert ("paste", "hello world") in env["calls"]
+    assert d._flow.state == IDLE
+
+
+# -- Review fix 3: Retry keeps edit mode and the original selection -------
+
+class FakeAI:
+    def __init__(self):
+        self.calls = []
+
+    def edit_selection(self, sel, instruction):
+        self.calls.append((sel, instruction))
+        return "EDITED"
+
+
+def test_edit_mode_retry_reruns_as_edit_on_original_selection(env, monkeypatch):
+    monkeypatch.setattr(dm, "_signal_edit_overlay", lambda status: None)
+    d = make_daemon()
+    d.ai = FakeAI()
+    d._edit_selection = "Selected text"
+    d._edit_pending = True
+    d.transcriber = FakeTranscriber(error=RuntimeError("down"))
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.on_record_stop()                       # edit-mode dictation fails
+    assert d._flow.state == ERROR
+    d._edit_selection = "something else"     # a later edit arm must not leak in
+    d.transcriber = FakeTranscriber(result="make it formal")
+    d._flow.handle_action({"action": "retry"})
+    assert d.ai.calls == [("Selected text", "make it formal")]
+    assert ("paste", "EDITED") in env["calls"]
+    assert ("paste", "make it formal") not in env["calls"]
+
+
+def test_cancelled_edit_does_not_arm_next_hold(env, monkeypatch):
+    monkeypatch.setattr(dm, "_signal_edit_overlay", lambda status: None)
+    d = make_daemon()
+    d.ai = FakeAI()
+    d._edit_selection = "Selected text"
+    d._edit_pending = True
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d._cancel_recording()
+    assert d._edit_pending is False
+    d._flow.handle_action({"action": "undo"})   # Undo still runs it as an edit
+    assert d.ai.calls == [("Selected text", "hello world")]
+
+
+# -- Review minors -----------------------------------------------------------
+
+def test_losing_stop_does_not_drive_the_widget(env):
+    d = make_daemon()
+    d._flow.processing()                     # the winner already stopped
+    d.recorder = FakeRecorder(audio=np.zeros(0, dtype=np.float32))
+    d.recorder.is_recording = True
+    d.on_record_stop()
+    assert d._flow.state == PROCESSING
+
+
+def test_empty_tap_still_returns_widget_to_idle(env):
+    d = make_daemon()
+    d.recorder = FakeRecorder(audio=np.zeros(0, dtype=np.float32))
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.on_record_stop()                       # no block captured at all
+    assert d._flow.state == IDLE
+
+
+def test_failed_paste_shows_card(env, monkeypatch):
+    monkeypatch.setattr(dm, "paste", lambda text, target=None: "failed")
+    d = make_daemon()
+    work(d, d._flow.processing())
+    assert d._flow.state == CARD and d._flow.text == "hello world"
+
+
+# -- Review fix 4: respawn backoff -------------------------------------------
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def drive(dog, clock, seconds, connected=False, step=0.5):
+    end = clock.t + seconds
+    while clock.t < end:
+        dog.poll(connected)
+        clock.t += step
+
+
+def test_widget_respawn_backs_off_and_caps(env):
+    clock, spawns = Clock(), []
+    dog = dm._WidgetWatchdog(lambda: spawns.append(clock.t), clock=clock)
+    drive(dog, clock, 2000)
+    gaps = [b - a for a, b in zip(spawns, spawns[1:])]
+    assert spawns[0] == 1000.0               # first spawn right away
+    assert gaps[:5] == [10.0, 20.0, 40.0, 80.0, 160.0]
+    assert set(gaps[5:]) == {300.0}          # capped at 5 min
+
+
+def test_widget_respawn_logs_cap_once(env, monkeypatch):
+    lines = []
+    monkeypatch.setattr(dm, "print", lambda *a, **k: lines.append(" ".join(map(str, a))),
+                        raising=False)
+    clock = Clock()
+    dog = dm._WidgetWatchdog(lambda: None, clock=clock)
+    drive(dog, clock, 3000)
+    assert sum("backoff" in l for l in lines) == 1
+
+
+def test_widget_respawn_backoff_resets_after_stable_connection(env):
+    clock, spawns = Clock(), []
+    dog = dm._WidgetWatchdog(lambda: spawns.append(clock.t), clock=clock)
+    drive(dog, clock, 200)                   # spawns at +0, 10, 30, 70, 150
+    assert len(spawns) == 5
+    drive(dog, clock, 31, connected=True)    # stays up 30 s
+    spawns.clear()
+    drive(dog, clock, 40)                    # crashes again
+    gaps = [b - a for a, b in zip(spawns, spawns[1:])]
+    assert gaps[:1] == [10.0]
+
+
+def test_short_lived_connection_keeps_backing_off(env):
+    clock, spawns = Clock(), []
+    dog = dm._WidgetWatchdog(lambda: spawns.append(clock.t), clock=clock)
+    drive(dog, clock, 200)
+    drive(dog, clock, 5, connected=True)     # crashes after 5 s
+    spawns.clear()
+    drive(dog, clock, 1000)
+    gaps = [b - a for a, b in zip(spawns, spawns[1:])]
+    assert gaps and gaps[0] >= 160.0
 
 
 # -- B: socket unavailable -> run without a widget ---------------------------

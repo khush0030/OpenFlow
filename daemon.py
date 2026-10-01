@@ -90,7 +90,7 @@ from dictionary import Dictionary
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
-from flow_state import CARD, FlowController, FlowHooks
+from flow_state import CARD, RECORDING, SILENT, FlowController, FlowHooks
 from widget_channel import WidgetServer
 
 
@@ -170,6 +170,58 @@ def _config_mtime() -> float:
         return cfg_mod.CONFIG_PATH.stat().st_mtime
     except OSError:
         return 0.0
+
+
+@dataclass
+class RunContext:
+    """What a pipeline run needs to be replayed by Undo/Retry. FlowController
+    keeps it opaque, as the `target` it stores next to the audio."""
+    target: object = None          # paste target captured at key-down
+    edit_mode: bool = False
+    selection: str = ""            # edit-mode selection the run applies to
+
+
+class _WidgetWatchdog:
+    """Respawns the widget process while it is not connected, with
+    exponential backoff so a widget that crashes at startup doesn't
+    relaunch the app every few seconds forever."""
+    GRACE_S = 5.0          # disconnected this long before (re)spawning
+    FIRST_DELAY_S = 10.0
+    MAX_DELAY_S = 300.0
+    STABLE_S = 30.0        # a connection this long resets the backoff
+
+    def __init__(self, spawn, clock=time.monotonic) -> None:
+        self._spawn = spawn
+        self._clock = clock
+        now = clock()
+        self._last_seen = now - self.GRACE_S   # spawn right away
+        self._connected_since: float | None = None
+        self._next_spawn_at = now
+        self._delay = self.FIRST_DELAY_S
+        self._cap_logged = False
+
+    def poll(self, connected: bool) -> None:
+        now = self._clock()
+        if connected:
+            self._last_seen = now
+            if self._connected_since is None:
+                self._connected_since = now
+            elif now - self._connected_since >= self.STABLE_S:
+                self._delay = self.FIRST_DELAY_S
+                self._next_spawn_at = now
+                self._cap_logged = False
+            return
+        self._connected_since = None
+        if now - self._last_seen < self.GRACE_S or now < self._next_spawn_at:
+            return
+        print("[daemon] flow widget not connected — spawning", flush=True)
+        self._spawn()
+        self._next_spawn_at = now + self._delay
+        self._delay = min(self._delay * 2, self.MAX_DELAY_S)
+        if self._delay >= self.MAX_DELAY_S and not self._cap_logged:
+            self._cap_logged = True
+            print(f"[daemon] flow widget keeps failing to connect — respawn "
+                  f"backoff capped at {self.MAX_DELAY_S:.0f}s", flush=True)
 
 
 _EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
@@ -488,11 +540,14 @@ class Daemon:
         if self.recorder.is_recording:
             self._flow.handle_action({"action": "cancel"})
 
-    def _rerun(self, audio, target) -> None:
-        """Undo / Retry: run the pipeline again on kept audio."""
-        self._paste_target = target
-        threading.Thread(target=self._pipeline_worker, args=(audio, False),
+    def _start_worker(self, audio, ctx: RunContext, run: int) -> None:
+        threading.Thread(target=self._pipeline_worker, args=(audio, ctx, run),
                          daemon=True).start()
+
+    def _rerun(self, audio, ctx: RunContext, run: int) -> None:
+        """Undo / Retry: run the pipeline again on kept audio, in the same
+        mode and against the same paste target / selection."""
+        self._start_worker(audio, ctx, run)
 
     def _save_widget_setting(self, key: str, value: str) -> None:
         """Drag-to-dock / menu choice from the widget. Updating self.cfg too
@@ -519,8 +574,7 @@ class Daemon:
         last_tick = 0.0
         last_cfg_check = 0.0
         cfg_mtime = _config_mtime()
-        last_seen = time.monotonic() - 5.0   # spawn the widget right away
-        last_spawn = 0.0
+        watchdog = _WidgetWatchdog(lambda: _spawn_flow_widget())
         while not self._stop_evt.is_set():
             now = time.monotonic()
             try:
@@ -543,12 +597,7 @@ class Daemon:
                     if mtime != cfg_mtime:
                         cfg_mtime = mtime
                         self._reload_widget_config()
-                if self._widget.connected:
-                    last_seen = now
-                elif now - last_seen >= 5.0 and now - last_spawn >= 10.0:
-                    print("[daemon] flow widget not connected — spawning", flush=True)
-                    _spawn_flow_widget()
-                    last_spawn = now
+                watchdog.poll(self._widget.connected)
             except Exception as e:
                 print(f"[daemon] widget pump error: {e}", flush=True)
             self._stop_evt.wait(0.05)
@@ -557,13 +606,26 @@ class Daemon:
         if not self.recorder.is_recording:
             return
         audio = self.recorder.stop()
+        if audio.size == 0:
+            # Either another thread (✓/✕ racing the key release) already
+            # stopped this recording — only that winner drives the flow — or
+            # the tap was too short to capture a single block.
+            if self._flow.state in (RECORDING, SILENT):
+                self.state.recording = RecordingState.IDLE
+                self.state.notify()
+                self._flow.done()
+            return
+        edit_mode = self._edit_pending
+        ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
+                         selection=getattr(self, "_edit_selection", "") if edit_mode else "")
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
+            self._edit_pending = False   # a cancelled edit must not arm the next hold
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             print("[daemon] recording cancelled (undo available).", flush=True)
-            self._flow.cancelled(audio, self._paste_target)
+            self._flow.cancelled(audio, ctx)
             return
         sr = self.cfg["audio"]["sample_rate"]
         dur = audio.size / sr
@@ -574,14 +636,13 @@ class Daemon:
             self.state.notify()
             self._flow.done()
             return
-        edit_mode = self._edit_pending
         self._edit_pending = False
         # Mark processing before the worker starts so the widget never
         # flashes back to idle in between.
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
-        self._flow.processing()
-        threading.Thread(target=self._pipeline_worker, args=(audio, edit_mode), daemon=True).start()
+        run = self._flow.processing()
+        self._start_worker(audio, ctx, run)
 
     def on_undo(self) -> None:
         # Best-effort: just type the inverse via paste of empty + restore previous clipboard.
@@ -616,21 +677,21 @@ class Daemon:
 
     # -- Worker ----------------------------------------------------------
 
-    def _widget_is_ours(self) -> bool:
-        """False while a newer recording is live: that recording owns the
-        widget, so a finished pipeline must not flip it to idle/card/error."""
-        if self.recorder.is_recording:
-            print("[daemon] new recording live — leaving the widget alone", flush=True)
-            return False
-        return True
+    def _stale(self, run: int) -> None:
+        print(f"[daemon] pipeline run {run} no longer owns the widget — result not shown",
+              flush=True)
 
-    def _pipeline_worker(self, audio, edit_mode: bool) -> None:
+    def _pipeline_worker(self, audio, ctx: RunContext | None, run: int) -> None:
+        ctx = ctx or RunContext()
+        target = ctx.target
         if not self._busy.acquire(blocking=False):
-            print("[daemon] already processing, skip.", flush=True)
+            # Another dictation is still processing: keep this audio and
+            # offer Retry rather than dropping it.
+            print("[daemon] already processing — offering Retry.", flush=True)
+            self._flow.failed(audio, ctx, run=run)
             return
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
-        target = self._paste_target
         try:
             t0 = time.time()
             opts = self._stt_opts()
@@ -638,8 +699,7 @@ class Daemon:
                 raw = self.transcriber.transcribe(audio, opts)
             except Exception as e:
                 log_exception("daemon.pipeline", "transcription failed — offering Retry", e)
-                if self._widget_is_ours():
-                    self._flow.failed(audio, target)
+                self._flow.failed(audio, ctx, run=run) or self._stale(run)
                 return
             t1 = time.time()
             print(
@@ -648,14 +708,12 @@ class Daemon:
                 flush=True,
             )
             if not raw.strip():
-                if self._widget_is_ours():
-                    self._flow.done()
+                self._flow.done(run=run) or self._stale(run)
                 return
 
-            if edit_mode:
+            if ctx.edit_mode:
                 instruction = raw.strip()
-                sel = getattr(self, "_edit_selection", "")
-                final = self.ai.edit_selection(sel, instruction)
+                final = self.ai.edit_selection(ctx.selection, instruction)
                 _signal_edit_overlay("done")
             else:
                 final = self._post_process(raw)
@@ -663,28 +721,24 @@ class Daemon:
             t2 = time.time()
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
-                if self._widget_is_ours():
-                    self._flow.done()
+                self._flow.done(run=run) or self._stale(run)
                 return
 
             self.state.last_pasted = final
-            if not edit_mode and focused_editable(target) is False:
-                set_clipboard(final)
+            if not ctx.edit_mode and focused_editable(target) is False:
+                set_clipboard(final)   # even if the card can't be shown
                 print("[daemon] no text box focused — showing card", flush=True)
-                if self._widget_is_ours():
-                    self._flow.show_card(final)
+                self._flow.show_card(final, run=run) or self._stale(run)
             else:
                 paste_status = paste(final, target=target)
                 self.state.last_paste_at = time.time()
                 print(f"[daemon] paste {paste_status}", flush=True)
-                # (a stale "clipboard" result needs no card: the text is
-                # already on the clipboard)
-                if self._widget_is_ours():
-                    if paste_status == "clipboard":
-                        # Accessibility missing: never lose the text (spec §8).
-                        self._flow.show_card(final)
-                    else:
-                        self._flow.done()
+                if paste_status in ("clipboard", "failed"):
+                    # Accessibility missing or paste failed: never lose the
+                    # text (spec §8).
+                    self._flow.show_card(final, run=run) or self._stale(run)
+                else:
+                    self._flow.done(run=run) or self._stale(run)
             self.history.add(
                 raw=raw,
                 final=final,
@@ -694,8 +748,7 @@ class Daemon:
             )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
-            if self._widget_is_ours():
-                self._flow.done()
+            self._flow.done(run=run) or self._stale(run)
         finally:
             self._busy.release()
             self.state.recording = RecordingState.IDLE

@@ -60,7 +60,7 @@ def test_cancel_then_undo_within_window_reruns_with_kept_audio():
     assert fc.state == CANCELLED
     clock.t += 4.9
     fc.handle_action({"action": "undo"})
-    assert ("rerun", "AUDIO", "TARGET") in calls
+    assert ("rerun", "AUDIO", "TARGET", fc.run) in calls
     assert fc.state == PROCESSING
 
 
@@ -80,7 +80,7 @@ def test_failed_then_retry_reruns():
     assert fc.state == ERROR
     clock.t += 14
     fc.handle_action({"action": "retry"})
-    assert ("rerun", "AUDIO", "TARGET") in calls
+    assert ("rerun", "AUDIO", "TARGET", fc.run) in calls
     assert fc.state == PROCESSING
 
 
@@ -176,7 +176,7 @@ def test_rerun_failure_goes_to_error_and_retry_still_works(monkeypatch):
     fc, calls, _, _ = make()
     attempts = []
 
-    def boom(audio, target):
+    def boom(audio, target, run):
         attempts.append((audio, target))
         if len(attempts) == 1:
             raise RuntimeError("pipeline down")
@@ -199,3 +199,58 @@ def test_undo_after_window_before_tick_goes_idle_without_rerun():
     fc.handle_action({"action": "undo"})
     assert fc.state == IDLE
     assert not any(c[0] == "rerun" for c in calls)
+
+
+# -- run ownership (stale pipeline results) ----------------------------------
+
+def test_processing_returns_a_fresh_run_id():
+    fc, _, _, _ = make()
+    a = fc.processing()
+    b = fc.processing()
+    assert b != a and fc.run == b
+
+
+def test_stale_run_results_are_ignored():
+    fc, _, sent, _ = make()
+    old = fc.processing()
+    new = fc.processing()
+    n = len(sent)
+    fc.done(run=old)
+    fc.show_card("old text", run=old)
+    fc.failed("AUDIO", "TARGET", run=old)
+    assert fc.state == PROCESSING and len(sent) == n
+    fc.show_card("new text", run=new)
+    assert fc.state == CARD and fc.text == "new text"
+
+
+def test_run_result_never_leaves_a_newer_state():
+    for later in (lambda fc: fc.recording_started(),
+                  lambda fc: fc.cancelled("AUDIO2", "T2")):
+        fc, _, _, _ = make()
+        run = fc.processing()
+        later(fc)
+        before = fc.state
+        fc.done(run=run)
+        fc.show_card("x", run=run)
+        fc.failed("AUDIO", "TARGET", run=run)
+        assert fc.state == before
+
+
+def test_undo_rerun_owns_a_new_run():
+    fc, calls, _, _ = make()
+    old = fc.processing()
+    fc.cancelled("AUDIO", "TARGET")
+    fc.handle_action({"action": "undo"})
+    run = calls[-1][3]
+    assert run != old and fc.run == run
+    fc.done(run=old)
+    assert fc.state == PROCESSING
+    fc.done(run=run)
+    assert fc.state == IDLE
+
+
+def test_calls_without_run_keep_todays_behaviour():
+    fc, _, _, _ = make()
+    fc.recording_started()
+    fc.done()
+    assert fc.state == IDLE
