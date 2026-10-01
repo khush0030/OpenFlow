@@ -2,9 +2,9 @@
 
 A table of the words OpenFlow should spell your way, with a side form to
 add or edit one. Reads and writes the same ~/.openflow/dictionary.json, through
-the same `dictionary.Dictionary` load/save/add/remove code, with the same
-rules as the old editor (ui/dict_editor.py): spelling required, duplicates
-rejected case-insensitively, hints lower-cased and de-duplicated, file sorted.
+the same `dictionary.Dictionary` load/save/add/remove code. This page is the
+one place the editing rules live: spelling required, duplicates rejected
+case-insensitively, hints lower-cased and de-duplicated, file sorted.
 """
 from __future__ import annotations
 

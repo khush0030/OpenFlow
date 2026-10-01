@@ -34,6 +34,15 @@ def test_open_openflow_is_the_first_item(menu_tray):
         assert label in keys
 
 
+def test_menu_order_matches_spec(menu_tray):
+    # Spec §6.8: Open OpenFlow, Tone, Language, ─, History, Dictionary, Settings, ─, Quit.
+    labels = [k for k in menu_tray.menu.keys() if not str(k).startswith("SeparatorMenuItem")]
+    assert labels == ["Open OpenFlow", "Tone", "Language", "History…", "Dictionary…",
+                      "Settings…", "Quit OpenFlow"]
+    keys = list(menu_tray.menu.keys())
+    assert str(keys[3]).startswith("SeparatorMenuItem") and str(keys[7]).startswith("SeparatorMenuItem")
+
+
 @pytest.mark.parametrize("label,page", [("Open OpenFlow", "home"), ("Dictionary…", "dictionary"),
                                         ("History…", "history"), ("Settings…", "settings")])
 def test_menu_items_open_hub_pages(menu_tray, spawned, label, page):
@@ -81,9 +90,13 @@ def test_source_spawn_runs_the_cli(popen, monkeypatch):
 
 def test_source_spawn_of_a_plain_module_is_unchanged(popen, monkeypatch):
     monkeypatch.delattr(tray.sys, "frozen", raising=False)
-    tray._spawn_ui_subprocess("ui.settings")
+    tray._spawn_ui_subprocess("ui.edit_overlay")
     cmd = popen[0]["cmd"]
-    assert cmd[1].endswith("ui/settings.py") and len(cmd) == 2
+    assert cmd[1].endswith("ui/edit_overlay.py") and len(cmd) == 2
+
+
+def test_old_window_modules_have_no_bundle_route():
+    assert set(tray._BUNDLE_SUBCOMMAND) == {"ui.hub"}
 
 
 # -- reopen (Finder / Spotlight / Dock on the running app) --------------------------
@@ -115,3 +128,21 @@ def test_cli_hub_subcommand_runs_the_hub(monkeypatch, argv, page):
     args = cli.build_parser().parse_args(argv)
     assert args.func(args) == 0
     assert got == [page]
+
+
+@pytest.mark.parametrize("argv,page", [(["settings"], "settings"), (["history-viewer"], "history"),
+                                       (["dict", "edit"], "dictionary")])
+def test_old_window_subcommands_open_hub_pages(monkeypatch, argv, page):
+    import cli
+    import ui.hub.app as hub_app
+    got: list[str] = []
+    monkeypatch.setattr(hub_app, "main", lambda p="home", **kw: got.append(p) or 0)
+    args = cli.build_parser().parse_args(argv)
+    assert args.func(args) == 0
+    assert got == [page]
+
+
+@pytest.mark.parametrize("module", ["ui.settings", "ui.history", "ui.dict_editor", "ui.settings_tabs"])
+def test_old_window_modules_are_gone(module):
+    import importlib.util
+    assert importlib.util.find_spec(module) is None

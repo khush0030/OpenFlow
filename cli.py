@@ -58,9 +58,8 @@ def _cmd_dict_remove(args: argparse.Namespace) -> int:
 
 
 def _cmd_dict_edit(args: argparse.Namespace) -> int:
-    """Launch PyQt6 dictionary editor."""
-    from ui.dict_editor import main as editor_main
-    return editor_main()
+    """Old `dict edit` GUI: now the hub's Dictionary page."""
+    return _open_hub("dictionary")
 
 
 def _cmd_edit_overlay(args: argparse.Namespace) -> int:
@@ -71,22 +70,24 @@ def _cmd_edit_overlay(args: argparse.Namespace) -> int:
 
 
 def _cmd_settings(args: argparse.Namespace) -> int:
-    """Launch PyQt6 settings window."""
-    from ui.settings import main as settings_main
-    return settings_main()
+    """Old settings window: now the hub's Settings page."""
+    return _open_hub("settings")
 
 
 def _cmd_history_viewer(args: argparse.Namespace) -> int:
-    """Launch PyQt6 history viewer."""
-    from ui.history import main as history_main
-    return history_main()
+    """Old history viewer: now the hub's History page."""
+    return _open_hub("history")
+
+
+def _open_hub(page: str) -> int:
+    from ui.hub import app as hub_app
+    return hub_app.main(page)
 
 
 def _cmd_hub(args: argparse.Namespace) -> int:
     """Open the main window on a page (single instance: hands off and exits
     if one is already open)."""
-    from ui.hub import app as hub_app
-    return hub_app.main(args.page)
+    return _open_hub(args.page)
 
 
 def _cmd_flow_widget(args: argparse.Namespace) -> int:
@@ -201,14 +202,14 @@ def build_parser() -> argparse.ArgumentParser:
     dr.add_argument("name")
     dr.set_defaults(func=_cmd_dict_remove)
 
-    dsub.add_parser("edit", help="open dictionary GUI editor").set_defaults(func=_cmd_dict_edit)
+    dsub.add_parser("edit", help="open the Dictionary page").set_defaults(func=_cmd_dict_edit)
 
     eo = sub.add_parser("edit-overlay", help="(internal) launch edit-mode overlay")
     eo.add_argument("selection", help="path to selection text file")
     eo.set_defaults(func=_cmd_edit_overlay)
 
-    sub.add_parser("settings", help="open settings window").set_defaults(func=_cmd_settings)
-    sub.add_parser("history-viewer", help="open history viewer").set_defaults(func=_cmd_history_viewer)
+    sub.add_parser("settings", help="open the Settings page").set_defaults(func=_cmd_settings)
+    sub.add_parser("history-viewer", help="open the History page").set_defaults(func=_cmd_history_viewer)
     hb = sub.add_parser("hub", help="open the OpenFlow window")
     hb.add_argument("page", nargs="?", default="home",
                     help="home, insights, history, dictionary, tones, settings or help")

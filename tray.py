@@ -111,8 +111,8 @@ class OpenFlowTray(rumps.App):
             ("Tone", list(self._tone_items.values())),
             ("Language", list(self._lang_items.values())),
             None,
-            rumps.MenuItem("Dictionary…", callback=self._open_dictionary),
             rumps.MenuItem("History…", callback=self._open_history),
+            rumps.MenuItem("Dictionary…", callback=self._open_dictionary),
             rumps.MenuItem("Settings…", callback=self._open_settings, key=","),
             None,
             rumps.MenuItem("Quit OpenFlow", callback=self._quit, key="q"),
@@ -187,10 +187,7 @@ class OpenFlowTray(rumps.App):
 # module → bundle CLI args mapping. Keep here so the bundle path stays
 # explicit (avoids guessing dotted-name conventions inside PyInstaller).
 _BUNDLE_SUBCOMMAND = {
-    "ui.dict_editor": ["dict", "edit"],
-    "ui.settings":    ["settings"],
-    "ui.history":     ["history-viewer"],
-    "ui.hub":         ["hub"],
+    "ui.hub": ["hub"],
 }
 # Modules that, from source, run through cli.py rather than as a script.
 _SOURCE_VIA_CLI = {"ui.hub"}

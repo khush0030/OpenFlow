@@ -256,7 +256,7 @@ OpenFlow/
 │   ├── install_macos.sh   # copy .app + register LaunchAgent
 │   └── build_dmg.sh       # pyinstaller → codesign → notarize → .dmg
 ├── assets/                # logos, tray icons, fonts, sounds
-├── ui/                    # PyQt6 windows (settings, onboarding, dict editor, …)
+├── ui/                    # PyQt6 windows (hub/ main window, onboarding, flow widget, …)
 ├── tests/                 # unit + smoke tests
 ├── daemon.py              # orchestrator
 ├── audio.py               # sounddevice recorder
