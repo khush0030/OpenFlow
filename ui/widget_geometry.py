@@ -14,15 +14,16 @@ DRAG_THRESHOLD = 4  # movement before a press becomes a drag
 POSITIONS = ("left", "bottom", "right")
 
 # (width, height) for vertical placement; bottom placement swaps them.
+# Pills are Wispr Flow's (116 × 30) plus 1 pt (user decision 2026-10-01).
 SIZES: dict[str, tuple[float, float]] = {
     "idle": (8, 46),
     "card": (8, 46),
     "cancelled": (8, 46),
     "error": (8, 46),
-    "hover": (36, 56),
-    "recording": (26, 102),
-    "silent": (26, 102),
-    "processing": (26, 102),
+    "hover": (31, 117),
+    "recording": (31, 117),
+    "silent": (31, 117),
+    "processing": (31, 117),
 }
 
 

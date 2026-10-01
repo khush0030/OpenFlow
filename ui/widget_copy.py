@@ -27,9 +27,9 @@ _KEY_NAMES = {
 
 
 def hold_label(key: str) -> str:
-    """Tooltip hint for the configured hold-to-talk key, e.g. 'Hold ⌘ right'."""
+    """Tooltip hint for the configured hold-to-talk key, e.g. '⌘ right'."""
     k = (key or "").strip().lower()
     name = _KEY_NAMES.get(k)
     if name is None:
         name = k.upper() if k.startswith("f") and k[1:].isdigit() else k
-    return f"Hold {name}"
+    return name

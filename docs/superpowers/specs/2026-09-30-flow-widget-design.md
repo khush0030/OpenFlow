@@ -92,16 +92,16 @@ A terracotta handle, **8 × 46**, radius 4, 1 pt border `rgba(255,255,255,.9)`,
 opacity 0.9. Nothing else on screen.
 
 ### 2 · Hover (pointer over the idle handle)
-Only one control: the **Dictate** pill, **36 × 56**, surface colour, mic icon
+Only one control: the **Dictate** pill, **31 × 117** (Wispr Flow's 116 × 30 + 1 pt), surface colour, mic icon
 **20 pt**. It turns terracotta with a white icon while pointed at.
-- Tooltip (appears at once on first hover): **"Dictate"** in Fraunces +
-  **"Hold ⌘ right"** in Geist 14 pt at 55% opacity, sharing a baseline. The key
+- Tooltip (appears at once on first hover): **"Dictate"** in Fraunces 13 pt +
+  **"⌘ right"** in Geist 12 pt at 55% opacity, about 137 × 37 (Wispr's is 128 × 36), sharing a baseline. The key
   text reflects the configured `record_hold` key.
 - Click → start recording (click-to-start; finish with ✓ or cancel with ✕).
   Holding the hotkey still works as today.
 
 ### 3 · Recording
-Pill **26 × 102**: ✕ (20 pt, secondary) · waveform · ✓ (20 pt, terracotta).
+Pill **31 × 117**: ✕ (20 pt, secondary, concentric with the round end) · waveform · ✓ (20 pt, terracotta).
 - Waveform: 7 dots, 2.5 pt thick, length 3 → 13 pt driven by live mic RMS,
   shaped louder in the middle. 7 pt gap between the dots and each button.
 - ✓ → finish (same as releasing the hotkey). ✕ or **Esc** → state 7.
