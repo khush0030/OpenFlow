@@ -114,8 +114,8 @@ quotes or code fences."""),
 
 
 # Auto-formatting (formatting.py, [formatting] auto). Verbatim only calls a
-# model when Python can't finish the layout itself, and then with this
-# prompt: layout only, every word kept. The daemon checks the result
+# model for what Python can't do itself (paragraphs in a long dictation),
+# and then with this prompt: layout only, every word kept. The daemon checks the result
 # (formatting.same_words) and pastes the unformatted text if a word moved.
 FORMAT_ONLY = """You lay out a voice transcription (often Indian English or
 Hinglish). Keep every word exactly as given, in the same order: do not add,
@@ -125,20 +125,6 @@ capitalization and line breaks. Keep the line breaks already in the text.
 Return ONLY the formatted text, no preamble."""
 
 FORMAT_TASKS = {
-    "list": """The speaker lists points with spoken numbering ("one is that",
-"second", "third is", "firstly", "number two", "pehli baat", "ek toh"). Put
-any lead-in on its own line ending with a colon, then each point on its own
-line as "1. ", "2. ", "3. ". Here, and only here, leave out the spoken
-numbering words themselves ("One is that", "Second is that", "and third
-is", "Firstly", "Pehli baat yeh hai ki"): the numbers replace them. Text
-after the last point that is not part of it goes in a new paragraph after
-the list. Example:
-"I have two points. One is that the deck is late. Second, the budget is over. Let me know." ->
-"I have two points:
-1. The deck is late.
-2. The budget is over.
-
-Let me know.\"""",
     "paragraphs": """Split the text into paragraphs where the topic changes,
 with a blank line between paragraphs. Keep sentences whole. Text that stays
 on one topic stays one paragraph.""",

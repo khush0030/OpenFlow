@@ -135,8 +135,7 @@ class SpokenList:
     lead: str
     items: list[str]
     removable: list[tuple[int, int]] = field(default_factory=list)
-    tail: str = ""                  # text after the list (bullets only)
-    ambiguous_tail: bool = False    # numbered: last item may run on
+    tail: str = ""                  # text after the list, its own paragraph
 
 
 def words(text: str) -> list[str]:
@@ -214,14 +213,33 @@ def numbered(text: str) -> SpokenList | None:
                  for i, c in enumerate(run)]
         if not all(_content_ok(i) for i in items):
             continue
-        last = items[-1].strip()
-        ambiguous = bool(re.search(r"[.!?]\s+\S", last))
+        items[-1], tail = _split_closing(items[-1])
         found = SpokenList(kind="numbered", lead=lead, items=items,
-                           removable=[(c.cue_start, c.end) for c in run],
-                           ambiguous_tail=ambiguous)
+                           removable=[(c.cue_start, c.end) for c in run], tail=tail)
         if best is None or len(found.items) > len(best.items):
             best = found
     return best
+
+
+# A remark after the last point, not part of it: "Let me know.", "Thanks!",
+# "What do you think?". Anything else stays in the last item (never wrong,
+# just less tidy).
+_CLOSING = re.compile(
+    rf"^\s*(?:(?:so\s+)?(?:let\s+me\s+know|lmk|thanks|thank\s+you|cheers|that's\s+(?:it|all)|"
+    rf"that\s+is\s+(?:it|all)|ok(?:ay)?\s+bye|bye|talk\s+soon|see\s+you|regards|best|"
+    rf"bas(?:\s+itna\s+hi)?|itna\s+hi|baaki\s+(?:sab\s+)?theek|dhanyavaad|shukriya)"
+    rf"{_END}[^.!?]*[.!?]*|[^.!?]*\?)\s*$", _FLAGS)
+
+
+def _split_closing(last: str) -> tuple[str, str]:
+    """(item, closing remarks) for the last item of a numbered list."""
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s+\S)", last)]
+    for e in ends:
+        rest = last[e:]
+        sentences = [x for x in re.findall(r"[^.!?]+[.!?]*", rest) if x.strip()]
+        if sentences and all(_CLOSING.match(x) for x in sentences):
+            return last[:e], rest
+    return last, ""
 
 
 # -- Bullets ------------------------------------------------------------------
@@ -387,11 +405,8 @@ def _item(raw: str, *, period: bool) -> str:
     return s
 
 
-def render(found: SpokenList) -> str | None:
-    """The formatted list, or None when only a model can place the end of it
-    (a numbered list whose last item runs into more sentences)."""
-    if found.ambiguous_tail:
-        return None
+def render(found: SpokenList) -> str:
+    """The formatted list (lead-in line, items, then any closing remark)."""
     lines = []
     lead = _lead_line(found.lead)
     if lead:

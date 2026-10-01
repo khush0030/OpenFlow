@@ -8,12 +8,13 @@ is deterministic and free:
 - in a mail app the greeting and sign-off go on their own lines,
 - spoken numbered and bulleted lists are laid out (lists.py).
 
-Only two things want a model: paragraph breaks in a long dictation (where
-the topic changes is a judgement call) and a numbered list whose last item
-runs on into more sentences (where does the list end?). Verbatim makes that
-call with a "formatting only" prompt and keeps the result only if
-same_words() agrees no word was added, dropped or changed beyond the spoken
-cue words; otherwise it pastes the deterministic result. The cleanup tones
+Only paragraph breaks in a long dictation want a model (where the topic
+changes is a judgement call). Verbatim makes that call with a "formatting
+only" prompt and keeps the result only if same_words() agrees no word was
+added, dropped or changed (beyond spoken list cues); otherwise it pastes
+the deterministic result. (Lists used to go to the model when the last
+item ran on into more sentences; the live model kept inventing lead-ins,
+so lists.py now decides that itself.) The cleanup tones
 already make a model call, so they get prompt notes instead (notes()).
 
 Plain short dictation finds no structure and never reaches a model.
@@ -185,7 +186,7 @@ def notes(s: Structure) -> list[str]:
 @dataclass
 class Local:
     text: str          # the deterministic result
-    model_tasks: list[str] = field(default_factory=list)   # "list", "paragraphs"
+    model_tasks: list[str] = field(default_factory=list)   # keys of prompts.FORMAT_TASKS
 
 
 def format_local(text: str, *, email: bool = False) -> Local:
@@ -197,11 +198,7 @@ def format_local(text: str, *, email: bool = False) -> Local:
     tasks: list[str] = []
     found = lists.find(out)
     if found is not None:
-        rendered = lists.render(found)
-        if rendered is None:
-            tasks.append("list")     # where does the last item end?
-        else:
-            out = rendered
+        out = lists.render(found)
     # Paragraphs: a long run of prose the speaker didn't break up or list.
     spoken_breaks = out != text and has_commands(text)
     if (found is None and not spoken_breaks
