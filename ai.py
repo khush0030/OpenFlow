@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llm import ChatProvider, SarvamChat
-from prompts import (PROMPTS, SELF_CORRECTION, SELF_CORRECTION_TONES, SNIPPET_MARK,
-                     SNIPPET_NOTE, context_note)
+from prompts import (FORMAT_ONLY, FORMAT_TASKS, PROMPTS, SELF_CORRECTION,
+                     SELF_CORRECTION_TONES, SNIPPET_MARK, SNIPPET_NOTE, context_note)
 
 
 @dataclass
@@ -39,7 +39,10 @@ class AIProcessor:
         language: str | None = None,
         glossary: str | None = None,
         examples: str | None = None,
+        format_notes: list[str] | None = None,
     ) -> str:
+        """format_notes: auto-formatting notes (formatting.notes()) for the
+        structure found in this dictation: lists, paragraphs, email lines."""
         if not text.strip():
             return text
         if mode == "raw":
@@ -61,6 +64,8 @@ class AIProcessor:
                 "the task is explicitly English-only or Hindi-only. Do not "
                 "translate Hindi words to English just to 'clean' them."
             )
+        if format_notes:
+            extras.extend(format_notes)
         if glossary:
             extras.append(glossary)
         if examples:
@@ -70,6 +75,18 @@ class AIProcessor:
             )
         if extras:
             system = system.rstrip() + "\n\n" + "\n\n".join(extras)
+        return self._call(system, text, self.provider)
+
+    def format_only(self, text: str, tasks: list[str]) -> str:
+        """Layout only (Verbatim auto-formatting): numbering, paragraphs,
+        line breaks; every word kept. tasks: keys of prompts.FORMAT_TASKS.
+        The caller checks the words (formatting.same_words)."""
+        if not text.strip():
+            return text
+        extras = [FORMAT_TASKS[t] for t in tasks if t in FORMAT_TASKS]
+        if SNIPPET_MARK in text:
+            extras.append(SNIPPET_NOTE)
+        system = FORMAT_ONLY.rstrip() + "".join("\n\n" + e for e in extras)
         return self._call(system, text, self.provider)
 
     def transliterate_to_roman(self, hindi_text: str) -> str:
