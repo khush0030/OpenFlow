@@ -73,7 +73,7 @@ import config as cfg_mod
 from openflow_logger import get_logger, log_exception
 
 _log = get_logger("daemon")
-from audio import Recorder, RecorderConfig
+from audio import NO_INPUT_RMS, Recorder, RecorderConfig, heard_nothing, loudest_rms
 from transcribe import Transcriber, TranscribeOptions
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
@@ -84,9 +84,10 @@ else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "escape"
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
-                   focused_editable, set_clipboard)
+                   focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
+from snippets import Snippets
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
@@ -336,6 +337,7 @@ class Daemon:
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
         ))
         self.dictionary = Dictionary.load()
+        self.snippets = Snippets.load()
         self.history = History()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
@@ -381,12 +383,12 @@ class Daemon:
 
     # -- Pipeline pieces -------------------------------------------------
 
-    def _stt_opts(self) -> TranscribeOptions:
+    def _stt_opts(self, tone: ToneMode | None = None) -> TranscribeOptions:
         """Map OpenFlow language mode → Saaras language_code + mode."""
         m = self.state.language.value
         always_en = self.cfg["general"].get("always_english_output", True)
         sr = int(self.cfg["audio"].get("sample_rate", 16000))
-        tone_raw = self.state.tone.value == "raw"
+        tone_raw = (tone or self.state.tone).value == "raw"
 
         def _opts(language_code: str | None, mode: str) -> TranscribeOptions:
             if tone_raw and mode == "transcribe":
@@ -445,14 +447,68 @@ class Daemon:
             return bool(d["inject_into_cleanup"])
         return True
 
+    def _tone_for(self, target) -> ToneMode:
+        """Tone for a dictation into `target`: its [apps.tones] entry stands
+        in for the default tone. A tone switched to for the session (F6, the
+        hub), i.e. not the configured default, is an explicit choice and wins."""
+        tone = self.state.tone
+        default = (self.cfg.get("general") or {}).get("default_tone")
+        if default is not None and tone.value != default:
+            return tone
+        name = getattr(target, "name", None)
+        override = cfg_mod.app_tone(self.cfg.get("apps"), name,
+                                    getattr(target, "bundle_id", None))
+        if override is None:
+            return tone
+        try:
+            return ToneMode(override)
+        except ValueError:
+            self._warn(f"apps.tones: {name!r} = {override!r} is not a tone — using {tone.value}")
+            return tone
+
+    def _context_app(self, target) -> str | None:
+        """App name for the cleanup prompt's context hint, if enabled."""
+        if not (self.cfg.get("apps") or {}).get("context_hints", True):
+            return None
+        return getattr(target, "name", None) or get_active_app()
+
+    def _active_snippets(self) -> Snippets | None:
+        """The snippet store, re-read if snippets.json changed; None when
+        snippets are off or there are none."""
+        snips = getattr(self, "snippets", None)
+        if snips is None or not (self.cfg.get("snippets") or {}).get("enabled", True):
+            return None
+        snips.refresh()
+        return snips if snips.items else None
+
     def _post_process(self, raw: str, tone: ToneMode | None = None,
-                      language: LanguageMode | None = None) -> str:
+                      language: LanguageMode | None = None, target=None) -> str:
         """Dictionary + cleanup for the current modes, or the given ones
-        (control `rerun`)."""
+        (control `rerun`). target: the paste target, for the app context."""
         if not raw:
             return ""
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
+
+        # Snippets (snippets.py): a dictation that is only a trigger pastes
+        # the stored text; otherwise triggers ride through as placeholders
+        # and done() puts the stored text back.
+        snips, slots = self._active_snippets(), []
+        if snips is not None:
+            whole = snips.whole(corrected)
+            if whole is not None:
+                print("[daemon] snippet: whole dictation is a trigger", flush=True)
+                return whole
+            corrected, slots = snips.protect(corrected)
+
+        def done(out: str) -> str:
+            if not slots:
+                return out
+            back = Snippets.restore(out, slots)
+            if back is None:   # the model dropped or mangled a placeholder
+                self._warn("snippet placeholder lost in cleanup — pasting the uncleaned text")
+                back = Snippets.restore(corrected, slots)
+            return back
 
         m_lang = (language or self.state.language).value
         m_tone = (tone or self.state.tone).value
@@ -461,35 +517,35 @@ class Daemon:
         # chat hop for raw/verbatim — that's the default path and the lag.
         if m_lang == "en_to_hi":
             try:
-                return self.ai.translate_en_to_hi(corrected)
+                return done(self.ai.translate_en_to_hi(corrected))
             except Exception as e:
                 log_exception("daemon.pipeline", "EN→HI failed — pasting English", e)
-                return corrected
+                return done(corrected)
         if m_lang == "hi_roman" and any("\u0900" <= ch <= "\u097F" for ch in corrected):
             try:
-                return self.ai.transliterate_to_roman(corrected)
+                return done(self.ai.transliterate_to_roman(corrected))
             except Exception as e:
                 log_exception("daemon.pipeline", "transliterate failed", e)
-                return corrected
+                return done(corrected)
         if m_tone in ("raw", "verbatim"):
-            return corrected
+            return done(corrected)
 
         glossary = None
         if self._inject_glossary():
             lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
             glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
         try:
-            return self.ai.cleanup(
+            return done(self.ai.cleanup(
                 corrected,
                 mode=m_tone,
-                context_app=get_active_app(),
+                context_app=self._context_app(target),
                 language=m_lang,
                 glossary=glossary,
                 examples=self._style_examples(),
-            )
+            ))
         except Exception as e:
             log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
-            return corrected
+            return done(corrected)
 
     # -- Hotkey callbacks ------------------------------------------------
 
@@ -684,6 +740,10 @@ class Daemon:
                   f"volume={ch.sounds['volume']}", flush=True)
         if ch.general is not None:
             self.cfg["general"] = ch.general   # always_english_output, hindi_script
+        if ch.apps is not None:
+            self.cfg["apps"] = ch.apps         # per-app tones / context hints
+        if ch.snippets is not None:
+            self.cfg["snippets"] = ch.snippets
         # Only a changed config value moves the daemon's tone/language, so a
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:
@@ -836,6 +896,16 @@ class Daemon:
             self.state.notify()
             self._flow.done()
             return
+        no_input = float(self.cfg["audio"].get("no_input_rms", NO_INPUT_RMS))
+        if heard_nothing(audio, sr, no_input):
+            # Muted or wrong input: transcribing silence only costs a round
+            # trip (or comes back as a made-up phrase). Say so instead.
+            print(f"[daemon] can't hear you: loudest {loudest_rms(audio, sr):.5f} < "
+                  f"{no_input} — mic muted or wrong input? Not transcribing.", flush=True)
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            self._flow.no_audio(audio, ctx)
+            return
         self._edit_pending = False
         # Mark processing before the worker starts so the widget never
         # flashes back to idle in between.
@@ -845,9 +915,18 @@ class Daemon:
         self._start_worker(audio, ctx, run)
 
     def on_undo(self) -> None:
-        # Best-effort: just type the inverse via paste of empty + restore previous clipboard.
-        # True undo requires app-level integration. We leave this as a stub.
-        print("[daemon] undo: not implemented", flush=True)
+        # Chords fire on the main thread; the undo waits for the chord's
+        # modifiers to come up, so it runs off it (paste.py has the guards).
+        threading.Thread(target=self._undo_last_paste, name="undo-paste",
+                         daemon=True).start()
+
+    def _undo_last_paste(self) -> None:
+        try:
+            status = undo_last_paste()
+        except Exception as e:
+            log_exception("daemon.undo", "undo last paste failed", e)
+            return
+        print(f"[daemon] undo last paste -> {status}", flush=True)
 
     def on_edit_mode(self) -> None:
         # Capture currently selected text (Cmd+C), then start recording.
@@ -938,7 +1017,10 @@ class Daemon:
         self.state.notify()
         try:
             t0 = time.time()
-            opts = self._stt_opts()
+            tone = self._tone_for(target)
+            if tone != self.state.tone:
+                print(f"[daemon] tone for {getattr(target, 'name', '?')}: {tone.value}", flush=True)
+            opts = self._stt_opts(tone)
             try:
                 raw = self.transcriber.transcribe(audio, opts)
             except Exception as e:
@@ -959,7 +1041,7 @@ class Daemon:
                 instruction = raw.strip()
                 final = self.ai.edit_selection(ctx.selection, instruction)
             else:
-                final = self._post_process(raw)
+                final = self._post_process(raw, tone=tone, target=target)
 
             t2 = time.time()
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
@@ -987,7 +1069,7 @@ class Daemon:
                 self.history.add(
                     raw=raw,
                     final=final,
-                    tone=self.state.tone.value,
+                    tone=tone.value,
                     lang=self.state.language.value,
                     duration=audio.size / self.cfg["audio"]["sample_rate"],
                     app=getattr(target, "name", None) or None,

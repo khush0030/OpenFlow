@@ -30,6 +30,9 @@ class ConfigChanges:
     general:  the new [general] table (always_english_output and
               hindi_script are read from it per dictation).
     widget:   the new [widget] table, pushed to the widget process.
+    apps:     the new [apps] table (context hints, per-app tones), read
+              per dictation.
+    snippets: the new [snippets] table, read per dictation.
     """
     hotkeys: dict[str, str] | None = None
     sounds: dict[str, Any] | None = None
@@ -37,10 +40,13 @@ class ConfigChanges:
     language: str | None = None
     general: dict[str, Any] | None = None
     widget: dict[str, Any] | None = None
+    apps: dict[str, Any] | None = None
+    snippets: dict[str, Any] | None = None
 
     def __bool__(self) -> bool:
         return any(v is not None for v in (self.hotkeys, self.sounds, self.tone,
-                                           self.language, self.general, self.widget))
+                                           self.language, self.general, self.widget,
+                                           self.apps, self.snippets))
 
 
 def _section(cfg: dict, name: str) -> dict:
@@ -78,6 +84,11 @@ def plan_changes(old: dict, new: dict) -> ConfigChanges:
 
     if _section(old, "widget") != _section(new, "widget"):
         out["widget"] = dict(_section(new, "widget"))
+
+    if _section(old, "apps") != _section(new, "apps"):
+        out["apps"] = dict(_section(new, "apps"))
+    if _section(old, "snippets") != _section(new, "snippets"):
+        out["snippets"] = dict(_section(new, "snippets"))
 
     return ConfigChanges(**out)
 

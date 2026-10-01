@@ -956,6 +956,7 @@ class FlowApp(QObject):
         self._unhide_timer.timeout.connect(self._unhide)
         self.state = "idle"
         self.text = ""
+        self.reason = ""          # error: "" = Retry, "no_audio" = Mic settings
         self.hands_free = False
         # The hands-free hint shows for the first session after launch only.
         self._hint_seen = False
@@ -1046,6 +1047,7 @@ class FlowApp(QObject):
         elif kind == "state":
             self.state = m.get("state", "idle")
             self.text = m.get("text", "")
+            self.reason = m.get("reason", "")
             self._set_hands_free(bool(m.get("hands_free")))
             if self.widget.dragging:
                 return  # don't yank the widget mid-drag; end_drag applies it
@@ -1158,6 +1160,9 @@ class FlowApp(QObject):
             return Toast(th, copy.CANT_HEAR, copy.MIC_SETTINGS, open_mic_settings)
         if v == "cancelled":
             return Toast(th, copy.CANCELLED, copy.UNDO, lambda: self.send("undo"), timer_s=5.0)
+        if v == "error" and self.reason == "no_audio":
+            # The take was silent end to end: nothing to retry; check the mic.
+            return Toast(th, copy.CANT_HEAR, copy.MIC_SETTINGS, open_mic_settings)
         if v == "error":
             return Toast(th, copy.ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "card":
@@ -1170,7 +1175,7 @@ class FlowApp(QObject):
         final rect (never mid-animation) so it can't overlap the widget."""
         screen = self._screen or self._screen_rect()
         max_h = popup_max_height(anchor, screen, self.position)
-        key = (self.widget.view, self.text, self.theme.name, self.hold_key,
+        key = (self.widget.view, self.text, self.reason, self.theme.name, self.hold_key,
                self.position, max_h, self._hint_on)
         if self.popup is None or key != self._popup_key:
             self._close_popup()

@@ -776,3 +776,12 @@ def test_hover_pill_stays_red_while_the_tooltip_shows(fa):
     fa.widget._hot = None  # pointer in the margin, off the pill
     fill, _icon = fa.widget._dictate_colors(fa.theme)
     assert fill == fw.qc(fa.theme.accent)
+
+
+def test_no_audio_error_shows_cant_hear_with_mic_settings(fa):
+    fa._on_message({"type": "state", "state": "error", "text": "", "reason": "no_audio"})
+    assert isinstance(fa.popup, fw.Toast)
+    assert fa.popup.button.text() == "Mic settings"
+    # A transcription failure right after swaps the toast back to Retry.
+    fa._on_message({"type": "state", "state": "error", "text": ""})
+    assert fa.popup.button.text() == "Retry"

@@ -21,7 +21,8 @@ from flow_state import CANCELLED, CARD, ERROR, IDLE, PROCESSING, RECORDING
 from state import DaemonState, LanguageMode, ToneMode
 from transcribe import TranscribeOptions
 
-AUDIO = np.zeros(16000, dtype=np.float32)
+# 1 s at a speaking level: an all-silent take is never transcribed.
+AUDIO = np.full(16000, 0.05, dtype=np.float32)
 
 
 class FakeServer:
@@ -122,8 +123,8 @@ def make_daemon():
     d._edit_pending = False
     d._cancel_pending = False
     d._paste_target = None
-    d._stt_opts = lambda: TranscribeOptions(language_code="en-IN", mode="transcribe")
-    d._post_process = lambda raw: raw
+    d._stt_opts = lambda tone=None: TranscribeOptions(language_code="en-IN", mode="transcribe")
+    d._post_process = lambda raw, **kw: raw
     d._edit_selection = ""
     # Run pipelines inline so Undo/Retry sequences are deterministic.
     d._start_worker = d._pipeline_worker
@@ -697,3 +698,58 @@ def test_widget_start_after_stale_toggle_is_not_hands_free(keyed):
     d._flow.handle_action({"action": "start"})             # then the mic is clicked
     assert "hands_free" not in d._widget.sent[-1]
     assert played == ["start"]
+
+
+# -- can't hear you: a silent take is not transcribed --------------------------
+
+class CountingTranscriber(FakeTranscriber):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def transcribe(self, audio, opts):
+        self.calls += 1
+        return super().transcribe(audio, opts)
+
+
+@pytest.mark.parametrize("audio", [
+    np.zeros(32000, dtype=np.float32),                                   # muted
+    np.random.default_rng(0).normal(0, 2e-4, 32000).astype(np.float32),  # idle input
+])
+def test_silent_take_skips_stt_and_says_cant_hear_you(env, monkeypatch, audio):
+    played = []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    d = make_daemon()
+    d.transcriber = CountingTranscriber()
+    d.recorder = FakeRecorder(audio=audio)
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.on_record_stop()
+    assert d.transcriber.calls == 0
+    assert d._widget.sent[-1] == {"type": "state", "state": ERROR, "text": "",
+                                  "reason": "no_audio"}
+    assert played[-1] == "error"
+    assert d.state.recording == dm.RecordingState.IDLE
+
+
+def test_one_spoken_word_in_a_quiet_take_is_transcribed(env):
+    d = make_daemon()
+    d.transcriber = CountingTranscriber()
+    audio = np.zeros(48000, dtype=np.float32)
+    audio[20000:24000] = 0.05                     # a quarter second of speech
+    d.recorder = FakeRecorder(audio=audio)
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.on_record_stop()
+    assert d.transcriber.calls == 1
+
+
+def test_no_input_threshold_comes_from_config(env):
+    d = make_daemon()
+    d.cfg["audio"]["no_input_rms"] = 0.1          # AUDIO (0.05) now counts as silence
+    d.transcriber = CountingTranscriber()
+    d.recorder = FakeRecorder()
+    d.recorder.is_recording = True
+    d._flow.recording_started()
+    d.on_record_stop()
+    assert d.transcriber.calls == 0 and d._flow.reason == "no_audio"

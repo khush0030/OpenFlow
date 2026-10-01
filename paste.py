@@ -2,6 +2,14 @@
 
 Never `activate` an app that is already frontmost — that steals focus
 from the text field. Clipboard writes go through NSPasteboard (no pbcopy).
+
+Undo last paste sends Cmd+Z to the app that received it: a Cmd+V paste is
+one undo step in Cocoa, Electron and Chromium apps alike, and the app's own
+undo also reverts whatever it did to the text (auto-indent, smart quotes,
+replacing an edit-mode selection), which selecting back len(text) characters
+and deleting them would get wrong. Cmd+Z is only sent while it would still
+hit our paste: recent, same app in front, and — where the field's text can
+be read over AX — our text still sits right before the caret.
 """
 from __future__ import annotations
 
@@ -74,6 +82,7 @@ except Exception as _e:
 _OWN_NAMES = {"openflow", "openflow.app"}
 _OWN_BUNDLES = {"com.openflow.dictation"}
 _VK_V = 9
+_VK_Z = 6
 _NS_APP_ACTIVATE_IGNORING_OTHERS = 1 << 1
 _LAST_CLIPBOARD: Optional[str] = None
 
@@ -88,6 +97,24 @@ class PasteTarget:
 
 # Back-compat alias used by older call sites / tests.
 FrontApp = PasteTarget
+
+
+# Undo last paste only within this long of the paste.
+UNDO_WINDOW_S = 60.0
+
+
+@dataclass
+class PasteRecord:
+    """The last paste that went out as Cmd+V: what Undo would revert."""
+    text: str
+    pid: int
+    app: str
+    at: float                      # time.monotonic() of the paste
+    clip_before: Optional[str]     # clipboard before we overwrote it
+    clip_change: Optional[int]     # pasteboard changeCount after our write
+
+
+_LAST_PASTE: Optional[PasteRecord] = None
 
 
 def _is_own_app(name: str, bundle_id: str) -> bool:
@@ -351,12 +378,13 @@ def _clipboard_set(text: str) -> bool:
         return False
 
 
-def _cgevent_paste() -> bool:
+def _cgevent_cmd_key(vk: int) -> bool:
+    """Post Cmd+<key> (down, up) to the frontmost app."""
     if not _HAS_QUARTZ:
         return False
     try:
-        down = CGEventCreateKeyboardEvent(None, _VK_V, True)
-        up = CGEventCreateKeyboardEvent(None, _VK_V, False)
+        down = CGEventCreateKeyboardEvent(None, vk, True)
+        up = CGEventCreateKeyboardEvent(None, vk, False)
         CGEventSetFlags(down, kCGEventFlagMaskCommand)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, down)
@@ -364,8 +392,12 @@ def _cgevent_paste() -> bool:
         CGEventPost(kCGHIDEventTap, up)
         return True
     except Exception as e:
-        print(f"[paste] CGEvent paste failed: {e}", flush=True)
+        print(f"[paste] CGEvent Cmd+key {vk} failed: {e}", flush=True)
         return False
+
+
+def _cgevent_paste() -> bool:
+    return _cgevent_cmd_key(_VK_V)
 
 
 def _osascript_paste() -> bool:
@@ -390,12 +422,14 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
     Cmd+V first: Electron / Chromium apps (VS Code, Chrome, Slack) accept an
     AXSelectedText write and report success while inserting nothing, so AX
     insert is only a last resort when synthetic keystrokes are unavailable."""
-    global _LAST_CLIPBOARD
+    global _LAST_CLIPBOARD, _LAST_PASTE
+    _LAST_PASTE = None
     if not text:
         return "failed"
     _LAST_CLIPBOARD = _clipboard_get()
     if not _clipboard_set(text):
         return "failed"
+    clip_change = _clipboard_change_count()
 
     from permissions import accessibility_trusted
     if accessibility_trusted() is False:
@@ -412,11 +446,20 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
             print(f"[paste] could not restore {target.name}", flush=True)
 
     time.sleep(0.04)
-    if _cgevent_paste():
+    sent = _cgevent_paste()
+    if sent:
         print("[paste] sent Cmd+V", flush=True)
-        return "pasted"
-    print("[paste] CGEvent failed; falling back to osascript", flush=True)
-    if _osascript_paste():
+    else:
+        print("[paste] CGEvent failed; falling back to osascript", flush=True)
+        sent = _osascript_paste()
+    if sent:
+        # Only a Cmd+V paste is undoable (the AX fallback below is not one
+        # undo step everywhere).
+        pid = target.pid if target is not None else (_front_pid() or 0)
+        _LAST_PASTE = PasteRecord(text=text, pid=pid,
+                                  app=target.name if target is not None else "",
+                                  at=time.monotonic(), clip_before=_LAST_CLIPBOARD,
+                                  clip_change=clip_change)
         return "pasted"
     ax_el = target.ax_element if target is not None else None
     if _ax_insert(text, ax_el):
@@ -428,6 +471,136 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
 def restore_clipboard() -> None:
     if _LAST_CLIPBOARD is not None:
         _clipboard_set(_LAST_CLIPBOARD)
+
+
+def _clipboard_change_count() -> Optional[int]:
+    if not _HAS_APPKIT or NSPasteboard is None:
+        return None
+    try:
+        return int(NSPasteboard.generalPasteboard().changeCount())
+    except Exception:
+        return None
+
+
+# -- Undo last paste ---------------------------------------------------------
+
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+# Compare this much of the end of the pasted text: enough to tell our paste
+# from other text, short enough that an app reflowing a long paste still matches.
+_UNDO_MATCH_CHARS = 40
+
+
+def _squash(s: str) -> str:
+    """Drop whitespace and straighten quotes: apps reflow line breaks,
+    auto-indent and smart-quote pasted text."""
+    return "".join(s.translate(_QUOTES).split())
+
+
+def paste_still_at_caret(before_caret: str, pasted: str) -> bool:
+    tail = _squash(pasted)[-_UNDO_MATCH_CHARS:]
+    return bool(tail) and _squash(before_caret).endswith(tail)
+
+
+def undo_check(rec: Optional[PasteRecord], now: float, front_pid: Optional[int],
+               before_caret: Optional[str], window_s: float = UNDO_WINDOW_S) -> Optional[str]:
+    """Why sending Cmd+Z now might undo something other than our paste, or
+    None when it is safe. before_caret: the focused field's text up to the
+    caret, or None when the app doesn't expose it over AX."""
+    if rec is None:
+        return "nothing pasted to undo"
+    age = now - rec.at
+    if age > window_s:
+        return f"last paste was {age:.0f}s ago (limit {window_s:.0f}s)"
+    if front_pid != rec.pid:
+        return f"{rec.app or 'the app pasted into'} is no longer in front"
+    if before_caret is not None and not paste_still_at_caret(before_caret, rec.text):
+        return "the text before the caret changed since the paste"
+    return None
+
+
+def _ax_text_before_caret(pid: int) -> Optional[str]:
+    """Focused field's text up to the caret, or None if AX can't say."""
+    if not _HAS_AX:
+        return None
+    try:
+        from ApplicationServices import AXValueGetValue  # type: ignore
+        try:
+            from ApplicationServices import kAXValueTypeCFRange as _RANGE  # type: ignore
+        except Exception:
+            from ApplicationServices import kAXValueCFRangeType as _RANGE  # type: ignore
+    except Exception:
+        return None
+    _status, el = _ax_app_focus(pid)
+    if el is None:
+        return None
+    _ax_set_timeout(el)
+    value = _ax_copy(el, "AXValue")
+    rng = _ax_copy(el, "AXSelectedTextRange")
+    if not isinstance(value, str) or rng is None:
+        return None
+    try:
+        ok, r = AXValueGetValue(rng, _RANGE, None)
+        # A CFRange struct or, from some pyobjc versions, a (location, length) tuple.
+        loc = int(r.location if hasattr(r, "location") else r[0]) if ok else -1
+    except Exception:
+        return None
+    if loc < 0:
+        return None
+    # AX ranges count UTF-16 units; Python strings count code points.
+    units = value.encode("utf-16-le")
+    return units[: loc * 2].decode("utf-16-le", errors="ignore")
+
+
+def _wait_modifiers_released(timeout_s: float = 1.0) -> None:
+    """The undo chord's ⌘⇧ are still down when it fires; a Cmd+Z sent now
+    could reach the app as ⌘⇧Z (Redo). Wait for them to come up."""
+    try:
+        from Quartz import (  # type: ignore
+            CGEventSourceFlagsState, kCGEventSourceStateHIDSystemState,
+            kCGEventFlagMaskShift, kCGEventFlagMaskAlternate, kCGEventFlagMaskControl,
+        )
+    except Exception:
+        time.sleep(0.2)
+        return
+    held = kCGEventFlagMaskShift | kCGEventFlagMaskAlternate | kCGEventFlagMaskControl
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            if not CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & held:
+                return
+        except Exception:
+            return
+        time.sleep(0.02)
+
+
+def undo_last_paste(window_s: float = UNDO_WINDOW_S) -> str:
+    """Revert the last paste with Cmd+Z in the app it went to, and put the
+    clipboard back as it was. Returns "undone", "skipped" (not safe, see
+    undo_check; logged) or "failed". One undo per paste: pressing the chord
+    again does nothing here (the app itself sees ⌘⇧Z, its Redo)."""
+    global _LAST_PASTE
+    rec = _LAST_PASTE
+    front = _front_pid()
+    before = _ax_text_before_caret(rec.pid) if rec is not None and front == rec.pid else None
+    reason = undo_check(rec, time.monotonic(), front, before, window_s=window_s)
+    if reason is None:
+        from permissions import accessibility_trusted
+        if accessibility_trusted() is False:
+            reason = "Accessibility not granted"
+    if reason is not None:
+        print(f"[paste] undo skipped: {reason}", flush=True)
+        return "skipped"
+    _LAST_PASTE = None
+    _wait_modifiers_released()
+    if not _cgevent_cmd_key(_VK_Z):
+        return "failed"
+    print(f"[paste] undo: sent Cmd+Z to {rec.app or rec.pid} "
+          f"(caret check {'passed' if before is not None else 'unavailable'})", flush=True)
+    # Put back what was on the clipboard, unless something was copied since.
+    if rec.clip_before and rec.clip_change is not None \
+            and _clipboard_change_count() == rec.clip_change:
+        _clipboard_set(rec.clip_before)
+    return "undone"
 
 
 def get_active_app() -> Optional[str]:

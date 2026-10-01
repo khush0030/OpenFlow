@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from prompts import PROMPTS
+from prompts import (PROMPTS, SELF_CORRECTION, SELF_CORRECTION_TONES, SNIPPET_MARK,
+                     SNIPPET_NOTE, context_note)
 from sarvam import chat_complete, resolve_api_key
 
 
@@ -39,7 +40,7 @@ class AIProcessor:
         self,
         text: str,
         mode: str = "verbatim",
-        context_app: str | None = None,  # noqa: ARG002 — kept for callers
+        context_app: str | None = None,
         *,
         language: str | None = None,
         glossary: str | None = None,
@@ -51,6 +52,14 @@ class AIProcessor:
             return text
         system = PROMPTS.get(mode) or PROMPTS["verbatim"]
         extras: list[str] = []
+        if mode in SELF_CORRECTION_TONES:
+            extras.append(SELF_CORRECTION)
+        if SNIPPET_MARK in text:
+            extras.append(SNIPPET_NOTE)
+        # The app being dictated into (prompts.CONTEXT_HINTS).
+        note = context_note(context_app, mode)
+        if note:
+            extras.append(note)
         if language in ("hinglish", "hi", "hi_roman", "auto"):
             extras.append(
                 "The speaker often uses Indian English and Hindi–English "
