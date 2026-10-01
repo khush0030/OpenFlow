@@ -216,6 +216,12 @@ def test_no_word_list_means_no_correction():
         sc._ENGLISH = old
 
 
+def test_a_known_name_is_not_respelled_into_another():
+    names = frozenset({"austin"})
+    assert sc.correct("met Austin", ["Austen"], english=frozenset(), names=names) == "met Austin"
+    assert sc.correct("met austen", ["Austen"], english=frozenset(), names=names) == "met Austen"
+
+
 def test_no_terms_is_a_no_op():
     assert fix("thanks Ashtan", []) == "thanks Ashtan"
 
@@ -435,3 +441,14 @@ def test_capture_drops_own_name(words_loaded):
     cap = sc.Capture(1, reader=fake_reader(["Khush Mutha", "Ashton"]),
                      own_name="Khush Mutha", secure_check=lambda: False).run_now()
     assert cap.terms() == ["Ashton"]
+
+
+@pytest.mark.skipif(not __import__("os").path.exists(sc.WORDS_PATH),
+                    reason="no system word list")
+def test_real_word_list_guards_common_words_and_lets_names_through():
+    eng = sc.english_words()
+    keep = "mark it, will do, the hall in austin, send the notes, slack off"
+    assert sc.correct(keep, ["Mark", "Will", "Hall", "Austen", "Sendgrid", "Notion", "Slack"],
+                      english=eng) == keep
+    assert sc.correct("review the Vistar deck with Ashtan", ["Vistaar", "Ashton"],
+                      english=eng) == "review the Vistaar deck with Ashton"

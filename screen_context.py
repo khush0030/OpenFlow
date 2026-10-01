@@ -94,26 +94,45 @@ feedback alerts alert updates update marketing postmaster webmaster root
 """.split())
 
 _ENGLISH: frozenset[str] | None = None
+_NAMES: frozenset[str] = frozenset()
 _ENGLISH_LOCK = threading.Lock()
 WORDS_PATH = "/usr/share/dict/words"
+NAMES_PATH = "/usr/share/dict/propernames"
 
 
 def english_words(load: bool = True) -> frozenset[str] | None:
     """Lower-case entries of the system word list (macOS web2): ordinary
-    English words. Capitalised entries there are proper names, left out.
-    Loaded once (~80 ms) off the paste path; None until then if load=False."""
-    global _ENGLISH
+    English words. Its capitalised entries (and propernames) are known
+    proper names, kept apart in known_names().
+    Loaded once (~100 ms) off the paste path; None until then if load=False."""
+    global _ENGLISH, _NAMES
     if _ENGLISH is not None or not load:
         return _ENGLISH
     with _ENGLISH_LOCK:
         if _ENGLISH is None:
-            try:
-                with open(WORDS_PATH, encoding="utf-8", errors="ignore") as f:
-                    _ENGLISH = frozenset(
-                        line.strip() for line in f if line[:1].islower())
-            except OSError:
-                _ENGLISH = frozenset()
+            words: set[str] = set()
+            names: set[str] = set()
+            for path in (WORDS_PATH, NAMES_PATH):
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            w = line.strip()
+                            if w[:1].islower():
+                                words.add(w)
+                            elif w[:1].isupper():
+                                names.add(w.lower())
+                except OSError:
+                    pass
+            _NAMES = frozenset(names - words)
+            _ENGLISH = frozenset(words)
     return _ENGLISH
+
+
+def known_names() -> frozenset[str]:
+    """Lower-cased proper names from the system word lists (Austin, Mark…),
+    loaded with english_words(). A transcript word that already is one is
+    never respelled into a different name."""
+    return _NAMES
 
 
 def is_ordinary_word(word: str, english: Iterable[str] | None = None) -> bool:
@@ -354,12 +373,16 @@ def _match(word: str, choices: dict[str, str], threshold: int) -> str | None:
 
 
 def correct(text: str, terms: list[str], threshold: int = 85,
-            english: Iterable[str] | None = None) -> str:
+            english: Iterable[str] | None = None,
+            names: Iterable[str] | None = None) -> str:
     """Respell near-misses of on-screen names. Precision over recall:
     only words of 4+ letters that are not ordinary English words are ever
     touched; two words that join to a CamelCase term ("git hub" → GitHub)
-    must match it exactly. Needs the English word list; without it, a no-op."""
+    must match it exactly. A word that is already a known name ("Austin")
+    only ever gets its case fixed, never another name's spelling.
+    Needs the English word list; without it, a no-op."""
     english = english if english is not None else english_words(load=False)
+    names = names if names is not None else known_names()
     if not text or not terms or english is None:
         return text
     words: dict[str, str] = {}      # lower -> spelling, single words only
@@ -391,7 +414,9 @@ def correct(text: str, terms: list[str], threshold: int = 85,
                 i += 3
                 continue
         if len(tok) >= 4 and tok.isalpha() and not is_ordinary_word(tok, english):
-            hit = words.get(tok.lower()) or _match(tok, words, threshold)
+            hit = words.get(tok.lower())
+            if hit is None and tok.lower() not in names:
+                hit = _match(tok, words, threshold)
             if hit:
                 out.append(hit)
                 i += 1
