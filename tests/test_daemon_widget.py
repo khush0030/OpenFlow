@@ -229,7 +229,6 @@ class FakeAI:
 
 
 def test_edit_mode_retry_reruns_as_edit_on_original_selection(env, monkeypatch):
-    monkeypatch.setattr(dm, "_signal_edit_overlay", lambda status: None)
     d = make_daemon()
     d.ai = FakeAI()
     d._edit_selection = "Selected text"
@@ -248,7 +247,6 @@ def test_edit_mode_retry_reruns_as_edit_on_original_selection(env, monkeypatch):
 
 
 def test_cancelled_edit_does_not_arm_next_hold(env, monkeypatch):
-    monkeypatch.setattr(dm, "_signal_edit_overlay", lambda status: None)
     d = make_daemon()
     d.ai = FakeAI()
     d._edit_selection = "Selected text"

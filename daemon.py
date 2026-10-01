@@ -68,7 +68,6 @@ _install_file_logger()
 
 import json
 import subprocess
-import tempfile
 
 import config as cfg_mod
 from openflow_logger import get_logger, log_exception
@@ -93,7 +92,7 @@ from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, FlowController, FlowHooks
-from widget_channel import WidgetServer
+from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
 import sounds
@@ -255,7 +254,6 @@ class _WidgetWatchdog:
                   f"backoff capped at {self.MAX_DELAY_S:.0f}s", flush=True)
 
 
-_EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
 _ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
 _FIRST_RUN_CONFIG = Path(os.path.expanduser("~/.openflow/config.toml"))
 _FIRST_RUN_POLL_S = 0.25
@@ -298,23 +296,10 @@ def _maybe_run_onboarding_blocking() -> None:
         time.sleep(_FIRST_RUN_POLL_S)
 
 
-def _spawn_edit_overlay(selection: str) -> None:
-    """Spawn the PyQt6 edit-mode overlay (subprocess, never blocks)."""
-    try:
-        sel_file = Path(tempfile.mkstemp(prefix="openflow-edit-sel-", suffix=".txt")[1])
-        sel_file.write_text(selection)
-        _spawn_ui(["edit-overlay", str(sel_file)], "ui/edit_overlay.py",
-                  dev_args=(str(sel_file),))
-    except Exception as e:
-        print(f"[daemon] edit overlay spawn failed: {e}", flush=True)
-
-
-def _signal_edit_overlay(status: str) -> None:
-    """Tell the running overlay to close (status='done' or 'cancel')."""
-    try:
-        _EDIT_OVERLAY_STATE.write_text(json.dumps({"status": status, "at": time.time()}))
-    except Exception:
-        pass
+def _spawn_edit_overlay() -> subprocess.Popen | None:
+    """Spawn the PyQt6 edit-mode overlay (subprocess, never blocks). It
+    connects back over EDIT_OVERLAY_SOCKET_PATH for the selection."""
+    return _spawn_ui(["edit-overlay"], "ui/edit_overlay.py")
 
 
 class Daemon:
@@ -835,6 +820,8 @@ class Daemon:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
             self._edit_pending = False   # a cancelled edit must not arm the next hold
+            if edit_mode:
+                self._close_edit_overlay()
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             print("[daemon] recording cancelled (undo available).", flush=True)
@@ -884,9 +871,53 @@ class Daemon:
             self._edit_selection = sel
             self._edit_pending = True
             print(f"[daemon] edit mode armed; selection ({len(sel)} chars). Hold record key and speak instruction.", flush=True)
-            _spawn_edit_overlay(sel)
+            self._show_edit_overlay(sel)
         except Exception as e:
             log_exception("daemon.edit_mode", "edit-mode trigger failed", e)
+
+    # -- Edit overlay link (~/.openflow/edit-overlay.sock) ----------------
+    # Same channel as the flow widget: the overlay process lives exactly as
+    # long as its connection, so there is no state file and no polling.
+
+    def _start_edit_overlay_channel(self) -> None:
+        self._edit_overlay = WidgetServer(EDIT_OVERLAY_SOCKET_PATH,
+                                          on_connect=self._on_edit_overlay_connect,
+                                          on_disconnect=self._on_edit_overlay_gone)
+        try:
+            self._edit_overlay.start()
+        except OSError as e:
+            # Another daemon owns the socket: edit mode still works, just
+            # without the on-screen selection.
+            log_exception("daemon.edit_overlay", "edit overlay socket unavailable", e)
+            self._edit_overlay = None
+
+    def _show_edit_overlay(self, selection: str) -> None:
+        server = getattr(self, "_edit_overlay", None)
+        if server is None:
+            return
+        # Already up: swap the text in place. Otherwise spawn it; it gets
+        # the selection when it connects.
+        if not server.send({"type": "show", "selection": selection}):
+            _spawn_edit_overlay()
+
+    def _close_edit_overlay(self) -> None:
+        server = getattr(self, "_edit_overlay", None)
+        if server is not None:
+            server.send({"type": "close"})
+
+    def _on_edit_overlay_connect(self) -> None:
+        if self._edit_pending:
+            self._edit_overlay.send({"type": "show", "selection": self._edit_selection})
+        else:
+            self._edit_overlay.send({"type": "close"})  # the edit ended before it came up
+
+    def _on_edit_overlay_gone(self) -> None:
+        # Esc, its 30 s timeout or a crash. An edit already being dictated
+        # carries on; an armed one is dropped so the next hold dictates
+        # normally instead of rewriting a selection the user can't see.
+        if self._edit_pending and not self.recorder.is_recording:
+            self._edit_pending = False
+            print("[daemon] edit overlay closed — edit mode cancelled.", flush=True)
 
     # -- Worker ----------------------------------------------------------
 
@@ -927,7 +958,6 @@ class Daemon:
             if ctx.edit_mode:
                 instruction = raw.strip()
                 final = self.ai.edit_selection(ctx.selection, instruction)
-                _signal_edit_overlay("done")
             else:
                 final = self._post_process(raw)
 
@@ -970,6 +1000,10 @@ class Daemon:
             self._busy.release()
             self.state.recording = RecordingState.IDLE
             self.state.notify()
+            if ctx.edit_mode and not self._edit_pending:
+                # Done, failed or empty: the overlay's job is over (unless
+                # the user already armed the next edit on it).
+                self._close_edit_overlay()
 
     # -- Control socket (app hub, spec 2026-10-01 §3) ----------------------
     # Each connection is served on its own control-conn thread (never the
@@ -1118,6 +1152,7 @@ class Daemon:
         self._start_widget_channel()
         # Hub -> daemon commands (status, Paste again, Run it again as…).
         self._start_control_channel()
+        self._start_edit_overlay_channel()
 
         sv = self.cfg.get("sarvam") or {}
         print(
@@ -1156,6 +1191,8 @@ class Daemon:
             if self._widget is not None:
                 self._widget.stop()
             self._stop_control_channel()
+            if getattr(self, "_edit_overlay", None) is not None:
+                self._edit_overlay.stop()   # the overlay quits on the hang-up
             if self._hold:
                 self._hold.stop()
             if self._chords:

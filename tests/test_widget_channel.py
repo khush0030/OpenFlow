@@ -377,3 +377,72 @@ def test_new_server_can_start_after_first_stops():
     assert wait_for(lambda: b.connected)
     cli.close()
     b.stop()
+
+
+# -- on_disconnect: the live peer going away, and only that ----------------
+
+def test_server_on_disconnect_fires_when_the_peer_closes():
+    gone = []
+    srv = WidgetServer(sock_path(), on_disconnect=lambda: gone.append(1))
+    srv.start()
+    cli = WidgetClient(srv.path)
+    assert cli.connect()
+    assert wait_for(lambda: srv.connected)
+    assert gone == []
+    cli.close()
+    assert wait_for(lambda: gone == [1])
+    srv.stop()
+
+
+def test_server_on_disconnect_ignores_a_replaced_client():
+    gone = []
+    srv = WidgetServer(sock_path(), on_disconnect=lambda: gone.append(1))
+    srv.start()
+    old = WidgetClient(srv.path)
+    assert old.connect()
+    assert wait_for(lambda: srv.connected)
+    new = WidgetClient(srv.path)
+    assert new.connect()
+    assert wait_for(lambda: not old.connected)
+    time.sleep(0.1)
+    assert gone == [] and srv.connected
+    new.close()
+    assert wait_for(lambda: gone == [1])
+    srv.stop()
+
+
+def test_server_on_disconnect_not_fired_by_stop():
+    gone = []
+    srv = WidgetServer(sock_path(), on_disconnect=lambda: gone.append(1))
+    srv.start()
+    cli = WidgetClient(srv.path)
+    assert cli.connect()
+    assert wait_for(lambda: srv.connected)
+    srv.stop()
+    assert wait_for(lambda: not cli.connected)
+    time.sleep(0.1)
+    assert gone == []
+
+
+def test_message_sent_right_before_close_still_arrives():
+    # A peer may say its last word and hang up at once; the line must not
+    # be lost to the shutdown.
+    got, gone = [], []
+    srv = WidgetServer(sock_path(), on_message=got.append,
+                       on_disconnect=lambda: gone.append(1))
+    srv.start()
+    cli = WidgetClient(srv.path)
+    assert cli.connect()
+    assert wait_for(lambda: srv.connected)
+    assert cli.send({"action": "bye"})
+    cli.close()
+    assert wait_for(lambda: gone)
+    assert got == [{"action": "bye"}]
+    srv.stop()
+
+
+def test_edit_overlay_socket_is_its_own_path_under_openflow():
+    from widget_channel import EDIT_OVERLAY_SOCKET_PATH, SOCKET_PATH
+    assert EDIT_OVERLAY_SOCKET_PATH != SOCKET_PATH
+    assert os.path.dirname(EDIT_OVERLAY_SOCKET_PATH) == os.path.dirname(SOCKET_PATH)
+    assert not EDIT_OVERLAY_SOCKET_PATH.startswith("/tmp")
