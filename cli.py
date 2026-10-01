@@ -8,6 +8,7 @@ Usage:
   python -m openflow dict remove NAME
   python -m openflow history [--limit 20]
   python -m openflow config path
+  python -m openflow key set groq|anthropic   # fast cleanup LLM key → Keychain
   python -m openflow hub [page]      # open the main window (home, history, …)
 """
 from __future__ import annotations
@@ -106,7 +107,39 @@ def _cmd_history(args: argparse.Namespace) -> int:
     h = History()
     rows = h.recent(limit=args.limit)
     for r in rows:
-        print(f"[{r.tone}/{r.lang}] {r.final}")
+        took = f" ({r.t_total:.2f}s)" if r.t_total is not None else ""
+        print(f"[{r.tone}/{r.lang}]{took} {r.final}")
+    return 0
+
+
+def _cmd_key_set(args: argparse.Namespace) -> int:
+    """Store a fast cleanup provider's key in the Keychain. With [cleanup]
+    provider = "auto" (the default) the daemon switches to it on restart."""
+    import getpass
+    import keyring
+    import keyring.errors
+    from llm import FAST_PROVIDERS
+    from sarvam import KEYRING_SERVICE
+    key = (getpass.getpass(f"{args.provider} API key: ") or "").strip()
+    if not key:
+        print("No key entered; nothing changed.")
+        return 1
+    keyring.set_password(KEYRING_SERVICE, FAST_PROVIDERS[args.provider]["keyring_user"], key)
+    print(f"Saved. Restart OpenFlow to use {args.provider} for cleanup.")
+    return 0
+
+
+def _cmd_key_clear(args: argparse.Namespace) -> int:
+    import keyring
+    import keyring.errors
+    from llm import FAST_PROVIDERS
+    from sarvam import KEYRING_SERVICE
+    try:
+        keyring.delete_password(KEYRING_SERVICE, FAST_PROVIDERS[args.provider]["keyring_user"])
+    except keyring.errors.PasswordDeleteError:
+        print(f"No {args.provider} key stored.")
+        return 0
+    print("Removed. Restart OpenFlow to go back to Sarvam for cleanup.")
     return 0
 
 
@@ -219,6 +252,13 @@ def build_parser() -> argparse.ArgumentParser:
     h = sub.add_parser("history")
     h.add_argument("--limit", type=int, default=20)
     h.set_defaults(func=_cmd_history)
+
+    k = sub.add_parser("key", help="store a fast cleanup LLM key (groq, anthropic)")
+    ksub = k.add_subparsers(dest="kcmd", required=True)
+    for name, fn in (("set", _cmd_key_set), ("clear", _cmd_key_clear)):
+        kp = ksub.add_parser(name)
+        kp.add_argument("provider", choices=["groq", "anthropic"])
+        kp.set_defaults(func=fn)
 
     c = sub.add_parser("config")
     c.set_defaults(func=_cmd_config)
