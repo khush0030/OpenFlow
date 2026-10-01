@@ -100,11 +100,16 @@ Entering a new state always dismisses any leftover tooltip or menu.
 
 ### 1 · Idle
 A terracotta handle, **8 × 46**, radius 4, 1 pt border `rgba(255,255,255,.9)`,
-opacity 0.9. Nothing else on screen.
+opacity 0.9. Nothing else on screen. Idle bar: kept as is (user decision
+2026-10-01).
 
 ### 2 · Hover (pointer over the idle handle)
 Only one control: the **Dictate** pill, **36 × 56**, surface colour, mic icon
 **20 pt**. It turns terracotta with a white icon while pointed at.
+- Mic icon: **solid mic** (user pick 2026-10-01): a filled capsule with a
+  stroked stand and stem (24-unit glyph: capsule 8 × 13 at (8, 2.5), radius 4;
+  stand a half circle of radius 7.5 from (4.5, 11); stem (12, 18.5) → (12, 21.5);
+  strokes 2.2 with round caps). Theme text colour, white on the hot pill.
 - Tooltip (follows the mic, see Motion): **"Dictate"** in Fraunces +
   **"Hold ⌘ right"** in Geist 14 pt at 55% opacity, sharing a baseline. The key
   text reflects the configured `record_hold` key.

@@ -533,6 +533,29 @@ def test_hover_shows_mic_first_then_tooltip(fa):
     assert _settles(lambda: fa.widget.reveal == 1.0 and tip.windowOpacity() == 1.0)
 
 
+@pytest.mark.parametrize("hot", [False, True])
+def test_hover_mic_is_solid(fa, hot):
+    # "B · Solid mic" (user pick 2026-10-01): the capsule is filled, in the
+    # icon colour (light on the hot red pill, theme text otherwise).
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa.set_hover(True)
+    w = fa.widget
+    w._anim.stop()
+    w._reveal.stop()
+    w.reveal = 1.0
+    w._hot = "dictate" if hot else None
+    w.setGeometry(fw.window_geometry(w.target_rect))
+    img = w.grab().toImage()
+    k = 20 * fw.S / 24  # the 24-unit glyph at full size
+    c = fw.shape_rect(w).center()
+    for gy in (6, 9, 12):  # down the capsule's middle, in glyph units
+        px = img.pixelColor(int(c.x()), int(c.y() + (gy - 12) * k))
+        if hot:
+            assert min(px.red(), px.green(), px.blue()) > 230
+        else:
+            assert max(px.red(), px.green(), px.blue()) < 60
+
+
 def test_tooltip_slides_in_from_the_widget(fa):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     fa.set_hover(True)

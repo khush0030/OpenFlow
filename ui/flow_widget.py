@@ -736,15 +736,18 @@ class FlowWidget(QWidget):
         k = 20 * S / 24 * self._grow()  # 24-unit glyph (as in the mockup SVG) → 20 pt × scale
         p.scale(k, k)
         p.translate(-12, -12)
+        # "B · Solid mic" (user pick 2026-10-01): filled capsule, stroked stand + stem
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(icon)
+        p.drawRoundedRect(QRectF(8, 2.5, 8, 13), 4, 4)
         pen = QPen(icon, 2.2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(QRectF(9, 3, 6, 11), 3, 3)
-        arc = QPainterPath(QPointF(5, 11))
-        arc.arcTo(QRectF(5, 4, 14, 14), 180, 180)
+        arc = QPainterPath(QPointF(4.5, 11))
+        arc.arcTo(QRectF(4.5, 3.5, 15, 15), 180, 180)  # radius 7.5, bottom half
         p.drawPath(arc)
-        p.drawLine(QPointF(12, 18), QPointF(12, 21))
+        p.drawLine(QPointF(12, 18.5), QPointF(12, 21.5))
         p.restore()
 
     def _paint_recording(self, p: QPainter, r: QRectF, th: Theme) -> None:
