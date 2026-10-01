@@ -218,7 +218,43 @@ def test_rerun_rejects_unknown_tone(env):
 def test_pipeline_post_process_still_follows_daemon_state(env):
     d = make_daemon()
     d.state.tone = ToneMode.SLACK
-    assert d._post_process("open flow") == "<slack>OpenFlow"
+    assert d._post_process("ship open flow on friday") == "<slack>ship OpenFlow on friday"
+
+
+# -- trivial transcripts skip the cleanup LLM -----------------------------------
+
+@pytest.mark.parametrize("text", ["ok", "yes open flow", "thanks a lot"])
+def test_pipeline_skips_cleanup_for_three_words_or_fewer(env, text):
+    d = make_daemon()
+    d.state.tone = ToneMode.PROFESSIONAL
+    assert d._post_process(text) == text.replace("open flow", "OpenFlow")
+    assert d.ai.calls == []
+
+
+def test_four_words_still_get_cleaned_up(env):
+    d = make_daemon()
+    d.state.tone = ToneMode.CASUAL
+    assert d._post_process("sure see you then") == "<casual>sure see you then"
+
+
+def test_bullets_are_never_skipped(env):
+    d = make_daemon()
+    d.state.tone = ToneMode.BULLETS
+    assert d._post_process("milk eggs bread") == "<bullets>milk eggs bread"
+
+
+def test_skip_limit_comes_from_config(env):
+    d = make_daemon()
+    d.state.tone = ToneMode.EMAIL
+    d.cfg["cleanup"] = {"skip_max_words": 0}
+    assert d._post_process("ok") == "<email>ok"
+    d.cfg["cleanup"] = {"skip_max_words": 5}
+    assert d._post_process("sure see you then") == "sure see you then"
+
+
+def test_rerun_of_a_short_transcript_still_cleans_up(env):
+    d = make_daemon()
+    assert d._ctl_rerun("ok", "professional")["text"] == "<professional>ok"
 
 
 # -- play_cues / check --------------------------------------------------------

@@ -70,6 +70,9 @@ DEFAULTS: dict[str, Any] = {
         "groq_api_key_env": "OPENFLOW_GROQ_API_KEY",
         "anthropic_model": "claude-haiku-4-5-20251001",
         "anthropic_api_key_env": "OPENFLOW_ANTHROPIC_API_KEY",
+        # Transcripts of at most this many words skip the LLM (Saaras already
+        # punctuates; "ok" doesn't need a rewrite). Bullets always go. 0 = off.
+        "skip_max_words": 3,
     },
     "dictionary": {
         "fuzzy_threshold": 85,

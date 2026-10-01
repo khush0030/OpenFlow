@@ -460,10 +460,19 @@ class Daemon:
             return bool(d["inject_into_cleanup"])
         return True
 
+    def _trivial(self, text: str, tone: str) -> bool:
+        """Short enough that the cleanup LLM can only add latency: at most
+        [cleanup] skip_max_words words (Saaras has already punctuated it).
+        Bullets still go, since even three words become a list."""
+        limit = int((self.cfg.get("cleanup") or {}).get(
+            "skip_max_words", cfg_mod.DEFAULTS["cleanup"]["skip_max_words"]))
+        return tone != "bullets" and 0 < len(text.split()) <= limit
+
     def _post_process(self, raw: str, tone: ToneMode | None = None,
-                      language: LanguageMode | None = None) -> str:
+                      language: LanguageMode | None = None,
+                      *, skip_trivial: bool = True) -> str:
         """Dictionary + cleanup for the current modes, or the given ones
-        (control `rerun`)."""
+        (control `rerun`, which always cleans up: the user asked for it)."""
         if not raw:
             return ""
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
@@ -487,6 +496,10 @@ class Daemon:
                 log_exception("daemon.pipeline", "transliterate failed", e)
                 return corrected
         if m_tone in ("raw", "verbatim"):
+            return corrected
+        if skip_trivial and self._trivial(corrected, m_tone):
+            print(f"[daemon] {len(corrected.split())}-word transcript — "
+                  "skipping cleanup", flush=True)
             return corrected
 
         glossary = None
@@ -1096,7 +1109,7 @@ class Daemon:
         Like the pipeline, a failed chat call falls back to the corrected raw text."""
         t = self._parse_tone(tone)
         lang = self._parse_language(language) if language else self.state.language
-        text = self._post_process(raw or "", tone=t, language=lang)
+        text = self._post_process(raw or "", tone=t, language=lang, skip_trivial=False)
         return {"text": text, "tone": t.value, "language": lang.value}
 
     def _ctl_play_cues(self) -> dict:
