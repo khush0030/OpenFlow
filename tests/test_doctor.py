@@ -32,7 +32,7 @@ class _Stream:
 @pytest.fixture
 def fakes(monkeypatch, tmp_path):
     """Mic opens, AX trusted, no key events, files under tmp, key in env."""
-    state = {"mic_error": None, "ax": True, "keyring": None}
+    state = {"mic_error": None, "ax": True, "keyring": None, "im": True}
 
     sd = types.ModuleType("sounddevice")
     sd.InputStream = lambda **kw: _Stream(fail=state["mic_error"])
@@ -40,6 +40,8 @@ def fakes(monkeypatch, tmp_path):
 
     import hotkeys
     monkeypatch.setattr(hotkeys, "accessibility_trusted", lambda: state["ax"])
+    import permissions
+    monkeypatch.setattr(permissions, "input_monitoring_granted", lambda: state["im"])
 
     class _Listener:
         def __init__(self, on_press=None, on_release=None):
@@ -78,6 +80,7 @@ def test_cli_output_is_unchanged(fakes, capsys, tmp_path):
         "sys.executable: /py\n"
         "sys.frozen: False\n"
         "AXIsProcessTrusted: True\n"
+        "Input Monitoring: granted\n"
         "Microphone: ok\n"
         "\nListening for any key events for 5s. Press right Option a few times…\n"
         "Captured 1 events:\n"
@@ -105,8 +108,9 @@ def test_run_checks_returns_structured_results(fakes, tmp_path):
     import doctor
     checks = doctor.run_checks()
     by = {c["name"]: c for c in checks}
-    assert list(by) == ["accessibility", "microphone", "config", "dictionary",
-                        "history", "sarvam_key"]
+    assert list(by) == ["accessibility", "input_monitoring", "microphone", "config",
+                        "dictionary", "history", "sarvam_key"]
+    assert by["input_monitoring"]["ok"] is True
     assert by["accessibility"]["ok"] is True
     assert by["microphone"] == {"name": "microphone", "ok": True, "detail": "ok",
                                 "line": "Microphone: ok"}
@@ -127,3 +131,25 @@ def test_run_checks_reports_failures_without_raising(fakes, monkeypatch):
     assert by["accessibility"]["line"] == "AX check failed: RuntimeError: ax gone"
     assert by["microphone"]["ok"] is False
     assert by["sarvam_key"]["ok"] is False
+
+
+@pytest.mark.parametrize("im, ok, line", [
+    (True, True, "Input Monitoring: granted"),
+    (False, False, "Input Monitoring: NOT granted — System Settings → Privacy & "
+                   "Security → Input Monitoring"),
+    (None, None, "Input Monitoring: unknown (IOHIDCheckAccess unavailable)"),
+])
+def test_input_monitoring_check(fakes, im, ok, line):
+    import doctor
+    fakes["im"] = im
+    c = doctor.check_input_monitoring()
+    assert c["name"] == "input_monitoring" and c["ok"] is ok and c["line"] == line
+
+
+def test_input_monitoring_check_never_raises(fakes, monkeypatch):
+    import doctor
+    import permissions
+    monkeypatch.setattr(permissions, "input_monitoring_granted",
+                        lambda: (_ for _ in ()).throw(RuntimeError("iokit")))
+    c = doctor.check_input_monitoring()
+    assert c["ok"] is None and "RuntimeError: iokit" in c["line"]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import os
 import sys
 
@@ -16,6 +17,18 @@ _app = QApplication.instance() or QApplication([])
 
 import config as cfg_mod
 from ui.settings_tabs.general import GeneralTab
+
+
+@pytest.fixture(autouse=True)
+def _collect_dropped_widgets():
+    # Dropped tabs sit in reference cycles (slots capture self) with their
+    # ToggleSwitch animations still running. If the cyclic GC frees one
+    # while another switch's animation is starting, Qt destroys a running
+    # QPropertyAnimation inside QPropertyAnimation::updateState and
+    # deadlocks on its own mutex. Collect at safe points instead.
+    gc.collect()
+    yield
+    gc.collect()
 
 
 @pytest.fixture

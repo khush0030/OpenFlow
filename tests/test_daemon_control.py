@@ -73,6 +73,9 @@ def env(monkeypatch):
     # Deferred cues run at once so tests stay deterministic.
     monkeypatch.setattr(dm, "_after", lambda delay, fn: fn())
     monkeypatch.setattr(permissions, "accessibility_trusted", lambda: True)
+    # Never ask the real OS (IOKit / AVFoundation) from tests.
+    monkeypatch.setattr(permissions, "input_monitoring_granted", lambda: True)
+    monkeypatch.setattr(permissions, "microphone_granted", lambda: True)
     return {"calls": calls, "logged": logged}
 
 
@@ -97,6 +100,7 @@ def make_daemon():
 
 def test_status_reports_state_modes_key_and_permissions(env, monkeypatch):
     monkeypatch.delattr(permissions, "input_monitoring_granted", raising=False)
+    monkeypatch.delattr(permissions, "microphone_granted", raising=False)
     d = make_daemon()
     d.state.recording = RecordingState.PROCESSING
     assert d._ctl_status() == {

@@ -26,6 +26,25 @@ def check_accessibility() -> Check:
         return _check("accessibility", None, detail, f"AX check failed: {detail}")
 
 
+def check_input_monitoring() -> Check:
+    """IOHIDCheckAccess(ListenEvent): read-only, never prompts."""
+    try:
+        import permissions
+        im = permissions.input_monitoring_granted()
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        return _check("input_monitoring", None, detail,
+                      f"Input Monitoring: check failed — {detail}")
+    if im is None:
+        return _check("input_monitoring", None, "unavailable",
+                      "Input Monitoring: unknown (IOHIDCheckAccess unavailable)")
+    if im:
+        return _check("input_monitoring", True, "granted", "Input Monitoring: granted")
+    return _check("input_monitoring", False, "not granted",
+                  "Input Monitoring: NOT granted — System Settings → Privacy & "
+                  "Security → Input Monitoring")
+
+
 def check_microphone() -> Check:
     try:
         import sounddevice as sd
@@ -64,4 +83,5 @@ def check_sarvam_key() -> Check:
 
 def run_checks() -> list[Check]:
     """All non-interactive doctor checks, in CLI order."""
-    return [check_accessibility(), check_microphone(), *check_files(), check_sarvam_key()]
+    return [check_accessibility(), check_input_monitoring(), check_microphone(),
+            *check_files(), check_sarvam_key()]

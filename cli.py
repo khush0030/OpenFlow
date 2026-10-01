@@ -118,6 +118,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     import doctor
     # Accessibility; microphone — try to open
     print(doctor.check_accessibility()["line"])
+    print(doctor.check_input_monitoring()["line"])
     print(doctor.check_microphone()["line"])
 
     # pynput listener — start and watch for 5 seconds
