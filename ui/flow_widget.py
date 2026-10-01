@@ -200,11 +200,14 @@ class Tooltip(Surface):
         super().__init__(theme)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(M + 16, M + 9, M + 16, M + 9)
-        lay.setSpacing(9)
-        lay.addWidget(headline(title, theme), 0, Qt.AlignmentFlag.AlignBaseline)
+        # Sized like Wispr Flow's "Dictate ⌥ Opt" tooltip (user decision 2026-10-01).
+        lay.setContentsMargins(M + 11, M + 8, M + 11, M + 8)
+        lay.setSpacing(7)
+        title_label = headline(title, theme)
+        title_label.setFont(serif_font(13))
+        lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignBaseline)
         self.hint_label = QLabel(hint)
-        self.hint_label.setFont(ui_font(14))
+        self.hint_label.setFont(ui_font(12))
         faded = theme.text[:3] + (140,)
         self.hint_label.setStyleSheet(f"color:{css(faded)};background:transparent;")
         lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignBaseline)
@@ -567,9 +570,10 @@ class FlowWidget(QWidget):
 
     def _button_centers(self, r: QRectF) -> tuple[QPointF, QPointF]:
         c = r.center()
+        inset = min(r.width(), r.height()) / 2  # concentric with the pill's round ends
         if self.vertical:
-            return QPointF(c.x(), r.top() + 13), QPointF(c.x(), r.bottom() - 13)
-        return QPointF(r.left() + 13, c.y()), QPointF(r.right() - 13, c.y())
+            return QPointF(c.x(), r.top() + inset), QPointF(c.x(), r.bottom() - inset)
+        return QPointF(r.left() + inset, c.y()), QPointF(r.right() - inset, c.y())
 
     def hit(self, pos: QPointF) -> str | None:
         r = self._final_shape()
