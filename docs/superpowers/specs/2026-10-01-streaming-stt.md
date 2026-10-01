@@ -90,3 +90,36 @@ Observations:
   today; hooking a live preview is a widget change).
 - Dependency: `websockets` (sync client), imported lazily; if missing,
   streaming is off and batch runs.
+
+## Measured through the app's code path (`scripts/bench_latency.py --stream`)
+
+The clip is fed in 100 ms blocks the way the mic does it. `stt` is the wait from key-up to the transcript.
+
+| clip | batch stt (warm, median) | stream stt (median) | stream runs that fell back |
+| --- | --- | --- | --- |
+| 17.7 s English, fed at 2× speed | 0.48 s (cold 0.94) | **0.17 s** | 1 of 3 (connection dropped, "no close frame") |
+| 7.7 s Hinglish codemix, fed at 1× | 0.45 s (cold 0.96) | **0.28 s** | 2 of 6 (connect timed out at 4 s) |
+
+Each fallback ran the batch upload and returned the same text, so no take was
+lost. The streamed text was identical to the batch text on both clips.
+
+Expected effect in the app: STT drops from about 0.45–0.66 s to about 0.2–0.3 s
+after key-up. That saves about 0.2–0.4 s per take, and more on long takes,
+where the batch upload grows with the clip while the stream does not. It
+should also cut the cold-connection cases (0.9 s or more) that the warm-up
+doesn't catch.
+
+Worst case: the stream hangs after key-up, and the take waits
+`FINISH_TIMEOUT_S` (2 s) plus a batch upload. If the stream fails while the
+user is still talking (as the connect timeouts above did), it costs nothing
+extra, because the take simply goes to batch.
+
+## Not done
+
+- **Live partials in the widget.** The widget has no transcript slot while
+  recording. `StreamingSession(on_partial=...)` is there for that, and it
+  switches `stream_type` to `balanced`. Partials get revised, so they are a
+  preview only.
+- **`keyterms` / `prompt`.** These could carry the dictionary or on-screen
+  names into STT (`keyterms` is v4 only, at most 50 terms). Other work owns
+  that context.

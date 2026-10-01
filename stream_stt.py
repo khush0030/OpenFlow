@@ -29,8 +29,8 @@ REALTIME_URL = "wss://api.sarvam.ai/speech-to-text-realtime/ws"
 # The connect runs while the user talks; a slower one means the network is
 # bad enough that batch is the better bet.
 CONNECT_TIMEOUT_S = 4.0
-# Key-up -> session.end. Measured 0.2-0.35 s; past this, batch.
-FINISH_TIMEOUT_S = 3.0
+# Key-up -> session.end. Measured 0.16-0.35 s (one 1.2 s); past this, batch.
+FINISH_TIMEOUT_S = 2.0
 # Sarvam closes idle sessions (1008); a take that is silent for a while
 # sends nothing (see the gate below), so keep it alive.
 PING_EVERY_S = 5.0
