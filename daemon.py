@@ -87,6 +87,7 @@ from paste import (paste, get_active_app, capture_front_app, capture_paste_targe
                    focused_editable, set_clipboard)
 from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
+from sarvam import STT_URL, warm
 from dictionary import Dictionary
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
@@ -348,6 +349,7 @@ class Daemon:
         ), provider=make_cleanup_provider(self.cfg))
         print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
               f"({self.ai.provider.model})", flush=True)
+        self._warm_enabled = True     # see _warm_up
         self.dictionary = Dictionary.load()
         self.history = History()
         self._busy = threading.Lock()
@@ -541,9 +543,24 @@ class Daemon:
                 flush=True,
             )
         self.recorder.start()
+        self._warm_up()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
         self._flow.recording_started(hands_free=hands_free)
+
+    def _warm_up(self) -> None:
+        """Key-down: open the STT connection (and the cleanup LLM's, when this
+        dictation will use it) while the user is still talking, so key-up
+        skips the TCP + TLS handshake. Only a daemon built by __init__ does
+        this; tests build bare ones that must never touch the network."""
+        if not getattr(self, "_warm_enabled", False):
+            return
+        try:
+            warm(STT_URL)
+            if self._edit_pending or self.state.tone.value not in ("raw", "verbatim"):
+                warm(getattr(self.ai.provider, "url", None))
+        except Exception as e:
+            print(f"[daemon] warm-up skipped: {e}", flush=True)
 
     # -- Flow widget wiring ----------------------------------------------
 

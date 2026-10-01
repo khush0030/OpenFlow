@@ -19,7 +19,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from sarvam import _http, chat_complete, find_api_key, resolve_api_key
+from sarvam import CHAT_URL, _http, chat_complete, find_api_key, resolve_api_key
 
 
 class LLMError(RuntimeError):
@@ -32,12 +32,14 @@ class ChatProvider(Protocol):
     """One system + user turn in, the reply text out. Raises on failure."""
     name: str
     model: str
+    url: str        # endpoint; its host is pre-connected at key-down
 
     def complete(self, system: str, user: str, *, max_tokens: int) -> str: ...
 
 
 class SarvamChat:
     name = "sarvam"
+    url = CHAT_URL
 
     def __init__(self, model: str = "sarvam-105b",
                  api_key_env: str = "SARVAM_API_KEY") -> None:
@@ -122,6 +124,7 @@ class OpenAICompatChat:
 class AnthropicChat:
     name = "anthropic"
     URL = "https://api.anthropic.com/v1/messages"
+    url = URL
 
     def __init__(self, model: str, api_key: str, timeout: float = 15.0) -> None:
         self.model = model

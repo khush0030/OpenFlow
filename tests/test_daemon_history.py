@@ -82,3 +82,34 @@ def test_retry_does_not_count_time_spent_on_the_card(env):
     d._rerun(None, ctx, 1)
     assert seen[0].keyup_at is None and seen[0].record_s is None
     assert ctx.keyup_at == 1.0               # original left alone
+
+
+# -- key-down warm-up -----------------------------------------------------------
+
+def _warm_daemon(monkeypatch, tone):
+    warmed = []
+    monkeypatch.setattr(dm, "warm", lambda url: warmed.append(url))
+    d = make_daemon()
+    d.state.tone = tone
+    d.ai = SimpleNamespace(provider=SimpleNamespace(url="https://api.groq.com/x"))
+    d._warm_enabled = True
+    return d, warmed
+
+
+def test_warm_up_opens_stt_and_cleanup_hosts(env, monkeypatch):
+    d, warmed = _warm_daemon(monkeypatch, dm.ToneMode.PROFESSIONAL)
+    d._warm_up()
+    assert warmed == [dm.STT_URL, "https://api.groq.com/x"]
+
+
+def test_warm_up_skips_the_llm_when_the_tone_wont_use_it(env, monkeypatch):
+    d, warmed = _warm_daemon(monkeypatch, dm.ToneMode.VERBATIM)
+    d._warm_up()
+    assert warmed == [dm.STT_URL]
+
+
+def test_bare_test_daemon_never_warms(env, monkeypatch):
+    warmed = []
+    monkeypatch.setattr(dm, "warm", lambda url: warmed.append(url))
+    make_daemon()._warm_up()
+    assert warmed == []

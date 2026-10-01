@@ -7,6 +7,7 @@ one vendor end-to-end.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -126,6 +127,36 @@ def _http() -> httpx.Client:
                                 keepalive_expiry=KEEPALIVE_S),
         )
     return _client
+
+
+# Warm-up: a bare HEAD to a host opens (or refreshes) the pooled connection,
+# so the dictation's real request skips the handshake. Sent at key-down; the
+# user is still talking while it runs. No key, no payload, no quota.
+WARM_EVERY_S = 10.0
+_warm_lock = threading.Lock()
+_warmed_at: dict[str, float] = {}
+
+
+def warm(url: str | None, *, clock=time.monotonic) -> bool:
+    """Open a connection to `url`'s host in the background, at most once per
+    WARM_EVERY_S per host. Returns True if a warm-up was started."""
+    if not url:
+        return False
+    origin = httpx.URL(url).copy_with(path="/", query=None)
+    host = str(origin)
+    now = clock()
+    with _warm_lock:
+        if now - _warmed_at.get(host, float("-inf")) < WARM_EVERY_S:
+            return False
+        _warmed_at[host] = now
+
+    def run() -> None:
+        try:
+            _http().head(host, timeout=5.0)
+        except Exception:
+            pass       # best effort: the real request connects as before
+    threading.Thread(target=run, name="http-warm", daemon=True).start()
+    return True
 
 
 def _request_with_retry(
