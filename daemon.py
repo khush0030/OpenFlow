@@ -226,6 +226,7 @@ class RunContext:
     # Latency bookkeeping for the live run only (Undo/Retry clear it):
     keyup_at: float | None = None  # time.monotonic() when recording stopped
     record_s: float | None = None  # key-up -> audio in hand (recorder.stop)
+    stream: object = None          # the take's StreamingSession, if streamed
 
 
 class _WidgetWatchdog:
@@ -343,7 +344,10 @@ class Daemon:
         self.transcriber = Transcriber(
             model=sarvam_cfg.get("stt_model", "saaras:v4"),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
+            streaming=sarvam_cfg.get("streaming", "auto"),
         )
+        self._stream_enabled = True   # see _open_stream
+        self._stream = None
         threading.Thread(
             target=self.transcriber.preload, name="sarvam-preload", daemon=True
         ).start()
@@ -649,11 +653,50 @@ class Daemon:
                 f"ax={'yes' if remembered.ax_element is not None else 'no'}",
                 flush=True,
             )
+        self._open_stream()
         self.recorder.start()
         self._warm_up()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
         self._flow.recording_started(hands_free=hands_free)
+
+    def _open_stream(self) -> None:
+        """Key-down: stream this take to Sarvam while the user talks
+        (stream_stt.py), so key-up only waits for the last words. Off per
+        [sarvam] streaming; the take falls back to batch on any problem.
+        Only a daemon built by __init__ streams; test daemons never do."""
+        self._drop_stream()
+        if not getattr(self, "_stream_enabled", False):
+            return
+        try:
+            opts = self._stt_opts(self._tone_for(self._paste_target))
+            stream = self.transcriber.begin_stream(opts)
+        except Exception as e:
+            print(f"[daemon] streaming skipped: {e}", flush=True)
+            return
+        if stream is not None:
+            self._stream = stream
+            self.recorder.on_block = stream.feed
+
+    def _take_stream(self):
+        """Detach the take's stream from the recorder; None if not streaming."""
+        stream = getattr(self, "_stream", None)
+        self._stream = None
+        if stream is not None:
+            self.recorder.on_block = None
+        return stream
+
+    @staticmethod
+    def _abort_stream(ctx: RunContext) -> None:
+        """A take that won't be transcribed now (cancel, too short, can't
+        hear you): close its stream. Undo/Retry replay through batch."""
+        if ctx.stream is not None:
+            ctx.stream.abort()
+
+    def _drop_stream(self) -> None:
+        stream = self._take_stream()
+        if stream is not None:
+            stream.abort()
 
     def _warm_up(self) -> None:
         """Key-down: open the STT connection (and the cleanup LLM's, when this
@@ -793,7 +836,7 @@ class Daemon:
         mode and against the same paste target / selection."""
         if isinstance(ctx, RunContext):
             # The user waited on the card: key-up time no longer means anything.
-            ctx = replace(ctx, keyup_at=None, record_s=None)
+            ctx = replace(ctx, keyup_at=None, record_s=None, stream=None)
         self._start_worker(audio, ctx, run)
 
     def _save_widget_setting(self, key: str, value: str) -> None:
@@ -860,6 +903,14 @@ class Daemon:
             if not self._auto_learn():
                 self._stop_paste_watch()
             print(f"[daemon] dictionary auto_learn -> {self._auto_learn()}", flush=True)
+        # [sarvam] streaming: read per take (Transcriber.begin_stream).
+        streaming = (fresh.get("sarvam") or {}).get("streaming", "auto")
+        if streaming != (self.cfg.get("sarvam") or {}).get("streaming", "auto"):
+            self.cfg.setdefault("sarvam", {})["streaming"] = streaming
+            transcriber = getattr(self, "transcriber", None)
+            if hasattr(transcriber, "set_streaming"):
+                transcriber.set_streaming(streaming)
+            print(f"[daemon] streaming STT -> {streaming}", flush=True)
         if ch.cleanup is not None:
             self.cfg["cleanup"] = ch.cleanup
             self.ai.provider = make_cleanup_provider(self.cfg)
@@ -979,7 +1030,10 @@ class Daemon:
         keyup_at = time.monotonic()
         audio = self.recorder.stop()
         record_s = time.monotonic() - keyup_at
+        stream = self._take_stream()
         if audio.size == 0:
+            if stream is not None:
+                stream.abort()
             # Either another thread (✓/✕ racing the key release) already
             # stopped this recording — only that winner drives the flow — or
             # the tap was too short to capture a single block.
@@ -990,7 +1044,7 @@ class Daemon:
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
                          selection=getattr(self, "_edit_selection", "") if edit_mode else "",
-                         keyup_at=keyup_at, record_s=record_s)
+                         keyup_at=keyup_at, record_s=record_s, stream=stream)
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
@@ -1000,6 +1054,7 @@ class Daemon:
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             print("[daemon] recording cancelled (undo available).", flush=True)
+            self._abort_stream(ctx)
             self._flow.cancelled(audio, ctx)
             return
         sr = self.cfg["audio"]["sample_rate"]
@@ -1007,6 +1062,7 @@ class Daemon:
         print(f"[daemon] captured {dur:.2f}s; transcribing...", flush=True)
         if dur < 0.25:
             print("[daemon] too short, ignoring.", flush=True)
+            self._abort_stream(ctx)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             self._flow.done()
@@ -1017,6 +1073,7 @@ class Daemon:
             # trip (or comes back as a made-up phrase). Say so instead.
             print(f"[daemon] can't hear you: loudest {loudest_rms(audio, sr):.5f} < "
                   f"{no_input} — mic muted or wrong input? Not transcribing.", flush=True)
+            self._abort_stream(ctx)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             self._flow.no_audio(audio, ctx)
@@ -1178,6 +1235,7 @@ class Daemon:
             # The previous dictation never finished: keep this audio and
             # offer Retry rather than dropping it.
             print("[daemon] previous dictation still processing — offering Retry.", flush=True)
+            self._abort_stream(ctx)
             self._flow.failed(audio, ctx, run=run) or self._stale(run)
             return
         self.state.recording = RecordingState.PROCESSING
@@ -1195,7 +1253,10 @@ class Daemon:
                 print(f"[daemon] tone for {getattr(target, 'name', '?')}: {tone.value}", flush=True)
             opts = self._stt_opts(tone)
             try:
-                raw = self.transcriber.transcribe(audio, opts)
+                if ctx.stream is not None:
+                    raw = self.transcriber.transcribe(audio, opts, stream=ctx.stream)
+                else:
+                    raw = self.transcriber.transcribe(audio, opts)
             except Exception as e:
                 log_exception("daemon.pipeline", "transcription failed — offering Retry", e)
                 self._flow.failed(audio, ctx, run=run) or self._stale(run)
@@ -1207,7 +1268,8 @@ class Daemon:
                 timings["encode"] = encode_s
             timings["stt"] = stt_t.get("stt", (t1 - t0) - (encode_s or 0.0))
             print(
-                f"[daemon] sarvam-stt {t1-t0:.2f}s mode={opts.mode} "
+                f"[daemon] sarvam-stt {t1-t0:.2f}s "
+                f"via={getattr(self.transcriber, 'last_source', 'batch')} mode={opts.mode} "
                 f"lang={opts.language_code!r} "
                 f"trimmed={getattr(self.transcriber, 'last_trimmed_s', 0.0):.2f}s: {raw!r}",
                 flush=True,

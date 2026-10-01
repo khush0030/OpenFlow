@@ -66,6 +66,12 @@ DEFAULTS: dict[str, Any] = {
         "chat_model": "sarvam-105b",
         "max_tokens": 1024,
         "api_key_env": "SARVAM_API_KEY",
+        # Stream speech to Sarvam's realtime API while the key is held, so
+        # the transcript is ready ~0.3 s after key-up (stream_stt.py).
+        # "auto": stream, and stop for the run if Sarvam refuses the session.
+        # true: stream every take. false: upload after key-up only. Any
+        # stream problem falls back to the upload for that take.
+        "streaming": "auto",
     },
     "cleanup": {
         # LLM that rewrites dictation in the cleanup tones (llm.py).

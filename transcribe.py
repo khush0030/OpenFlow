@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.io import wavfile
 
+import stream_stt
 from sarvam import (
     STT_MAX_SECONDS,
     STTResult,
@@ -69,11 +70,25 @@ def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
+def streaming_policy(value) -> str:
+    """[sarvam] streaming: "auto" (default), True/"true"/"on" or
+    False/"false"/"off". Anything else reads as "auto"."""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    v = str(value).strip().lower()
+    if v in ("true", "on", "yes", "1"):
+        return "on"
+    if v in ("false", "off", "no", "0"):
+        return "off"
+    return "auto"
+
+
 class Transcriber:
     def __init__(
         self,
         model: str = "saaras:v4",
         api_key_env: str = "SARVAM_API_KEY",
+        streaming="auto",
     ) -> None:
         self.model = model
         self.api_key_env = api_key_env
@@ -82,6 +97,50 @@ class Transcriber:
         # "stt" (Sarvam round trips). Read by the daemon for stage timing.
         self.last_timings: dict[str, float] = {}
         self.last_trimmed_s = 0.0     # silence cut from the last clip
+        # "stream" or "batch": where the last transcript came from.
+        self.last_source = "batch"
+        self.streaming = streaming_policy(streaming)
+        # "auto" stops streaming after Sarvam refuses the session itself
+        # (bad parameter / key / account not enabled), until restart or a
+        # config change.
+        self._stream_refused = False
+
+    def set_streaming(self, value) -> None:
+        policy = streaming_policy(value)
+        if policy != self.streaming:
+            self.streaming = policy
+            self._stream_refused = False
+
+    def begin_stream(
+        self,
+        opts: TranscribeOptions | None = None,
+        on_partial=None,
+        *,
+        connect=None,
+    ) -> "stream_stt.StreamingSession | None":
+        """Key-down: open a realtime session for this take, or None when
+        streaming is off / unavailable (the take then goes to batch).
+        Never raises and never blocks on the network."""
+        if self.streaming == "off" or (self.streaming == "auto" and self._stream_refused):
+            return None
+        if connect is None and not stream_stt.available():
+            return None
+        opts = opts or TranscribeOptions()
+        try:
+            key = self._ensure_key()
+        except Exception:
+            return None
+        kw = {} if connect is None else {"connect": connect}
+        return stream_stt.StreamingSession(
+            api_key=key,
+            model=self.model,
+            language_code=opts.language_code,
+            mode=opts.mode,
+            sample_rate=opts.sample_rate,
+            silence_threshold=opts.silence_threshold,
+            on_partial=on_partial,
+            **kw,
+        ).start()
 
     def preload(self) -> None:
         """Resolve the API key early so the first dictation isn't the one that fails."""
@@ -96,15 +155,26 @@ class Transcriber:
             self._api_key = resolve_api_key(self.api_key_env)
         return self._api_key
 
-    def transcribe(self, audio: np.ndarray, opts: TranscribeOptions | None = None) -> str:
-        result = self.transcribe_detailed(audio, opts)
+    def transcribe(self, audio: np.ndarray, opts: TranscribeOptions | None = None,
+                   stream: "stream_stt.StreamingSession | None" = None) -> str:
+        result = self.transcribe_detailed(audio, opts, stream=stream)
         return result.transcript
 
     def transcribe_detailed(
-        self, audio: np.ndarray, opts: TranscribeOptions | None = None
+        self, audio: np.ndarray, opts: TranscribeOptions | None = None,
+        stream: "stream_stt.StreamingSession | None" = None,
     ) -> STTResult:
+        """`stream`: the take's realtime session (begin_stream at key-down).
+        Its transcript is used when it finishes cleanly with the same
+        language and mode; otherwise `audio` (always the full take) goes
+        to the batch API, so a stream problem costs time, never text."""
         self.last_timings = {}
         self.last_trimmed_s = 0.0
+        self.last_source = "batch"
+        if stream is not None:
+            result = self._finish_stream(stream, opts or TranscribeOptions())
+            if result is not None:
+                return result
         if audio.size == 0:
             return STTResult(transcript="")
         opts = opts or TranscribeOptions()
@@ -141,6 +211,34 @@ class Transcriber:
             language_probability=last.language_probability,
             request_id=last.request_id,
         )
+
+
+    def _finish_stream(self, stream, opts: TranscribeOptions) -> STTResult | None:
+        if not stream.matches(opts.language_code, opts.mode):
+            stream.abort()
+            print("[transcribe] stream opened for another language/mode — batch",
+                  flush=True)
+            return None
+        t0 = time.monotonic()
+        try:
+            result = stream.finish()
+        except Exception as e:
+            if getattr(e, "rejected", False) and self.streaming == "auto":
+                self._stream_refused = True
+                print(f"[transcribe] Sarvam refused streaming ({e}) — batch only "
+                      "until restart; set [sarvam] streaming = true to keep trying",
+                      flush=True)
+            else:
+                print(f"[transcribe] stream failed ({e}) — batch", flush=True)
+            return None
+        if not result.transcript:
+            # Its VAD heard no speech; batch judges the whole clip (a quiet
+            # voice under the gate still gets its chance).
+            print("[transcribe] stream returned no text — batch", flush=True)
+            return None
+        self.last_timings = {"stt": time.monotonic() - t0}
+        self.last_source = "stream"
+        return result
 
 
 # Long dictations are rare and Sarvam rate-limits per key; a few in flight
