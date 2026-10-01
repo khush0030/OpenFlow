@@ -52,6 +52,7 @@ def level_from_rms(rms: float) -> float:
     return max(0.0, min(1.0, (db - LEVEL_FLOOR_DB) / (LEVEL_CEIL_DB - LEVEL_FLOOR_DB)))
 RECORDING_VIEWS = ("recording", "silent", "processing")
 ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
+FOLLOW_MS = 250  # how often the widget checks which display the cursor is on
 MIC_SETTINGS_URLS = (
     "x-apple.systempreferences:com.apple.Sound-Settings.extension?input",
     "x-apple.systempreferences:com.apple.preference.sound",
@@ -153,22 +154,6 @@ def open_mic_settings() -> None:
     for url in MIC_SETTINGS_URLS:
         if QDesktopServices.openUrl(QUrl(url)):
             return
-
-
-def _frontmost_window_center() -> QPoint | None:
-    """Centre of the frontmost app's main window, in global coordinates."""
-    try:
-        from AppKit import NSWorkspace  # type: ignore
-        from Quartz import (CGWindowListCopyWindowInfo, kCGNullWindowID,  # type: ignore
-                            kCGWindowListOptionOnScreenOnly)
-        pid = int(NSWorkspace.sharedWorkspace().frontmostApplication().processIdentifier())
-        for w in CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []:
-            if int(w.get("kCGWindowOwnerPID", -1)) == pid and int(w.get("kCGWindowLayer", 1)) == 0:
-                b = w.get("kCGWindowBounds") or {}
-                return QPoint(int(b["X"] + b["Width"] / 2), int(b["Y"] + b["Height"] / 2))
-    except Exception:
-        return None
-    return None
 
 
 # ── pop-ups ───────────────────────────────────────────────────────────────
@@ -791,7 +776,7 @@ class FlowApp(QObject):
         retry.start(1000)
         follow = QTimer(self)
         follow.timeout.connect(self._follow_screen)
-        follow.start(1000)
+        follow.start(FOLLOW_MS)
         try:
             qapp.styleHints().colorSchemeChanged.connect(lambda *_: self.apply_appearance())
         except Exception:
@@ -891,9 +876,15 @@ class FlowApp(QObject):
             return False
 
     def _screen_rect(self) -> Rect:
-        point = _frontmost_window_center()
-        screen = (QGuiApplication.screenAt(point) if point is not None else None) \
-            or QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        """The display the cursor is on. A cursor in a gap between displays
+        keeps the widget where it is."""
+        screen = QGuiApplication.screenAt(QCursor.pos())
+        if screen is None:
+            return self._screen or self._rect_of(QGuiApplication.primaryScreen())
+        return self._rect_of(screen)
+
+    @staticmethod
+    def _rect_of(screen) -> Rect:
         g = screen.availableGeometry()
         return Rect(g.x(), g.y(), g.width(), g.height())
 

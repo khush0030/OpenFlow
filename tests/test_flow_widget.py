@@ -40,6 +40,8 @@ load_fonts()  # as main() does
 _app.setFont(QFont(FONT_UI))
 
 SCREEN = fw.Rect(0, 25, 1440, 800)
+EXTERNAL = fw.Rect(1440, 0, 2560, 1415)
+_real_screen_rect = fw.FlowApp._screen_rect  # the fixture stubs it out
 
 
 class FakeClient:
@@ -469,3 +471,41 @@ def test_level_rises_fast_and_falls_slowly(fa):
     peak = w._level
     w.set_level(0.0)
     assert peak * 0.6 < w._level < peak  # decays, but not instantly
+
+
+class FakeScreen:
+    def __init__(self, r: fw.Rect) -> None:
+        self.r = r
+
+    def availableGeometry(self):
+        from PyQt6.QtCore import QRect
+        return QRect(int(self.r.x), int(self.r.y), int(self.r.w), int(self.r.h))
+
+
+def _cursor_on(monkeypatch, screen: fw.Rect | None) -> None:
+    monkeypatch.setattr(fw.QCursor, "pos", staticmethod(lambda: QPoint(0, 0)))
+    monkeypatch.setattr(fw.QGuiApplication, "screenAt",
+                        staticmethod(lambda p: FakeScreen(screen) if screen else None))
+
+
+def test_screen_is_the_one_under_the_cursor(fa, monkeypatch):
+    _cursor_on(monkeypatch, EXTERNAL)
+    assert _real_screen_rect(fa) == EXTERNAL
+
+
+def test_cursor_between_displays_keeps_current_screen(fa, monkeypatch):
+    fa._screen = EXTERNAL
+    _cursor_on(monkeypatch, None)
+    assert _real_screen_rect(fa) == EXTERNAL
+
+
+def test_widget_follows_cursor_to_other_display(fa, monkeypatch):
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    monkeypatch.setattr(fa.widget, "isVisible", lambda: True)
+    assert fa.widget.target_rect.right == SCREEN.right - 4
+    monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: EXTERNAL)
+    fa._follow_screen()
+    assert fa.widget.target_rect.right == EXTERNAL.right - 4
+    monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: SCREEN)
+    fa._follow_screen()
+    assert fa.widget.target_rect.right == SCREEN.right - 4
