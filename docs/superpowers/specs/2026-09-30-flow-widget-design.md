@@ -84,9 +84,9 @@ Three positions, chosen by dragging or from the right-click menu; stored as
 ## 4. States
 
 Sizes are in points, given for vertical placement; bottom placement swaps width
-and height. **The widget is drawn at 72% of the sizes below** ("Smaller", user
-decision 2026-10-01; `WIDGET_SCALE` in `ui/widget_geometry.py`): idle 6 × 33,
-hover 26 × 40, recording 19 × 73, and everything inside (icons, buttons,
+and height. **The widget is drawn at 86% of the sizes below** (option B, user
+decision 2026-10-01; `WIDGET_SCALE` in `ui/widget_geometry.py`): idle 7 × 40,
+hover 31 × 48, recording 22 × 88, and everything inside (icons, buttons,
 waveform, tooltip type) scales with it. Toasts and the card keep full size.
 All state changes morph over 220 ms, `cubic-bezier(.2,.8,.2,1)`.
 Entering a new state always dismisses any leftover tooltip or menu.

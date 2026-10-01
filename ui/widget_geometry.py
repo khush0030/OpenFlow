@@ -13,9 +13,9 @@ BOTTOM_INSET = 10   # widget ↔ bottom of the usable area (above the Dock)
 DRAG_THRESHOLD = 4  # movement before a press becomes a drag
 POSITIONS = ("left", "bottom", "right")
 
-# The widget is drawn at 72% of the original design ("Smaller", user decision
+# The widget is drawn at 86% of the original design (option B, user decision
 # 2026-10-01). Everything drawn inside it scales by the same factor.
-WIDGET_SCALE = 0.72
+WIDGET_SCALE = 0.86
 
 _BASE: dict[str, tuple[float, float]] = {
     "idle": (8, 46),

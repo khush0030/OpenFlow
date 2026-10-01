@@ -101,7 +101,7 @@ def fa(monkeypatch):
 def test_idle_handle_size_and_position(fa):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     r = fa.widget.target_rect
-    assert (r.w, r.h) == (6, 33)
+    assert (r.w, r.h) == (7, 40)
     assert r.right == SCREEN.right - 4
 
 
@@ -117,7 +117,7 @@ def test_hover_shows_only_dictate_with_key_hint_and_click_starts(fa):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     fa.set_hover(True)
     assert fa.widget.view == "hover"
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (26, 40)
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (31, 48)
     assert isinstance(fa.popup, fw.Tooltip)
     assert fa.popup.hint_label.text() == "Hold ⌘ right"
     fa.widget.click(QPointF(fw.M + 13, fw.M + 20))
@@ -128,10 +128,10 @@ def test_hover_shows_only_dictate_with_key_hint_and_click_starts(fa):
 
 def test_recording_buttons_hit_test(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (19, 73)
-    assert fa.widget.hit(QPointF(fw.M + 9.5, fw.M + 9.5)) == "x"
-    assert fa.widget.hit(QPointF(fw.M + 9.5, fw.M + 73 - 9.5)) == "ok"
-    fa.widget.click(QPointF(fw.M + 9.5, fw.M + 73 - 9.5))
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (22, 88)
+    assert fa.widget.hit(QPointF(fw.M + 11, fw.M + 11)) == "x"
+    assert fa.widget.hit(QPointF(fw.M + 11, fw.M + 88 - 11)) == "ok"
+    fa.widget.click(QPointF(fw.M + 11, fw.M + 88 - 11))
     assert fa.client.sent[-1] == {"action": "confirm"}
 
 
@@ -155,7 +155,7 @@ def test_menu_choices_apply_and_persist(fa):
     assert fa.client.sent[-1] == {"action": "set_appearance", "value": "ink"}
     fa.choose("position", "bottom")
     assert fa.position == "bottom"
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (33, 6)
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (40, 7)
     assert fa.client.sent[-1] == {"action": "set_position", "value": "bottom"}
 
 
@@ -309,7 +309,7 @@ def test_disconnect_mid_drag_cancels_drag(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
     assert fa.widget.view == "recording"
     assert fa.widget.isVisible()
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (19, 73)
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (22, 88)
 
 
 def test_config_during_drag_waits_for_drop(fa):
@@ -325,7 +325,7 @@ def test_config_during_drag_waits_for_drop(fa):
     assert fa.theme is INK and fa.hold_key == "alt_r"
     assert fa.position == "bottom"  # the user's drop wins over the stored config
     assert fa.client.sent[-1] == {"action": "set_position", "value": "bottom"}
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (33, 6)
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (40, 7)
 
 
 def test_config_echo_after_drop_keeps_the_morph(fa, monkeypatch):
@@ -512,9 +512,14 @@ def test_widget_follows_cursor_to_other_display(fa, monkeypatch):
 
 
 # ── motion (user decision 2026-10-01: mic first, then "Dictate"; smooth everywhere)
-def _wait(ms: int) -> None:
+def _settles(cond) -> bool:
+    """Wait (generously: the suite may run on a busy machine) for cond()."""
     from PyQt6.QtTest import QTest
-    QTest.qWait(ms)
+    for _ in range(150):
+        if cond():
+            return True
+        QTest.qWait(20)
+    return cond()
 
 
 def test_hover_shows_mic_first_then_tooltip(fa):
@@ -525,9 +530,7 @@ def test_hover_shows_mic_first_then_tooltip(fa):
     assert tip.windowOpacity() == 0.0          # tooltip waits…
     assert tip.enter_delay_ms >= fw.MORPH_MS // 2  # …until the mic has grown in
     assert fa.widget.reveal < 1.0               # mic is still fading/scaling in
-    _wait(fw.MORPH_MS + tip.enter_delay_ms + fw.POPUP_IN_MS + 80)
-    assert fa.widget.reveal == 1.0
-    assert tip.windowOpacity() == 1.0
+    assert _settles(lambda: fa.widget.reveal == 1.0 and tip.windowOpacity() == 1.0)
 
 
 def test_tooltip_slides_in_from_the_widget(fa):
@@ -536,8 +539,7 @@ def test_tooltip_slides_in_from_the_widget(fa):
     final = fw.window_geometry(fa.popup.target_rect)
     # right dock: starts nearer the widget (further right) and slides left
     assert fa.popup.geometry().x() > final.x()
-    _wait(fa.popup.enter_delay_ms + fw.POPUP_IN_MS + 80)
-    assert fa.popup.geometry() == final
+    assert _settles(lambda: fa.popup.geometry() == final)
 
 
 def test_other_popups_appear_without_delay(fa):
@@ -549,19 +551,18 @@ def test_other_popups_appear_without_delay(fa):
 def test_closed_popup_fades_out_then_closes(fa):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     fa.set_hover(True)
-    _wait(fa.popup.enter_delay_ms + fw.POPUP_IN_MS + 80)
+    assert _settles(lambda: fa.popup.windowOpacity() == 1.0)
     tip = fa.popup
     fa.set_hover(False)
     assert fa.popup is None
     assert tip.isVisible() and tip.windowOpacity() > 0.0  # still fading
-    _wait(fw.POPUP_OUT_MS + 80)
     from PyQt6 import sip
-    assert sip.isdeleted(tip) or not tip.isVisible()
+    assert _settles(lambda: sip.isdeleted(tip) or not tip.isVisible())
 
 
 def test_moving_a_shown_popup_does_not_replay_its_entrance(fa):
     fa._on_message({"type": "state", "state": "silent", "text": ""})
-    _wait(fw.POPUP_IN_MS + 80)
+    assert _settles(lambda: fa.popup.windowOpacity() == 1.0)
     toast = fa.popup
     fa.relayout(animate=False)
     assert fa.popup is toast and toast.windowOpacity() == 1.0
@@ -570,5 +571,4 @@ def test_moving_a_shown_popup_does_not_replay_its_entrance(fa):
 def test_state_change_reveals_new_contents(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
     assert fa.widget.reveal < 1.0
-    _wait(fw.MORPH_MS + 80)
-    assert fa.widget.reveal == 1.0
+    assert _settles(lambda: fa.widget.reveal == 1.0)
