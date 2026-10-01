@@ -784,6 +784,8 @@ class FlowApp(QObject):
                 # don't yank the widget mid-drag; replayed at the drop
                 self._pending_config = {**(self._pending_config or {}), **m}
                 return
+            if self.widget.isVisible() and self._config_unchanged(m):
+                return  # e.g. the daemon echoing a drop: keep the 220 ms morph
             self._apply_config(m)
             self.relayout(animate=False)
             self.widget.show_pinned()
@@ -795,6 +797,12 @@ class FlowApp(QObject):
             self._apply_state_view()
             self.relayout()
             self.widget.show_pinned()
+
+    def _config_unchanged(self, m: dict) -> bool:
+        pos = m["position"] if m.get("position") in POSITIONS else self.position
+        look = m["appearance"] if m.get("appearance") in APPEARANCES else self.appearance
+        return (pos, look, m.get("hold_key") or self.hold_key) == \
+            (self.position, self.appearance, self.hold_key)
 
     def _apply_config(self, m: dict) -> None:
         if m.get("position") in POSITIONS:

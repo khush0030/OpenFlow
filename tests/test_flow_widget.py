@@ -297,3 +297,28 @@ def test_config_during_drag_waits_for_drop(fa):
     assert fa.position == "bottom"  # the user's drop wins over the stored config
     assert fa.client.sent[-1] == {"action": "set_position", "value": "bottom"}
     assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (46, 8)
+
+
+def test_config_echo_after_drop_keeps_the_morph(fa, monkeypatch):
+    from PyQt6.QtCore import QAbstractAnimation
+    running = QAbstractAnimation.State.Running
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    _start_drag(fa)
+    fa.widget.dragging = False
+    fa.end_drag(QPointF(SCREEN.cx, SCREEN.bottom - 10))   # drop on bottom: 220 ms morph
+    assert fa.widget._anim.state() == running
+    shadows = []
+    monkeypatch.setattr(fw, "add_shadow", lambda w, theme: shadows.append(w))
+    # the daemon echoes the saved position back
+    fa._on_message({"type": "config", "position": "bottom",
+                    "appearance": "paper", "hold_key": "cmd_r"})
+    assert fa.widget._anim.state() == running
+    assert shadows == []
+
+
+def test_changed_config_still_relayouts(fa):
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa._on_message({"type": "config", "position": "left",
+                    "appearance": "ink", "hold_key": "cmd_r"})
+    assert fa.position == "left" and fa.theme is INK
+    assert fa.widget.target_rect.x == SCREEN.x + 4
