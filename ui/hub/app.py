@@ -353,6 +353,11 @@ class AppKitBridge:
         from AppKit import NSApplicationActivationPolicyRegular, NSImage  # type: ignore
         app = self._app()
         app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        # Inside OpenFlow.app the Dock already has the bundle's .icns. A
+        # runtime image replaces it and gets tinted by the Dock's tinted icon
+        # style, so only set one when running from source (no bundle icon).
+        if getattr(sys, "frozen", False):
+            return
         img = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
         if img is not None:
             app.setApplicationIconImage_(img)
