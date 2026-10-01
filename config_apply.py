@@ -36,6 +36,7 @@ class ConfigChanges:
     cleanup:  the new [cleanup] table; the daemon re-picks its cleanup LLM.
     formatting: the new [formatting] table (auto-formatting), read per
               dictation.
+    context:  the new [context] table (screen_names), read per dictation.
     """
     hotkeys: dict[str, str] | None = None
     sounds: dict[str, Any] | None = None
@@ -47,12 +48,13 @@ class ConfigChanges:
     snippets: dict[str, Any] | None = None
     cleanup: dict[str, Any] | None = None
     formatting: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
 
     def __bool__(self) -> bool:
         return any(v is not None for v in (self.hotkeys, self.sounds, self.tone,
                                            self.language, self.general, self.widget,
                                            self.apps, self.snippets, self.cleanup,
-                                           self.formatting))
+                                           self.formatting, self.context))
 
 
 def _section(cfg: dict, name: str) -> dict:
@@ -99,6 +101,8 @@ def plan_changes(old: dict, new: dict) -> ConfigChanges:
         out["cleanup"] = dict(_section(new, "cleanup"))
     if _section(old, "formatting") != _section(new, "formatting"):
         out["formatting"] = dict(_section(new, "formatting"))
+    if _section(old, "context") != _section(new, "context"):
+        out["context"] = dict(_section(new, "context"))
 
     return ConfigChanges(**out)
 
