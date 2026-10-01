@@ -74,6 +74,18 @@ def popup_rect(widget: Rect, size: tuple[float, float], position: str) -> Rect:
     return Rect(widget.x - GAP - w, widget.cy - h / 2, w, h)
 
 
+def clamp_to_screen(rect: Rect, screen: Rect, position: str) -> Rect:
+    """Slide a pop-up back inside the screen (GAP margin) along the axis that
+    runs parallel to the docked edge, so its GAP from the widget is kept.
+    A pop-up too big to fit is pinned to the top (or left) margin."""
+    def slide(start: float, size: float, lo: float, hi: float) -> float:
+        return max(lo + GAP, min(start, hi - GAP - size))
+
+    if position == "bottom":
+        return Rect(slide(rect.x, rect.w, screen.x, screen.right), rect.y, rect.w, rect.h)
+    return Rect(rect.x, slide(rect.y, rect.h, screen.y, screen.bottom), rect.w, rect.h)
+
+
 def nearest_dock(x: float, y: float, view: str, screen: Rect) -> str:
     best, best_d = "right", math.inf
     for pos in POSITIONS:

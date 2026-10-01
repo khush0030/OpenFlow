@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtCore import QPointF, qInstallMessageHandler
+from PyQt6.QtCore import QPoint, QPointF, QRectF, qInstallMessageHandler
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication
 
@@ -32,7 +32,7 @@ _prev_handler = qInstallMessageHandler(_quiet_offscreen)
 
 import ui.flow_widget as fw
 from ui.fonts import load_fonts
-from ui.widget_theme import FONT_UI, INK
+from ui.widget_theme import FONT_UI, INK, PAPER
 
 load_fonts()  # as main() does
 # Offscreen Qt defaults to a "Sans Serif" family that macOS lacks; use the
@@ -141,3 +141,97 @@ def test_disconnect_hides_everything(fa):
     fa._on_message({"type": "_disconnected"})
     assert fa.popup is None
     assert not fa.widget.isVisible()
+
+
+# ── review fixes ─────────────────────────────────────────────────────────
+SCREEN_13 = fw.Rect(0, 25, 1470, 853)  # 13" usable area
+WORDS = ("so the quarterly numbers look fine but we should double check the "
+         "regional breakdown before the meeting on thursday").split()
+
+
+def _inside(card, w) -> bool:
+    tl = w.mapTo(card, QPoint(0, 0))
+    return fw.shape_rect(card).contains(QRectF(tl.x(), tl.y(), w.width(), w.height()))
+
+
+def test_long_card_scrolls_and_fits_screen(fa, monkeypatch):
+    monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: SCREEN_13)
+    text = " ".join(WORDS[i % len(WORDS)] for i in range(400))
+    fa._on_message({"type": "state", "state": "card", "text": text})
+    card = fa.popup
+    r = card.target_rect
+    assert r.y >= SCREEN_13.y + 10 and r.bottom <= SCREEN_13.bottom - 10
+    assert round(fa.widget.target_rect.x - r.right) == 10
+    assert card.height() == round(r.h) + 2 * fw.M
+    card.layout().activate()
+    assert _inside(card, card.copy_button) and _inside(card, card.close_button)
+    assert card.body_scroll.verticalScrollBar().maximum() > 0
+    assert "regional breakdown" in card.body_label.text()
+
+
+def test_short_card_does_not_scroll(fa):
+    fa._on_message({"type": "state", "state": "card", "text": "hello"})
+    card = fa.popup
+    card.layout().activate()
+    assert card.body_scroll.verticalScrollBar().maximum() == 0
+    assert card.target_rect.h < 200
+
+
+def test_relayout_keeps_open_card_and_countdown(fa):
+    fa._on_message({"type": "state", "state": "card", "text": "x"})
+    card = fa.popup
+    card.close_button._elapsed = 7.0
+    card.close_button.paused = True
+    fa.relayout()
+    fa._on_message({"type": "state", "state": "card", "text": "x"})
+    assert fa.popup is card
+    assert card.close_button._elapsed == 7.0 and card.close_button.paused
+    fa._on_message({"type": "state", "state": "card", "text": "y"})
+    assert fa.popup is not card  # new text, new card
+
+
+def test_appearance_change_still_rebuilds_popup(fa):
+    fa._on_message({"type": "state", "state": "error", "text": ""})
+    toast = fa.popup
+    fa.choose("appearance", "ink")
+    assert fa.popup is not toast and fa.popup.theme is INK
+
+
+def test_state_during_drag_waits_for_drop(fa):
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    before = fa.widget.target_rect
+    fa.widget.dragging = True
+    fa.begin_drag()
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    fa._on_message({"type": "state", "state": "error", "text": ""})
+    assert fa.widget.target_rect == before
+    assert fa.popup is None
+    fa.widget.dragging = False
+    fa.end_drag(QPointF(SCREEN.right - 4, SCREEN.cy))
+    assert fa.widget.view == "error"
+    assert isinstance(fa.popup, fw.Toast)
+
+
+def test_frame_timer_runs_only_while_animating(fa):
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget._frames.isActive()
+    fa._on_message({"type": "state", "state": "processing", "text": ""})
+    assert fa.widget._frames.isActive()
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    assert not fa.widget._frames.isActive()
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    fa._on_message({"type": "_disconnected"})
+    assert not fa.widget._frames.isActive()
+
+
+def test_toast_and_countdown_timers_stop_when_expired():
+    t = fw.Toast(PAPER, "Transcript cancelled", "Undo", lambda: None, timer_s=5.0)
+    assert t._timer.isActive()
+    t._t0 -= 6
+    t._tick()
+    assert not t._timer.isActive()
+    fired = []
+    c = fw.CountdownClose(PAPER, 15.0, lambda: fired.append(1))
+    c._elapsed = 15.0
+    c._step()
+    assert fired == [1] and not c._timer.isActive()

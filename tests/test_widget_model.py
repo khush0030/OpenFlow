@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 
 from ui import widget_copy as copy
-from ui.widget_geometry import (GAP, Rect, nearest_dock, popup_rect, widget_rect,
-                                widget_size)
+from ui.widget_geometry import (GAP, Rect, clamp_to_screen, nearest_dock, popup_rect,
+                                widget_rect, widget_size)
 from ui.widget_theme import INK, PAPER, resolve
 
 SCREEN = Rect(0, 25, 1440, 800)
@@ -43,6 +43,43 @@ def test_popup_sits_10pt_from_widget_on_screen_side(pos):
         assert p.x - w.right == GAP and p.cy == w.cy
     else:
         assert w.y - p.bottom == GAP and p.cx == w.cx
+
+
+def test_clamp_leaves_fitting_popup_alone():
+    w = widget_rect("idle", "right", SCREEN)
+    r = popup_rect(w, (200, 50), "right")
+    assert clamp_to_screen(r, SCREEN, "right") == r
+
+
+@pytest.mark.parametrize("pos", ["left", "right"])
+def test_clamp_side_dock_slides_vertically_only(pos):
+    # A widget near the top: the centred pop-up would poke above the screen.
+    w = Rect(SCREEN.x + 4 if pos == "left" else SCREEN.right - 12, SCREEN.y + 5, 8, 46)
+    r = popup_rect(w, (340, 400), pos)
+    c = clamp_to_screen(r, SCREEN, pos)
+    assert (c.x, c.w, c.h) == (r.x, r.w, r.h)          # gap axis untouched
+    assert c.y == SCREEN.y + GAP
+    # ...and near the bottom it slides up
+    w = Rect(w.x, SCREEN.bottom - 50, 8, 46)
+    c = clamp_to_screen(popup_rect(w, (340, 400), pos), SCREEN, pos)
+    assert c.bottom == SCREEN.bottom - GAP
+
+
+def test_clamp_bottom_dock_slides_horizontally_only():
+    w = Rect(SCREEN.x + 5, SCREEN.bottom - 18, 46, 8)
+    r = popup_rect(w, (340, 120), "bottom")
+    c = clamp_to_screen(r, SCREEN, "bottom")
+    assert (c.y, c.w, c.h) == (r.y, r.w, r.h)
+    assert c.x == SCREEN.x + GAP
+    w = Rect(SCREEN.right - 50, SCREEN.bottom - 18, 46, 8)
+    c = clamp_to_screen(popup_rect(w, (340, 120), "bottom"), SCREEN, "bottom")
+    assert c.right == SCREEN.right - GAP
+
+
+def test_clamp_oversized_popup_pins_to_start():
+    w = widget_rect("idle", "right", SCREEN)
+    c = clamp_to_screen(popup_rect(w, (340, 2000), "right"), SCREEN, "right")
+    assert c.y == SCREEN.y + GAP
 
 
 def test_nearest_dock():

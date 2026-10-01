@@ -21,20 +21,22 @@ from PyQt6.QtCore import (QEasingCurve, QObject, QPoint, QPointF, QPropertyAnima
                           QRect, QRectF, Qt, QTimer, QUrl, pyqtSignal)
 from PyQt6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QGuiApplication,
                          QPainter, QPainterPath, QPen)
-from PyQt6.QtWidgets import (QApplication, QGraphicsDropShadowEffect, QHBoxLayout,
-                             QLabel, QMenu, QPushButton, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
+                             QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
+                             QVBoxLayout, QWidget)
 
 from ui import widget_copy as copy
 from ui.fonts import load_fonts
 from ui.vibrancy import pin_overlay
-from ui.widget_geometry import (DRAG_THRESHOLD, POSITIONS, Rect, nearest_dock,
-                                popup_rect, widget_rect)
+from ui.widget_geometry import (DRAG_THRESHOLD, GAP, POSITIONS, Rect, clamp_to_screen,
+                                nearest_dock, popup_rect, widget_rect)
 from ui.widget_theme import APPEARANCES, FONT_SERIF, FONT_UI, Theme, resolve
 from widget_channel import SOCKET_PATH, WidgetClient
 
 M = 16  # transparent margin around every shape: room for the drop shadow
 DOT_SHAPE = (0.45, 0.7, 0.9, 1.0, 0.85, 0.65, 0.4)
 RECORDING_VIEWS = ("recording", "silent", "processing")
+ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
 MIC_SETTINGS_URLS = (
     "x-apple.systempreferences:com.apple.Sound-Settings.extension?input",
     "x-apple.systempreferences:com.apple.preference.sound",
@@ -205,10 +207,15 @@ class Toast(Surface):
         lay.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
         self._timer_s = timer_s
         self._t0 = time.monotonic()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
         if timer_s:
-            t = QTimer(self)
-            t.timeout.connect(self.update)
-            t.start(33)
+            self._timer.start(33)
+
+    def _tick(self) -> None:
+        self.update()
+        if time.monotonic() - self._t0 >= self._timer_s:
+            self._timer.stop()  # bar is empty; nothing left to animate
 
     def paint_extra(self, p: QPainter, r: QRectF) -> None:
         if not self._timer_s:
@@ -280,13 +287,15 @@ class CountdownClose(QWidget):
         self._elapsed = 0.0
         self._last = time.monotonic()
         self._fired = False
-        t = QTimer(self)
-        t.timeout.connect(self._step)
-        t.start(33)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._step)
+        self._timer.start(33)
 
     def _fire(self) -> None:
         if not self._fired:
             self._fired = True
+            self._timer.stop()
+            self.update()
             self._on_close()
 
     def _step(self) -> None:
@@ -323,7 +332,10 @@ class Card(Surface):
     """Couldn't-paste card (state 6)."""
     W = 340
 
-    def __init__(self, theme: Theme, text: str, on_copy, on_dismiss) -> None:
+    BODY_W = W - 32  # inside the 16 pt side margins
+
+    def __init__(self, theme: Theme, text: str, on_copy, on_dismiss,
+                 max_height: float | None = None) -> None:
         super().__init__(theme, radius=18)
         self.setFixedWidth(self.W + 2 * M)
         muted = f"color:{css(theme.muted)};background:transparent;"
@@ -348,7 +360,23 @@ class Card(Surface):
         self.body_label.setWordWrap(True)
         self.body_label.setFont(serif_font(16))
         self.body_label.setStyleSheet(f"color:{css(theme.text)};background:transparent;")
-        v.addWidget(self.body_label)
+        # The transcript scrolls inside the card so ✕ and Copy always stay visible.
+        self.body_scroll = QScrollArea()
+        self.body_scroll.setWidget(self.body_label)
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.body_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.body_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.body_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        self.body_scroll.viewport().setStyleSheet("background:transparent;")
+        thumb = css(theme.muted[:3] + (90,))
+        self.body_scroll.verticalScrollBar().setStyleSheet(
+            f"QScrollBar:vertical{{background:transparent;width:6px;margin:0;}}"
+            f"QScrollBar::handle:vertical{{background:{thumb};border-radius:3px;min-height:24px;}}"
+            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
+            f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{{background:transparent;}}")
+        v.addWidget(self.body_scroll)
         v.addSpacing(14)
 
         rule = QWidget()
@@ -367,6 +395,16 @@ class Card(Surface):
         self.copy_button = solid_button(copy.COPY, theme, on_copy, size=12.5)
         foot.addWidget(self.copy_button)
         v.addLayout(foot)
+        self._fit_body(max_height)
+
+    def _fit_body(self, max_height: float | None) -> None:
+        """Body at its natural height, capped so the whole card is ≤ max_height."""
+        natural = self.body_label.heightForWidth(self.BODY_W)
+        self.body_scroll.setFixedHeight(natural)
+        if max_height is None:
+            return
+        chrome = self.shape_size()[1] - natural
+        self.body_scroll.setFixedHeight(max(24, min(natural, int(max_height - chrome))))
 
     def shape_size(self) -> tuple[float, float]:
         lay = self.layout()
@@ -438,9 +476,10 @@ class FlowWidget(QWidget):
         self._anim = QPropertyAnimation(self, b"geometry", self)
         self._anim.setDuration(220)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        frames = QTimer(self)
-        frames.timeout.connect(self._on_frame)
-        frames.start(33)
+        # Runs only while the waveform or shimmer animates (the morph repaints
+        # itself), so the always-on process doesn't wake 30×/s when idle.
+        self._frames = QTimer(self)
+        self._frames.timeout.connect(self._on_frame)
         add_shadow(self, app.theme)
 
     # state + geometry
@@ -451,7 +490,21 @@ class FlowWidget(QWidget):
     def set_view(self, view: str, hot: str | None = None) -> None:
         self.view = view
         self._hot = hot
+        self._sync_frames()
         self.update()
+
+    def _sync_frames(self) -> None:
+        want = self.isVisible() and self.view in ANIMATED_VIEWS
+        if want and not self._frames.isActive():
+            self._frames.start(33)
+        elif not want and self._frames.isActive():
+            self._frames.stop()
+
+    def showEvent(self, _e) -> None:
+        self._sync_frames()
+
+    def hideEvent(self, _e) -> None:
+        self._sync_frames()
 
     def set_level(self, rms: float) -> None:
         self._level = 0.6 * self._level + 0.4 * max(0.0, min(1.0, rms * 9))
@@ -675,6 +728,7 @@ class FlowApp(QObject):
         self.theme = resolve(self.appearance, self._system_dark())
         self.widget = FlowWidget(self)
         self.popup: Surface | None = None
+        self._popup_key: tuple | None = None
         self.zones: dict[str, DockZone] = {}
         self._screen: Rect | None = None
         # Socket callbacks arrive on a background thread; the signal hops to the UI thread.
@@ -736,10 +790,15 @@ class FlowApp(QObject):
         elif kind == "state":
             self.state = m.get("state", "idle")
             self.text = m.get("text", "")
-            if not (self.widget.view == "hover" and self.state == "idle"):
-                self.widget.set_view(self.state)
+            if self.widget.dragging:
+                return  # don't yank the widget mid-drag; end_drag applies it
+            self._apply_state_view()
             self.relayout()
             self.widget.show_pinned()
+
+    def _apply_state_view(self) -> None:
+        if not (self.widget.view == "hover" and self.state == "idle"):
+            self.widget.set_view(self.state)
 
     # placement
     def _system_dark(self) -> bool:
@@ -782,6 +841,7 @@ class FlowApp(QObject):
             self.popup.close()
             self.popup.deleteLater()
             self.popup = None
+            self._popup_key = None
 
     def _make_popup(self) -> Surface | None:
         v, th = self.widget.view, self.theme
@@ -794,18 +854,25 @@ class FlowApp(QObject):
         if v == "error":
             return Toast(th, copy.ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "card":
-            return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"))
+            screen = self._screen or self._screen_rect()
+            return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
+                        max_height=screen.h - 2 * GAP)
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:
         """Rebuild the pop-up for the current view, placed from the widget's
         final rect (never mid-animation) so it can't overlap the widget."""
-        self._close_popup()
-        popup = self._make_popup()
-        if popup is None:
-            return
-        self.popup = popup
-        popup.show_at(popup_rect(anchor, popup.shape_size(), self.position))
+        screen = self._screen or self._screen_rect()
+        key = (self.widget.view, self.text, self.theme.name, self.hold_key, screen.h)
+        if self.popup is None or key != self._popup_key:
+            self._close_popup()
+            popup = self._make_popup()
+            if popup is None:
+                return
+            self.popup, self._popup_key = popup, key
+        # Unchanged pop-ups are only moved, so timers and hover-pause survive.
+        rect = popup_rect(anchor, self.popup.shape_size(), self.position)
+        self.popup.show_at(clamp_to_screen(rect, screen, self.position))
 
     # drag to dock
     def begin_drag(self) -> None:
@@ -833,6 +900,7 @@ class FlowApp(QObject):
         if near != self.position:
             self.position = near
             self.send("set_position", near)
+        self._apply_state_view()  # any state that arrived mid-drag
         self.relayout(animate=True)
 
     # right-click menu
