@@ -105,7 +105,7 @@ opacity 0.9. Nothing else on screen. Idle bar: kept as is (user decision
 
 ### 2 · Hover (pointer over the idle handle)
 Only one control: the **Dictate** pill, **36 × 56**, surface colour, mic icon
-**20 pt**. It turns terracotta with a white icon while pointed at.
+**20 pt**. It is red (widget accent) with a white icon for the whole hover, matching the red tooltip.
 - Mic icon: **solid mic** (user pick 2026-10-01): a filled capsule with a
   stroked stand and stem (24-unit glyph: capsule 8 × 13 at (8, 2.5), radius 4;
   stand a half circle of radius 7.5 from (4.5, 11); stem (12, 18.5) → (12, 21.5);

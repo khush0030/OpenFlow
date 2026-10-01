@@ -535,8 +535,9 @@ def test_hover_shows_mic_first_then_tooltip(fa):
 
 @pytest.mark.parametrize("hot", [False, True])
 def test_hover_mic_is_solid(fa, hot):
-    # "B · Solid mic" (user pick 2026-10-01): the capsule is filled, in the
-    # icon colour (light on the hot red pill, theme text otherwise).
+    # "B · Solid mic" (user pick 2026-10-01): the capsule is filled. The pill
+    # is red for the whole hover (tooltip C), so the mic is always light,
+    # whether or not the pointer is on the pill itself.
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     fa.set_hover(True)
     w = fa.widget
@@ -550,10 +551,7 @@ def test_hover_mic_is_solid(fa, hot):
     c = fw.shape_rect(w).center()
     for gy in (6, 9, 12):  # down the capsule's middle, in glyph units
         px = img.pixelColor(int(c.x()), int(c.y() + (gy - 12) * k))
-        if hot:
-            assert min(px.red(), px.green(), px.blue()) > 230
-        else:
-            assert max(px.red(), px.green(), px.blue()) < 60
+        assert min(px.red(), px.green(), px.blue()) > 230
 
 
 def test_tooltip_slides_in_from_the_widget(fa):
@@ -768,3 +766,13 @@ def test_hide_for_an_hour_hides_idle_but_not_recording(fa):
     assert not fa.widget.isVisible()
     fa._unhide()
     assert fa.widget.isVisible()
+
+
+def test_hover_pill_stays_red_while_the_tooltip_shows(fa):
+    # Tooltip C is red; the pill under it must be too, even when the pointer
+    # sits in the widget's transparent margin rather than on the pill.
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    fa.set_hover(True)
+    fa.widget._hot = None  # pointer in the margin, off the pill
+    fill, _icon = fa.widget._dictate_colors(fa.theme)
+    assert fill == fw.qc(fa.theme.accent)

@@ -779,11 +779,16 @@ class FlowWidget(QWidget):
         p.setBrush(qc(th.accent))
         p.drawRoundedRect(r, 4 * S, 4 * S)
 
+    @staticmethod
+    def _dictate_colors(th: Theme) -> tuple[QColor, QColor]:
+        """(pill fill, mic colour). Always red while hovered: the red tooltip
+        (option C) shows for the whole hover, including when the pointer is in
+        the window's transparent margin rather than on the pill."""
+        return qc(th.accent), QColor(250, 247, 242)
+
     def _paint_dictate(self, p: QPainter, r: QRectF, th: Theme) -> None:
-        hot = self._hot == "dictate"
-        self._pill(p, r, qc(th.accent) if hot else qc(th.surface),
-                   qc(th.accent) if hot else qc(th.hairline))
-        icon = QColor(250, 247, 242) if hot else qc(th.text)
+        fill, icon = self._dictate_colors(th)
+        self._pill(p, r, fill, fill)
         p.save()
         p.setOpacity(self.reveal)
         p.translate(r.center())
