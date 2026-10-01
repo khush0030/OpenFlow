@@ -9,6 +9,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
@@ -147,3 +148,41 @@ def test_unknown_values_in_config_do_not_crash():
                                  "hindi_script": "klingon"}))
     assert not any(c.is_default() for c in page.cards.values())
     assert page.hindi_script.value() == "devanagari"
+
+
+@pytest.mark.real_workers
+def test_daemon_calls_run_off_the_ui_thread_and_last_choice_wins():
+    import threading
+    import time
+    from hub_async import deliver_queued
+    gate = threading.Event()
+    seen, in_flight, peak = [], [0], [0]
+    lock = threading.Lock()
+
+    class Slow(FakeCtx):
+        def call(self, cmd, timeout=5.0, **args):
+            with lock:
+                in_flight[0] += 1
+                peak[0] = max(peak[0], in_flight[0])
+            seen.append(threading.current_thread().name)
+            try:
+                gate.wait(5)
+                return super().call(cmd, timeout=timeout, **args)
+            finally:
+                with lock:
+                    in_flight[0] -= 1
+
+    ctx = Slow(general={"default_tone": "verbatim"})
+    page = make(ctx)
+    t0 = time.monotonic()
+    for tone in ("email", "slack", "casual"):
+        QTest.mouseClick(page.cards[tone], Qt.MouseButton.LeftButton)
+    assert time.monotonic() - t0 < 0.5
+    assert page.cards["casual"].is_default()               # the UI updated at once
+    assert ("general", "default_tone", "casual") in ctx.saved
+    gate.set()
+    assert deliver_queued(lambda: ctx.calls and ctx.calls[-1] == ("set_tone", {"value": "casual"})
+                          and not page._daemon_busy)
+    assert [c for c in ctx.calls] == [("set_tone", {"value": "email"}),
+                                      ("set_tone", {"value": "casual"})]   # slack superseded
+    assert peak[0] == 1 and set(seen) == {"hub-worker"}

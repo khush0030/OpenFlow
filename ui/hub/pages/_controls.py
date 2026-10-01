@@ -1,18 +1,17 @@
 """Controls shared by the Settings and Help pages (mockup boards 6–8).
 
 Toggle switch, segmented control, settings rows, keycaps, the shortcut
-key recorder, and a thread helper. Key capture is split into pure
-functions (event facts in, config string out) so it is unit tested
-without a keyboard.
+key recorder. Key capture is split into pure functions (event facts in,
+config string out) so it is unit tested without a keyboard. Background
+calls live in ui.hub.workers.
 """
 from __future__ import annotations
 
 import importlib
 import sys
-import threading
 from typing import Callable, Iterable, Optional
 
-from PyQt6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QKeyEvent, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
@@ -548,31 +547,3 @@ def transparent_scroll(scroll, content: QWidget) -> None:
                          "QWidget#qt_scrollarea_viewport{background:transparent;}"
                          "QWidget#hubscrollcontent{background:transparent;}")
     scroll.setWidget(content)
-
-
-# ── threads ─────────────────────────────────────────────────────────────
-class _Relay(QObject):
-    done = pyqtSignal(object, object)
-
-
-def run_in_thread(parent: QObject, fn: Callable[[], object],
-                  on_done: Callable[[object, Optional[BaseException]], None]) -> None:
-    """Run fn() on a worker thread; on_done(result, error) on the Qt thread."""
-    relay = _Relay(parent)
-
-    def finish(result, error):
-        try:
-            on_done(result, error)
-        finally:
-            relay.deleteLater()
-
-    relay.done.connect(finish)
-
-    def work():
-        try:
-            result, error = fn(), None
-        except BaseException as e:  # reported, never raised on the worker
-            result, error = None, e
-        relay.done.emit(result, error)
-
-    threading.Thread(target=work, name="hub-worker", daemon=True).start()

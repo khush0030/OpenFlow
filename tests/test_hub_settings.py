@@ -26,7 +26,6 @@ from ui.hub.pages import settings as settings_mod
 from ui.hub.pages.settings import SettingsPage
 
 NS_CMD, NS_SHIFT = 1 << 20, 1 << 17
-_real_run_in_thread = C.run_in_thread
 
 
 class FakeControl:
@@ -40,23 +39,6 @@ class FakeControl:
         if isinstance(r, BaseException):
             raise r
         return r
-
-
-def _sync_run(parent, fn, on_done):
-    try:
-        result, error = fn(), None
-    except BaseException as e:
-        result, error = None, e
-    on_done(result, error)
-
-
-@pytest.fixture(autouse=True)
-def _no_event_loop(monkeypatch):
-    # Worker threads report back through queued signals; spinning the event
-    # loop for them would also fire timers other test modules left behind
-    # (the flow widget's pyobjc pinning segfaults offscreen). Run inline.
-    from ui.hub.pages import _controls
-    monkeypatch.setattr(_controls, "run_in_thread", _sync_run)
 
 
 @pytest.fixture
@@ -420,33 +402,28 @@ def test_starting_one_recorder_stops_another(make_page):
     assert page.hints["edit_mode"].text() == ""
 
 
-# ── worker thread helper ────────────────────────────────────────────────
-def _deliver_queued(cond, seconds: float = 3.0) -> bool:
-    """Deliver queued cross-thread signal calls only (no timers fire)."""
-    import time
-    from PyQt6.QtCore import QCoreApplication
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.MetaCall.value)
-        if cond():
-            return True
-        time.sleep(0.01)
-    return cond()
-
-
-def test_run_in_thread_reports_on_the_qt_thread():
+# ── daemon calls stay off the UI thread ─────────────────────────────────
+@pytest.mark.real_workers
+def test_play_cues_runs_off_the_ui_thread(make_page):
     import threading
-    from PyQt6.QtCore import QObject
-    parent = QObject()
-    got = []
-    _real_run_in_thread(parent, lambda: threading.current_thread().name,
-                        lambda r, e: got.append((r, e, threading.current_thread().name)))
-    assert _deliver_queued(lambda: got)
-    assert got[0][0] == "hub-worker" and got[0][1] is None
-    assert got[0][2] == threading.main_thread().name
+    import time
+    from hub_async import deliver_queued
+    gate, seen = threading.Event(), []
 
-    def boom():
-        raise RuntimeError("x")
-    _real_run_in_thread(parent, boom, lambda r, e: got.append((r, e)))
-    assert _deliver_queued(lambda: len(got) == 2)
-    assert isinstance(got[1][1], RuntimeError)
+    class Slow(FakeControl):
+        def call(self, cmd, timeout=5.0, **args):
+            seen.append(threading.current_thread().name)
+            gate.wait(5)
+            return super().call(cmd, timeout=timeout, **args)
+
+    page, _ = make_page()
+    ctl = page.ctx.control = Slow({"play_cues": DaemonNotRunning()})
+    t0 = time.monotonic()
+    page.play_btn.click()
+    page.play_btn.click()                       # second press while playing: ignored
+    assert time.monotonic() - t0 < 0.5
+    assert deliver_queued(lambda: seen, 1.0)
+    gate.set()
+    assert deliver_queued(lambda: not page.play_note.isHidden())
+    assert "isn't running" in page.play_note.text()
+    assert seen == ["hub-worker"] and len(ctl.calls) == 1

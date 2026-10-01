@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 import config as cfg_mod
 from openflow_logger import log_exception
 from ui.hub import style as S
+from ui.hub import workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.hub.pages import _controls as C
@@ -173,6 +174,7 @@ class HelpPage(Page):
 
     def __init__(self, ctx) -> None:
         super().__init__(ctx)
+        self._perms_in_flight = False
         self.poll = QTimer(self)
         self.poll.setInterval(POLL_MS)
         self.poll.timeout.connect(lambda: self._safe(self.refresh_permissions))
@@ -316,9 +318,20 @@ class HelpPage(Page):
 
     # ── permissions ──────────────────────────────────────────────────────
     def refresh_permissions(self) -> None:
-        try:
-            perms = self.ctx.call("status", timeout=1.0).get("permissions") or {}
-        except (DaemonNotRunning, ControlError):
+        """Ask the daemon (off the UI thread); a poll tick that comes while
+        the previous call is still out is skipped."""
+        if self._perms_in_flight:
+            return
+        self._perms_in_flight = True
+        workers.run_in_thread(self, lambda: self.ctx.call("status", timeout=1.0),
+                              self._permissions_done)
+
+    def _permissions_done(self, st, err) -> None:
+        self._perms_in_flight = False
+        perms = (st.get("permissions") if err is None and isinstance(st, dict) else None)
+        if perms is None:
+            if err is not None and not isinstance(err, ControlError):
+                log_exception("hub.help", "status call failed", err)
             perms = local_permissions()
         for key, row in self.perm_rows.items():
             v = perms.get(key)
@@ -337,7 +350,7 @@ class HelpPage(Page):
         self.check_btn.setText("Checking…")
         self.check_note.hide()
         self._clear_results()
-        C.run_in_thread(self, lambda: self.ctx.call("check", timeout=30), self._check_done)
+        workers.run_in_thread(self, lambda: self.ctx.call("check", timeout=30), self._check_done)
 
     def _check_done(self, reply, error) -> None:
         self.check_btn.setEnabled(True)

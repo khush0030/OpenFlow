@@ -412,3 +412,35 @@ def test_corrupt_db_shows_calm_state(tmp_path):
     page.shown()
     assert page.rows == []
     assert str(bad) in page.empty_text()
+
+
+@pytest.mark.real_workers
+def test_default_runner_keeps_rerun_off_the_ui_thread(hist):
+    import threading
+    import time
+    from PyQt6 import sip
+    from hub_async import deliver_queued
+    from ui.hub import workers
+    gate, seen = threading.Event(), []
+
+    def rerun(**args):
+        seen.append(threading.current_thread().name)
+        gate.wait(5)
+        return {"text": "Rewritten.", "tone": "casual", "language": "auto"}
+    ctx = HubContext(history_path=hist.path, control=FakeControl({"rerun": rerun}))
+    page = HistoryPage(ctx, clock=lambda: _ts(NOW))      # default runner: real threads
+    page.shown()
+    t0 = time.monotonic()
+    page.detail.rerun_chips["casual"].click()
+    assert time.monotonic() - t0 < 0.5
+    assert page.detail.result_status.text() == "Rewriting…"
+    gate.set()
+    assert deliver_queued(lambda: page.detail.result_text.plain_text() == "Rewritten.")
+    assert seen == ["hub-worker"]
+    # A reply landing after the page is gone is dropped quietly.
+    gate.clear()
+    page.detail.rerun_chips["email"].click()
+    assert deliver_queued(lambda: len(seen) == 2, 1.0)
+    sip.delete(page)
+    gate.set()
+    assert deliver_queued(lambda: not workers._LIVE)
