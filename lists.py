@@ -81,7 +81,7 @@ _CONNECTORS = re.compile(
 _CUES = [re.compile(p, _FLAGS) for p in (
     # "number one", "point two", "number 3"
     rf"(?:number|point|item)\s+(?:number\s+)?(?P<n>{_CARD}|{_alt(HI_CARDINALS)}){_END}"
-    rf"(?:{_IS}|\s*[,:.)\-–—])?",
+    rf"(?:(?:{_IS}|\s*[,:.)\-–—])(?:\s*that{_END})?)?",
     rf"(?P<n>last)\s+but\s+not\s+least{_END}\s*[,:\-–—]?",
     # "the first point is", "my second reason,", "the last thing would be"
     rf"(?:the|my|our)\s+(?P<n>{_ORD}|last|final|next){_END}\s+{_NOUNS}{_END}"
@@ -101,6 +101,13 @@ _CUES = [re.compile(p, _FLAGS) for p in (
     rf"|{_PUNCT}|\.(?=\s))",
     rf"(?P<n>{_alt(HI_CARDINALS)}){_END}(?:\s+(?:toh|to|तो){_END}|{_PUNCT})",
 )]
+
+# "…and I think number one, he's…": "number N" / "point N" may open a list
+# mid-sentence, but only with a marker after it (never "number one
+# priority"), and like every cue it only counts inside a 1, 2, 3… run.
+_MID_CUE = re.compile(
+    rf"(?<![\wऀ-ॿ])(?:number|point)\s+(?:number\s+)?(?P<n>{_CARD}){_END}"
+    rf"(?:{_IS}|\s*[,:\-–—])(?:\s*that{_END})?", _FLAGS)
 
 _BOUNDARY = re.compile(r"[.!?;:,।\n—–]|\s(?=(?:and|aur|then)\s)", _FLAGS)
 
@@ -175,6 +182,11 @@ def _cues(text: str) -> list[Cue]:
                 out.append(Cue(start=b, cue_start=p, end=m.end(), value=_value(m.group("n"))))
                 seen_end = m.end()
                 break
+    for m in _MID_CUE.finditer(text):
+        if not any(c.cue_start <= m.start() < c.end for c in out):
+            out.append(Cue(start=m.start(), cue_start=m.start(), end=m.end(),
+                           value=_value(m.group("n"))))
+    out.sort(key=lambda c: c.cue_start)
     return out
 
 

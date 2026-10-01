@@ -30,6 +30,32 @@ def test_the_users_example():
         "3. They don't have the money to actually spend.")
 
 
+MID_SENTENCE = (
+    "Um, I've been speaking to Ashton for a couple of days and I think number one, "
+    "he's the worst liar ever. Number two, that he doesn't know how to speak to "
+    "anyone. Number three, that he is just. So pathetic that I can't tell you.")
+
+
+def test_number_one_can_start_mid_sentence():
+    # "…and I think number one, …": the list starts inside the lead-in
+    # sentence; "that" after a cue goes with it.
+    assert fmt(MID_SENTENCE) == (
+        "Um, I've been speaking to Ashton for a couple of days and I think:\n"
+        "1. He's the worst liar ever.\n"
+        "2. He doesn't know how to speak to anyone.\n"
+        "3. He is just. So pathetic that I can't tell you.")
+
+
+@pytest.mark.parametrize("text", [
+    "She was number one, he came second in the race last year.",
+    "My number one priority is sleep. Number two pencils are cheap.",
+    "Call me at point one, then we'll see how it goes.",
+    "He's number one, and honestly nobody else comes close to him.",
+])
+def test_mid_sentence_number_needs_a_run(text):
+    assert lists.find(text) is None
+
+
 NUMBERED = [
     ("First, buy milk. Second, call mom. Third, pay the rent.",
      "1. Buy milk.\n2. Call mom.\n3. Pay the rent."),
@@ -62,7 +88,7 @@ def test_numbered(text, expected):
     assert fmt(text) == expected
 
 
-@pytest.mark.parametrize("text", [ASHTON] + [t for t, _ in NUMBERED])
+@pytest.mark.parametrize("text", [ASHTON, MID_SENTENCE] + [t for t, _ in NUMBERED])
 def test_numbered_keeps_every_word_but_the_cues(text):
     found = lists.find(text)
     assert same_words(text, lists.render(found), found.removable)
