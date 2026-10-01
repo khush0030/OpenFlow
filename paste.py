@@ -144,7 +144,6 @@ def _ax_focused_element():
         return None
     try:
         sys_el = AXUIElementCreateSystemWide()
-        _ax_set_timeout(sys_el)
         err, focused = AXUIElementCopyAttributeValue(sys_el, "AXFocusedUIElement", None)
         if err != 0 or focused is None:
             return None
