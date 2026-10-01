@@ -100,3 +100,38 @@ def test_hands_free_flag_is_set_while_a_double_tap_session_starts_and_stops(back
     assert seen[i + 1] == ("stop", True)  # and the next press ends it as such
     assert seen[0] == ("start", False)   # the first tap is an ordinary hold
     assert h.hands_free is False
+
+
+# -- double-tap cues: the daemon defers a hold's start tick while the key is
+#    still held, so the backends say whether a hold is in progress ----------
+
+def test_short_tap_window_fits_real_taps(backend):
+    # Real taps from the log ran 105–313 ms; 350 was too tight.
+    mic = Mic()
+    h, _press, _release = backend(mic)
+    assert h.SHORT_TAP_MS == 450
+
+
+def test_holding_is_true_only_while_a_hold_key_is_down(backend):
+    seen = []
+    mic = Mic()
+    holder = {}
+    def start():
+        seen.append(holder["h"].holding); mic.start()
+    if backend is _nsevent:
+        h = hotkeys_nsevent.HoldToTalk("cmd_r", start, mic.stop, is_active=lambda: mic.on)
+        press, release = h._on_press, h._on_release
+    else:
+        h = hotkeys.HoldToTalk("cmd_r", start, mic.stop, is_active=lambda: mic.on)
+        key = hotkeys.keyboard.Key.cmd_r
+        press, release = (lambda: h._on_press(key)), (lambda: h._on_release(key))
+    holder["h"] = h
+    press()
+    assert h.holding
+    release()
+    assert not h.holding
+    press()                          # second tap: hands-free, not a hold
+    assert not h.holding and h.hands_free
+    release()
+    assert not h.holding
+    assert seen == [True, False]

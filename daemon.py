@@ -106,6 +106,21 @@ _LANG_CYCLE: list[LanguageMode] = [
 ]
 
 
+# A hold's start tick waits this long, and is skipped if the key is up by
+# then: that press was a tap, most likely the first half of a double-tap,
+# which should sound only the hands-free cue. Waiting the full SHORT_TAP_MS
+# (450 ms) would rule every tap out but lag every hold; 200 ms covers about
+# two thirds of real taps (log, 2026-10-01: 105–313 ms, median ~190). A longer
+# tap's tick is cut off when the hands-free cue plays (sounds._SUPERSEDES).
+HOLD_CUE_DELAY_S = 0.2
+
+
+def _after(delay_s: float, fn) -> None:
+    t = threading.Timer(delay_s, fn)
+    t.daemon = True
+    t.start()
+
+
 def _coerce_tone(s: str) -> ToneMode:
     try:
         return ToneMode(s)
@@ -468,7 +483,12 @@ class Daemon:
 
     # -- Hotkey callbacks ------------------------------------------------
 
-    def on_record_start(self) -> None:
+    def _on_hold_press(self) -> None:
+        # Only the hold key starts hands-free sessions; a widget click after
+        # a session ✓ ended must not inherit the key's stale toggle mode.
+        self.on_record_start(hands_free=bool(getattr(self._hold, "hands_free", False)))
+
+    def on_record_start(self, hands_free: bool = False) -> None:
         if self.state.paused:
             return
         if self.recorder.is_recording:
@@ -485,7 +505,7 @@ class Daemon:
         self.recorder.start()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
-        self._flow.recording_started()
+        self._flow.recording_started(hands_free=hands_free)
 
     # -- Flow widget wiring ----------------------------------------------
 
@@ -523,15 +543,25 @@ class Daemon:
             # Every way of starting/stopping (hotkey, widget, Esc) passes
             # through here, so the cues stay consistent.
             new = msg.get("state", "idle")
-            hold = getattr(self, "_hold", None)
+            # Starts carry the flag; stops / cancels end the session before.
+            hands_free = bool(msg.get("hands_free")) or getattr(self, "_last_hands_free", False)
             cue = sounds.cue_for_transition(getattr(self, "_last_flow_state", "idle"), new,
-                                            hands_free=bool(getattr(hold, "hands_free", False)))
+                                            hands_free=hands_free)
             self._last_flow_state = new
-            if cue:
+            self._last_hands_free = bool(msg.get("hands_free"))
+            if cue == "start" and getattr(getattr(self, "_hold", None), "holding", False):
+                _after(HOLD_CUE_DELAY_S, self._hold_cue)
+            elif cue:
                 sounds.play(cue)
         server = getattr(self, "_widget", None)
         if server is not None:
             server.send(msg)
+
+    def _hold_cue(self) -> None:
+        """The deferred hold start tick: only if that hold is still going."""
+        hold = getattr(self, "_hold", None)
+        if getattr(hold, "holding", False) and self._last_flow_state in ("recording", "silent"):
+            sounds.play("start")
 
     def _widget_config(self) -> dict:
         w = self.cfg.get("widget") or {}
@@ -779,7 +809,7 @@ class Daemon:
     def _build_hold(self, hold_key: str) -> HoldToTalk:
         # is_active: the widget (✓ / ✕) or Esc can stop a double-tap toggle
         # session; the key must then treat its next press as a fresh hold.
-        return HoldToTalk(hold_key, self.on_record_start, self.on_record_stop,
+        return HoldToTalk(hold_key, self._on_hold_press, self.on_record_stop,
                           is_active=lambda: self.recorder.is_recording)
 
     def run(self) -> None:

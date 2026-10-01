@@ -582,7 +582,119 @@ def test_hands_free_session_plays_hands_free_cues(env, monkeypatch):
     played = []
     monkeypatch.setattr(dm.sounds, "play", played.append)
     d = make_daemon()
-    d._hold = type("Hold", (), {"hands_free": True})()
-    d._flow.recording_started()
+    d._flow.recording_started(hands_free=True)
     d._flow.processing()
     assert played == ["handsfree_start", "handsfree_stop"]
+
+
+# -- double-tap: only the hands-free start cue ---------------------------------
+
+class KeyRecorder(FakeRecorder):
+    """A recorder the hold key can start; a tap captures a too-short clip."""
+
+    def start(self):
+        self.is_recording = True
+
+
+@pytest.fixture
+def keyed(env, monkeypatch):
+    """Daemon driven by the real NSEvent hold key (no monitor installed),
+    with sounds recorded and the hold-cue timer under test control."""
+    import hotkeys_nsevent
+    monkeypatch.setattr(hotkeys_nsevent, "print", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(dm, "HoldToTalk", hotkeys_nsevent.HoldToTalk)
+    monkeypatch.setattr(dm, "capture_paste_target", lambda: None)
+    played, timers = [], []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    monkeypatch.setattr(dm, "_after", lambda delay, fn: timers.append((delay, fn)))
+    d = make_daemon()
+    d.recorder = KeyRecorder(np.zeros(1600, dtype=np.float32))   # 0.1 s tap
+    d._hold = d._build_hold("cmd_r")
+
+    def fire():
+        while timers:
+            timers.pop(0)[1]()
+    return d, played, timers, fire
+
+
+def test_hold_start_cue_waits_briefly_then_plays_while_held(keyed):
+    d, played, timers, fire = keyed
+    d._hold._on_press()
+    assert played == [] and timers and timers[0][0] <= 0.2   # short, not SHORT_TAP_MS
+    fire()                                   # key still down after the delay
+    assert played == ["start"]
+    d.recorder.audio = AUDIO
+    d._hold._press_ms -= 1000
+    d._hold._on_release()
+    assert played == ["start", "stop"]
+
+
+def test_double_tap_plays_only_the_hands_free_start_cue(keyed):
+    d, played, timers, fire = keyed
+    d._hold._on_press()
+    d._hold._on_release()                    # quick first tap
+    d._hold._on_press()                      # second tap within the window
+    fire()
+    assert played == ["handsfree_start"]
+    assert d._flow.state == RECORDING
+    d._hold._on_release()
+    d.recorder.audio = AUDIO
+    d._hold._on_press()                      # a tap ends the session
+    assert played == ["handsfree_start", "handsfree_stop"]
+
+
+def test_lone_quick_tap_stays_silent_and_idle(keyed):
+    d, played, timers, fire = keyed
+    d._hold._on_press()
+    d._hold._on_release()
+    fire()
+    assert played == []
+    assert d._flow.state == IDLE and not d.recorder.is_recording
+
+
+def test_widget_click_start_cue_is_not_delayed(keyed):
+    d, played, timers, fire = keyed
+    d._flow.handle_action({"action": "start"})
+    assert played == ["start"] and timers == []
+
+
+# -- hands-free state reaches the widget -------------------------------------
+
+def test_double_tap_tells_the_widget_it_is_hands_free(keyed):
+    d, played, timers, fire = keyed
+    d._hold._on_press()
+    assert "hands_free" not in d._widget.sent[-1]          # a hold
+    d._hold._on_release()
+    d._hold._on_press()
+    assert d._widget.sent[-1] == {"type": "state", "state": RECORDING,
+                                  "text": "", "hands_free": True}
+    d._hold._on_release()
+    d.recorder.audio = AUDIO
+    n = len(d._widget.sent)
+    d._hold._on_press()                                    # tap to finish
+    after = [m for m in d._widget.sent[n:] if m["type"] == "state"]
+    assert after[0]["state"] == PROCESSING                 # (pipeline runs inline)
+    assert not any("hands_free" in m for m in after)
+
+
+def test_hands_free_flag_survives_silence(keyed):
+    d, played, timers, fire = keyed
+    d._hold._on_press(); d._hold._on_release(); d._hold._on_press()
+    d._flow._quiet_since = -100.0                          # quiet for ages
+    d._flow.level(0.0)
+    assert d._widget.sent[-1]["state"] == flow_state.SILENT
+    assert d._widget.sent[-1]["hands_free"] is True
+    d._flow.level(0.5)
+    assert d._widget.sent[-1] == {"type": "state", "state": RECORDING,
+                                  "text": "", "hands_free": True}
+
+
+def test_widget_start_after_stale_toggle_is_not_hands_free(keyed):
+    d, played, timers, fire = keyed
+    d._hold._on_press(); d._hold._on_release(); d._hold._on_press(); d._hold._on_release()
+    d.recorder.audio = AUDIO
+    d._flow.handle_action({"action": "confirm"})           # ✓ ends the session
+    played.clear()
+    d._flow.handle_action({"action": "start"})             # then the mic is clicked
+    assert "hands_free" not in d._widget.sent[-1]
+    assert played == ["start"]

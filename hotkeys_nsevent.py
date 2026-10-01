@@ -112,7 +112,10 @@ class HoldOrToggle:
     implementations transparently.
     """
 
-    SHORT_TAP_MS = 350
+    # press+release shorter than this counts as a tap. Real taps in the log
+    # (2026-10-01) ran 46–340 ms, several at 313–340 ms, right on the old
+    # 350 ms limit; 450 leaves room without catching short holds.
+    SHORT_TAP_MS = 450
     DOUBLE_TAP_GAP_MS = 600
 
     def __init__(self, key: str, on_press: Callable[[], None], on_release: Callable[[], None],
@@ -140,6 +143,11 @@ class HoldOrToggle:
     def hands_free(self) -> bool:
         """True while a double-tap (hands-free) session is running."""
         return self._mode == "toggle"
+
+    @property
+    def holding(self) -> bool:
+        """True while the key is held down in an ordinary hold (not hands-free)."""
+        return self._mode == "hold" and self._down
 
     def _on_press(self) -> None:
         if self._down:

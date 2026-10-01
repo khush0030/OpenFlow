@@ -103,3 +103,26 @@ def test_the_suite_never_loads_real_sounds():
 ])
 def test_hands_free_sessions_use_their_own_cues(prev, new, cue):
     assert sounds.cue_for_transition(prev, new, hands_free=True) == cue
+
+
+def test_hands_free_start_cuts_off_a_hold_tick_still_playing(monkeypatch):
+    # A double-tap whose first tap outlived the hold-cue delay has started
+    # the hold tick; the hands-free cue must not play over it.
+    tick, knock = FakeSound(), FakeSound()
+    stopped = []
+    tick.stop = lambda: stopped.append("start")
+    monkeypatch.setitem(sounds._cache, "start", tick)
+    monkeypatch.setattr(sounds, "_load", lambda cue: knock)
+    sounds.configure(enabled=True, volume=0.35)
+    sounds.play("handsfree_start")
+    assert stopped == ["start"] and knock.plays == 1
+
+
+def test_other_cues_leave_the_hold_tick_alone(monkeypatch):
+    tick, other = FakeSound(), FakeSound()
+    stopped = []
+    tick.stop = lambda: stopped.append("start")
+    monkeypatch.setitem(sounds._cache, "start", tick)
+    monkeypatch.setattr(sounds, "_load", lambda cue: other)
+    sounds.play("stop")
+    assert stopped == []

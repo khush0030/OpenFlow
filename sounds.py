@@ -26,6 +26,11 @@ _ASSETS = Path(__file__).resolve().parent / "assets" / "sounds"
 
 _RECORDING = ("recording", "silent")
 
+# Playing the key cue cuts these short. A double-tap whose first tap was held
+# past the daemon's hold-cue delay has already started the hold tick; it must
+# not ring on under the hands-free knock.
+_SUPERSEDES: dict[Cue, tuple[Cue, ...]] = {"handsfree_start": ("start",)}
+
 # Cached NSSound instances; NSSound caches its own decoded buffer so the
 # second play is sub-millisecond.
 _cache: dict[Cue, object] = {}
@@ -82,6 +87,13 @@ def play(cue: Cue) -> None:
     """Fire-and-forget play. No-op when disabled or on failure (never raises)."""
     if not _enabled:
         return
+    for other in _SUPERSEDES.get(cue, ()):
+        playing = _cache.get(other)  # never loaded = never played
+        if playing is not None:
+            try:
+                playing.stop()
+            except Exception:
+                pass
     snd = _load(cue)
     if snd is None:
         return

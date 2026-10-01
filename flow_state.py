@@ -65,6 +65,8 @@ class FlowController:
         self._lock = threading.RLock()  # daemon threads and the socket reader call in
         self.state = IDLE
         self.text = ""
+        # A double-tap session: recording continues without holding the key.
+        self.hands_free = False
         self._quiet_since: Optional[float] = None
         self._retained: Optional[_Retained] = None
         self._card_expires_at = 0.0
@@ -75,19 +77,25 @@ class FlowController:
     # -- outgoing ---------------------------------------------------------
     def message(self) -> dict:
         with self._lock:
-            return {"type": "state", "state": self.state,
-                    "text": self.text if self.state == CARD else ""}
+            msg = {"type": "state", "state": self.state,
+                   "text": self.text if self.state == CARD else ""}
+            if self.hands_free:
+                msg["hands_free"] = True  # only ever sent while recording / silent
+            return msg
 
     def _set(self, state: str, text: str = "") -> None:
+        if state not in (RECORDING, SILENT):
+            self.hands_free = False
         self.state = state
         self.text = text
         self._emit(self.message())
 
     # -- events from the daemon ------------------------------------------
-    def recording_started(self) -> None:
+    def recording_started(self, hands_free: bool = False) -> None:
         with self._lock:
             self._retained = None
             self._quiet_since = None
+            self.hands_free = hands_free
             self._set(RECORDING)
 
     def level(self, rms: float) -> None:
