@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from llm import ChatProvider, SarvamChat
 from prompts import PROMPTS
-from sarvam import chat_complete, resolve_api_key
 
 
 @dataclass
@@ -15,25 +15,19 @@ class AIConfig:
 
 
 class AIProcessor:
-    def __init__(self, cfg: AIConfig | None = None) -> None:
+    """Cleanup and edit-selection go to `provider` (llm.make_cleanup_provider:
+    Sarvam or a fast one); Hindi transliteration/translation stay on Sarvam,
+    which is the Indic specialist."""
+
+    def __init__(self, cfg: AIConfig | None = None,
+                 provider: ChatProvider | None = None) -> None:
         self.cfg = cfg or AIConfig()
-        self._api_key: str | None = None
+        self.sarvam = SarvamChat(model=self.cfg.model, api_key_env=self.cfg.api_key_env)
+        self.provider: ChatProvider = provider or self.sarvam
 
-    def _key(self) -> str:
-        if not self._api_key:
-            self._api_key = resolve_api_key(self.cfg.api_key_env)
-        return self._api_key
-
-    def _call(self, system: str, user: str) -> str:
-        return chat_complete(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            api_key=self._key(),
-            model=self.cfg.model,
-            max_tokens=self.cfg.max_tokens,
-        )
+    def _call(self, system: str, user: str, provider: ChatProvider | None = None) -> str:
+        return (provider or self.sarvam).complete(
+            system, user, max_tokens=self.cfg.max_tokens)
 
     def cleanup(
         self,
@@ -67,7 +61,7 @@ class AIProcessor:
             )
         if extras:
             system = system.rstrip() + "\n\n" + "\n\n".join(extras)
-        return self._call(system, text)
+        return self._call(system, text, self.provider)
 
     def transliterate_to_roman(self, hindi_text: str) -> str:
         if not hindi_text.strip():
@@ -83,4 +77,4 @@ class AIProcessor:
         prompt = PROMPTS["edit_selection"].format(
             selection=selection, instruction=instruction
         )
-        return self._call("You are an inline text editor.", prompt)
+        return self._call("You are an inline text editor.", prompt, self.provider)

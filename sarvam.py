@@ -39,15 +39,19 @@ class STTResult:
     request_id: str | None = None
 
 
-def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:
-    """Env → Keychain → ~/.openflow/.env / repo .env. Raises if missing."""
+def find_api_key(
+    api_key_env: str = DEFAULT_API_KEY_ENV,
+    keyring_user: str = KEYRING_USER,
+) -> str | None:
+    """Env → Keychain (service "openflow", account `keyring_user`) →
+    ~/.openflow/.env / repo .env. None if the key is nowhere."""
     load_env()
     key = os.environ.get(api_key_env, "").strip()
     if key:
         return key
     try:
         import keyring  # type: ignore
-        key = (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
+        key = (keyring.get_password(KEYRING_SERVICE, keyring_user) or "").strip()
         if key:
             os.environ[api_key_env] = key
             return key
@@ -73,6 +77,14 @@ def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:
                             return key
         except Exception:
             pass
+    return None
+
+
+def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:
+    """Env → Keychain → ~/.openflow/.env / repo .env. Raises if missing."""
+    key = find_api_key(api_key_env)
+    if key:
+        return key
     raise SarvamError(
         f"Missing Sarvam API key. Set ${api_key_env}, run onboarding, "
         "or place it in ~/.openflow/.env"

@@ -30,6 +30,7 @@ class ConfigChanges:
     general:  the new [general] table (always_english_output and
               hindi_script are read from it per dictation).
     widget:   the new [widget] table, pushed to the widget process.
+    cleanup:  the new [cleanup] table; the daemon re-picks its cleanup LLM.
     """
     hotkeys: dict[str, str] | None = None
     sounds: dict[str, Any] | None = None
@@ -37,10 +38,12 @@ class ConfigChanges:
     language: str | None = None
     general: dict[str, Any] | None = None
     widget: dict[str, Any] | None = None
+    cleanup: dict[str, Any] | None = None
 
     def __bool__(self) -> bool:
         return any(v is not None for v in (self.hotkeys, self.sounds, self.tone,
-                                           self.language, self.general, self.widget))
+                                           self.language, self.general, self.widget,
+                                           self.cleanup))
 
 
 def _section(cfg: dict, name: str) -> dict:
@@ -78,6 +81,9 @@ def plan_changes(old: dict, new: dict) -> ConfigChanges:
 
     if _section(old, "widget") != _section(new, "widget"):
         out["widget"] = dict(_section(new, "widget"))
+
+    if _section(old, "cleanup") != _section(new, "cleanup"):
+        out["cleanup"] = dict(_section(new, "cleanup"))
 
     return ConfigChanges(**out)
 

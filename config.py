@@ -61,6 +61,16 @@ DEFAULTS: dict[str, Any] = {
         "max_tokens": 1024,
         "api_key_env": "SARVAM_API_KEY",
     },
+    "cleanup": {
+        # LLM that rewrites dictation in the cleanup tones (llm.py).
+        # "auto": the first fast provider with a key (groq, then anthropic),
+        # else Sarvam ([sarvam] chat_model). Or name one: sarvam/groq/anthropic.
+        "provider": "auto",
+        "groq_model": "llama-3.3-70b-versatile",
+        "groq_api_key_env": "OPENFLOW_GROQ_API_KEY",
+        "anthropic_model": "claude-haiku-4-5-20251001",
+        "anthropic_api_key_env": "OPENFLOW_ANTHROPIC_API_KEY",
+    },
     "dictionary": {
         "fuzzy_threshold": 85,
         "inject_into_cleanup": True,

@@ -70,6 +70,13 @@ def test_widget_change():
     assert changes.widget == {"position": "left", "appearance": "paper"}
 
 
+def test_cleanup_change():
+    changes = plan_changes(cfg(), cfg(cleanup={"provider": "groq"}))
+    assert changes.cleanup == {**cfg()["cleanup"], "provider": "groq"}
+    assert changes
+    assert plan_changes(cfg(), cfg()).cleanup is None
+
+
 def test_missing_sections_in_old_config_do_not_crash():
     old = {"general": {}, "hotkeys": {"record_hold": "alt_r"}}
     changes = plan_changes(old, cfg())

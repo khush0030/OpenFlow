@@ -86,6 +86,7 @@ else:
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
                    focused_editable, set_clipboard)
 from ai import AIProcessor, AIConfig
+from llm import make_cleanup_provider
 from dictionary import Dictionary
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
@@ -344,7 +345,9 @@ class Daemon:
             model=sarvam_cfg.get("chat_model", "sarvam-105b"),
             max_tokens=int(sarvam_cfg.get("max_tokens", 1024)),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
-        ))
+        ), provider=make_cleanup_provider(self.cfg))
+        print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
+              f"({self.ai.provider.model})", flush=True)
         self.dictionary = Dictionary.load()
         self.history = History()
         self._busy = threading.Lock()
@@ -709,6 +712,11 @@ class Daemon:
         if ch.hotkeys is not None:
             self._pending_hotkeys = ch.hotkeys
             self._apply_pending_hotkeys()
+        if ch.cleanup is not None:
+            self.cfg["cleanup"] = ch.cleanup
+            self.ai.provider = make_cleanup_provider(self.cfg)
+            print(f"[daemon] cleanup LLM -> {self.ai.provider.name} "
+                  f"({self.ai.provider.model})", flush=True)
 
     def choose_tone(self, tone: ToneMode) -> None:
         """A tone picked from a menu (menu bar or widget) becomes the default."""
