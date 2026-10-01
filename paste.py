@@ -518,8 +518,22 @@ def undo_check(rec: Optional[PasteRecord], now: float, front_pid: Optional[int],
     return None
 
 
-def _ax_text_before_caret(pid: int) -> Optional[str]:
-    """Focused field's text up to the caret, or None if AX can't say."""
+@dataclass
+class FieldText:
+    """The focused text field, read over AX: what auto-learn diffs against
+    the paste. Held in memory only, never written anywhere."""
+    element: Any
+    value: str
+    caret: int        # in code points (Python string index)
+
+
+# Fields longer than this aren't read for auto-learn (a whole document).
+MAX_FIELD_CHARS = 100_000
+
+
+def ax_field_text(pid: int, max_chars: Optional[int] = None) -> Optional[FieldText]:
+    """Focused field's text and caret in app `pid`, or None if AX can't say
+    (many Electron / canvas editors don't expose AXValue)."""
     if not _HAS_AX:
         return None
     try:
@@ -535,8 +549,12 @@ def _ax_text_before_caret(pid: int) -> Optional[str]:
         return None
     _ax_set_timeout(el)
     value = _ax_copy(el, "AXValue")
+    if not isinstance(value, str):
+        return None
+    if max_chars is not None and len(value) > max_chars:
+        return None
     rng = _ax_copy(el, "AXSelectedTextRange")
-    if not isinstance(value, str) or rng is None:
+    if rng is None:
         return None
     try:
         ok, r = AXValueGetValue(rng, _RANGE, None)
@@ -548,7 +566,28 @@ def _ax_text_before_caret(pid: int) -> Optional[str]:
         return None
     # AX ranges count UTF-16 units; Python strings count code points.
     units = value.encode("utf-16-le")
-    return units[: loc * 2].decode("utf-16-le", errors="ignore")
+    caret = len(units[: loc * 2].decode("utf-16-le", errors="ignore"))
+    return FieldText(element=el, value=str(value), caret=caret)
+
+
+def ax_same_element(a, b) -> bool:
+    """Is `b` the same AX element as `a` (the field we pasted into)?"""
+    if a is None or b is None:
+        return False
+    try:
+        from CoreFoundation import CFEqual  # type: ignore
+        return bool(CFEqual(a, b))
+    except Exception:
+        try:
+            return bool(a == b)
+        except Exception:
+            return False
+
+
+def _ax_text_before_caret(pid: int) -> Optional[str]:
+    """Focused field's text up to the caret, or None if AX can't say."""
+    f = ax_field_text(pid)
+    return None if f is None else f.value[: f.caret]
 
 
 def _wait_modifiers_released(timeout_s: float = 1.0) -> None:
