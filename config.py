@@ -74,6 +74,12 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "volume": 0.35,
     },
+    "history": {
+        # Off: dictations aren't saved. Past size_cap rows the oldest are
+        # pruned (the Settings spin box offers 50–5000).
+        "enabled": True,
+        "size_cap": 500,
+    },
 }
 
 WIDGET_POSITIONS = ("left", "bottom", "right")

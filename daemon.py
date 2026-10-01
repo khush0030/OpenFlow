@@ -793,13 +793,17 @@ class Daemon:
                     self._flow.show_card(final, run=run) or self._stale(run)
                 else:
                     self._flow.done(run=run) or self._stale(run)
-            self.history.add(
-                raw=raw,
-                final=final,
-                tone=self.state.tone.value,
-                lang=self.state.language.value,
-                duration=audio.size / self.cfg["audio"]["sample_rate"],
-            )
+            hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
+            if hist_cfg["enabled"]:
+                self.history.add(
+                    raw=raw,
+                    final=final,
+                    tone=self.state.tone.value,
+                    lang=self.state.language.value,
+                    duration=audio.size / self.cfg["audio"]["sample_rate"],
+                    app=getattr(target, "name", None) or None,
+                    cap=int(hist_cfg["size_cap"]),
+                )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
             self._flow.done(run=run) or self._stale(run)
