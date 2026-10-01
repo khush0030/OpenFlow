@@ -24,6 +24,8 @@ import tomli_w
 CONFIG_DIR = Path(os.path.expanduser("~/.openflow"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 DICT_PATH = CONFIG_DIR / "dictionary.json"
+# Auto-learn: corrections seen once, waiting for a second sighting or a yes.
+SUGGESTIONS_PATH = CONFIG_DIR / "dictionary_suggestions.json"
 SNIPPETS_PATH = CONFIG_DIR / "snippets.json"
 HISTORY_PATH = CONFIG_DIR / "history.sqlite"
 
@@ -81,6 +83,10 @@ DEFAULTS: dict[str, Any] = {
     "dictionary": {
         "fuzzy_threshold": 85,
         "inject_into_cleanup": True,
+        # Learn a word when you fix it right after OpenFlow pastes it
+        # (autolearn.py): fixed twice, or added from the hub's Dictionary
+        # page, it joins the dictionary.
+        "auto_learn": True,
     },
     "widget": {
         # Flow widget dock position and look (spec 2026-09-30-flow-widget-design).
