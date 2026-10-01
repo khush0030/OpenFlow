@@ -84,7 +84,7 @@ else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "escape"
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
-                   focused_editable, set_clipboard)
+                   focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
 from history import History
@@ -850,9 +850,18 @@ class Daemon:
         self._start_worker(audio, ctx, run)
 
     def on_undo(self) -> None:
-        # Best-effort: just type the inverse via paste of empty + restore previous clipboard.
-        # True undo requires app-level integration. We leave this as a stub.
-        print("[daemon] undo: not implemented", flush=True)
+        # Chords fire on the main thread; the undo waits for the chord's
+        # modifiers to come up, so it runs off it (paste.py has the guards).
+        threading.Thread(target=self._undo_last_paste, name="undo-paste",
+                         daemon=True).start()
+
+    def _undo_last_paste(self) -> None:
+        try:
+            status = undo_last_paste()
+        except Exception as e:
+            log_exception("daemon.undo", "undo last paste failed", e)
+            return
+        print(f"[daemon] undo last paste -> {status}", flush=True)
 
     def on_edit_mode(self) -> None:
         # Capture currently selected text (Cmd+C), then start recording.
