@@ -756,9 +756,15 @@ class Daemon:
 
     # -- Lifecycle -------------------------------------------------------
 
+    def _build_hold(self, hold_key: str) -> HoldToTalk:
+        # is_active: the widget (✓ / ✕) or Esc can stop a double-tap toggle
+        # session; the key must then treat its next press as a fresh hold.
+        return HoldToTalk(hold_key, self.on_record_start, self.on_record_stop,
+                          is_active=lambda: self.recorder.is_recording)
+
     def run(self) -> None:
         hold_key = self.cfg["hotkeys"]["record_hold"]
-        self._hold = HoldToTalk(hold_key, self.on_record_start, self.on_record_stop)
+        self._hold = self._build_hold(hold_key)
         self._hold.start()
         # macOS TIS (Text Input Sources) API is not thread-safe during init.
         # Two pynput listeners starting concurrently both call

@@ -115,12 +115,16 @@ class HoldOrToggle:
     SHORT_TAP_MS = 350
     DOUBLE_TAP_GAP_MS = 600
 
-    def __init__(self, key: str, on_press: Callable[[], None], on_release: Callable[[], None]) -> None:
+    def __init__(self, key: str, on_press: Callable[[], None], on_release: Callable[[], None],
+                 is_active: Optional[Callable[[], bool]] = None) -> None:
         self.key_name = key
         self.target_vk = _parse_keycode(key)
         self.target_flag = _VK_TO_FLAG.get(self.target_vk)
         self.on_press_cb = on_press
         self.on_release_cb = on_release
+        # Is a recording live? Something else (widget ✓/✕, Esc) may have
+        # stopped a toggle session; the next press is then a fresh hold.
+        self.is_active = is_active
         self._down = False
         self._mode = "idle"
         self._press_ms = 0.0
@@ -137,6 +141,9 @@ class HoldOrToggle:
             return
         self._down = True
         now = self._now_ms()
+        if self._mode == "toggle" and self.is_active is not None and not self.is_active():
+            print("[hotkey] press: toggle session already stopped elsewhere", flush=True)
+            self._mode = "idle"
         if self._mode == "toggle":
             print("[hotkey] press: stopping toggle session", flush=True)
             try:

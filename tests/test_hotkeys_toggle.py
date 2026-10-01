@@ -1,0 +1,78 @@
+"""Hold key after a toggle session that something else stopped (✓ / ✕ / Esc).
+
+Both hotkey backends: no listeners or monitors are started; the press and
+release handlers are driven directly.
+"""
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pytest
+
+import hotkeys
+import hotkeys_nsevent
+
+
+class Mic:
+    def __init__(self):
+        self.on = False
+        self.log: list[str] = []
+
+    def start(self):
+        if not self.on:
+            self.on = True
+            self.log.append("start")
+
+    def stop(self):
+        if self.on:
+            self.on = False
+            self.log.append("stop")
+
+
+def _nsevent(mic):
+    h = hotkeys_nsevent.HoldToTalk("cmd_r", mic.start, mic.stop, is_active=lambda: mic.on)
+    return h, h._on_press, h._on_release
+
+
+def _pynput(mic):
+    h = hotkeys.HoldToTalk("cmd_r", mic.start, mic.stop, is_active=lambda: mic.on)
+    key = hotkeys.keyboard.Key.cmd_r
+    return h, (lambda: h._on_press(key)), (lambda: h._on_release(key))
+
+
+@pytest.fixture(params=[_nsevent, _pynput], ids=["nsevent", "pynput"])
+def backend(request, monkeypatch):
+    for mod in (hotkeys, hotkeys_nsevent):
+        monkeypatch.setattr(mod, "print", lambda *a, **k: None, raising=False)
+    return request.param
+
+
+def _double_tap(press, release):
+    press(); release(); press(); release()
+
+
+def test_hold_after_widget_stopped_toggle_records(backend):
+    mic = Mic()
+    h, press, release = backend(mic)
+    _double_tap(press, release)
+    assert mic.on and h._mode == "toggle"
+    mic.log.clear()
+    mic.stop()                     # ✓ / ✕ / Esc stopped it, not the hotkey
+    press()
+    assert mic.on, "the next hold must start recording"
+    h._press_ms -= 1000
+    release()
+    assert not mic.on
+    assert mic.log == ["stop", "start", "stop"]   # widget stop, then a full hold
+
+
+def test_press_still_stops_a_live_toggle_session(backend):
+    mic = Mic()
+    h, press, release = backend(mic)
+    _double_tap(press, release)
+    assert mic.on
+    press()
+    assert not mic.on and h._mode == "idle"

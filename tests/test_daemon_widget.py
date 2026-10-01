@@ -433,3 +433,21 @@ def test_escape_without_recording_does_nothing(env):
     d._cancel_recording()
     assert d._cancel_pending is False
     assert d._flow.state == IDLE
+
+
+# -- Final review 1: a stop the hotkey didn't make resets the toggle --------
+
+def test_hold_key_knows_when_a_recording_is_live(env, monkeypatch):
+    made = {}
+
+    class FakeHold:
+        def __init__(self, key, on_press, on_release, is_active=None):
+            made.update(key=key, is_active=is_active)
+
+    monkeypatch.setattr(dm, "HoldToTalk", FakeHold)
+    d = make_daemon()
+    d._build_hold("cmd_r")
+    assert made["key"] == "cmd_r" and made["is_active"] is not None
+    assert made["is_active"]() is False
+    d.recorder.is_recording = True
+    assert made["is_active"]() is True
