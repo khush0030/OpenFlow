@@ -25,6 +25,10 @@ ERROR = "error"
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
 RETRY_WINDOW_S = 15.0
+# Backstop for an unattended card: the widget's own 15 s countdown (paused
+# on hover) normally dismisses it first. Without this, a stale transcript
+# could be click-pasted into some other field minutes later.
+CARD_WINDOW_S = 60.0
 
 _SETTINGS = {
     "set_position": ("position", ("left", "bottom", "right")),
@@ -63,6 +67,7 @@ class FlowController:
         self.text = ""
         self._quiet_since: Optional[float] = None
         self._retained: Optional[_Retained] = None
+        self._card_expires_at = 0.0
         # Id of the pipeline run that owns PROCESSING. Results passed with
         # run= only land if that run still owns the widget.
         self.run = 0
@@ -124,6 +129,7 @@ class FlowController:
         with self._lock:
             if not self._owns(run):
                 return False
+            self._card_expires_at = self._clock() + CARD_WINDOW_S
             self._set(CARD, text)
             return True
 
@@ -146,12 +152,15 @@ class FlowController:
                 self.done()
 
     def tick(self) -> None:
-        """Call a few times a second: expires the Undo / Retry windows."""
+        """Call a few times a second: expires the Undo / Retry windows and
+        an unattended card."""
         with self._lock:
             if self.state in (CANCELLED, ERROR):
                 r = self._retained
                 if r is None or self._clock() > r.expires_at:
                     self.done()
+            elif self.state == CARD and self._clock() > self._card_expires_at:
+                self.done()
 
     def _take_retained(self) -> Optional[_Retained]:
         r, self._retained = self._retained, None

@@ -585,7 +585,10 @@ class Daemon:
                 if now - last_tick >= 0.25:
                     last_tick = now
                     self._flow.tick()
-                    if self._flow.state == CARD and focused_editable() is True:
+                    # Only for a card the user can see: never paste a
+                    # transcript they can't see into whatever gets focus.
+                    if self._flow.state == CARD and self._widget.connected \
+                            and focused_editable() is True:
                         text = self._flow.text
                         print("[daemon] text box focused — pasting card text", flush=True)
                         paste(text)

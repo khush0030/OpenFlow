@@ -451,3 +451,57 @@ def test_hold_key_knows_when_a_recording_is_live(env, monkeypatch):
     assert made["is_active"]() is False
     d.recorder.is_recording = True
     assert made["is_active"]() is True
+
+
+# -- Final review 2: click-to-paste only for a card the user can see --------
+
+class OnePass:
+    """Stop event that lets the widget pump loop run exactly once."""
+    def __init__(self):
+        self.done = False
+
+    def is_set(self):
+        return self.done
+
+    def wait(self, _t=None):
+        self.done = True
+        return True
+
+
+def pump_once(d):
+    d._stop_evt = OnePass()
+    d._widget_pump()
+
+
+def focus_probe(monkeypatch, answer=True):
+    asked = []
+    monkeypatch.setattr(dm, "focused_editable",
+                        lambda target=None: asked.append(1) or answer)
+    return asked
+
+
+def test_pump_does_not_poll_focus_without_a_card(env, monkeypatch):
+    asked = focus_probe(monkeypatch)
+    d = make_daemon()
+    pump_once(d)
+    assert asked == []
+
+
+def test_pump_pastes_card_into_clicked_text_box(env, monkeypatch):
+    focus_probe(monkeypatch)
+    d = make_daemon()
+    d._flow.show_card("hello", run=d._flow.processing())
+    pump_once(d)
+    assert ("paste", "hello") in env["calls"]
+    assert d._flow.state == IDLE
+
+
+def test_pump_never_pastes_card_while_widget_disconnected(env, monkeypatch):
+    asked = focus_probe(monkeypatch)
+    d = make_daemon()
+    d._widget.connected = False
+    d._flow.show_card("hello", run=d._flow.processing())
+    pump_once(d)
+    assert not any(c[0] == "paste" for c in env["calls"])
+    assert asked == []
+    assert d._flow.state == CARD

@@ -254,3 +254,30 @@ def test_calls_without_run_keep_todays_behaviour():
     fc.recording_started()
     fc.done()
     assert fc.state == IDLE
+
+
+# -- Final review 2: a card the user never acts on goes away ---------------
+
+def test_card_expires_after_sixty_seconds():
+    fc, _, sent, clock = make()
+    fc.processing()
+    fc.show_card("stale transcript")
+    clock.t += 59.9
+    fc.tick()
+    assert fc.state == CARD
+    clock.t += 0.2
+    fc.tick()
+    assert fc.state == IDLE and fc.text == ""
+    assert sent[-1] == {"type": "state", "state": IDLE, "text": ""}
+
+
+def test_a_new_card_gets_a_fresh_sixty_seconds():
+    fc, _, _, clock = make()
+    fc.processing()
+    fc.show_card("first")
+    clock.t += 50
+    fc.processing()
+    fc.show_card("second")
+    clock.t += 20
+    fc.tick()
+    assert fc.state == CARD and fc.text == "second"
