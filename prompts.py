@@ -67,6 +67,14 @@ stay. Examples:
 """
 
 
+# Snippets (snippets.py) arrive as placeholders; the stored text goes in
+# after cleanup, so the model must hand each one back untouched.
+SNIPPET_MARK = "{{snippet"
+SNIPPET_NOTE = """Tokens like {{snippet1}} stand for text that is inserted
+later. Copy each one exactly once, unchanged, where it belongs in the
+sentence. Do not translate, explain or remove them."""
+
+
 # Per-app context (ROADMAP Phase 2). The app being dictated into, by the
 # name macOS shows for it (lowercase), -> what kind of app it is.
 APP_KINDS = {

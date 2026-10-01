@@ -6,6 +6,9 @@ Usage:
   python -m openflow dict list
   python -m openflow dict add NAME --hints "h1,h2" [--lang en|hi|both] [--context TEXT]
   python -m openflow dict remove NAME
+  python -m openflow snippets list
+  python -m openflow snippets add "my email" "me@example.com"
+  python -m openflow snippets remove "my email"
   python -m openflow history [--limit 20]
   python -m openflow config path
   python -m openflow hub [page]      # open the main window (home, history, …)
@@ -53,6 +56,41 @@ def _cmd_dict_remove(args: argparse.Namespace) -> int:
     d = Dictionary.load()
     ok = d.remove(args.name)
     d.save()
+    print("removed" if ok else "not found")
+    return 0 if ok else 1
+
+
+def _cmd_snippets_list(args: argparse.Namespace) -> int:
+    from snippets import Snippets
+    s = Snippets.load()
+    if not s.items:
+        print("(empty)")
+        return 0
+    for item in s.items:
+        print(f"{item.trigger!r} -> {item.expansion!r}")
+    return 0
+
+
+def _cmd_snippets_add(args: argparse.Namespace) -> int:
+    from snippets import Snippets
+    s = Snippets.load()
+    # Shells pass "\n" literally; let a signature span lines.
+    expansion = args.expansion.replace("\\n", "\n")
+    try:
+        s.add(args.trigger, expansion)
+    except ValueError as e:
+        print(f"error: {e}")
+        return 1
+    s.save()
+    print(f"added: {args.trigger}")
+    return 0
+
+
+def _cmd_snippets_remove(args: argparse.Namespace) -> int:
+    from snippets import Snippets
+    s = Snippets.load()
+    ok = s.remove(args.trigger)
+    s.save()
     print("removed" if ok else "not found")
     return 0 if ok else 1
 
@@ -203,6 +241,17 @@ def build_parser() -> argparse.ArgumentParser:
     dr.set_defaults(func=_cmd_dict_remove)
 
     dsub.add_parser("edit", help="open the Dictionary page").set_defaults(func=_cmd_dict_edit)
+
+    sn = sub.add_parser("snippets", help="manage snippets (spoken trigger -> text)")
+    snsub = sn.add_subparsers(dest="scmd", required=True)
+    snsub.add_parser("list").set_defaults(func=_cmd_snippets_list)
+    sa = snsub.add_parser("add")
+    sa.add_argument("trigger")
+    sa.add_argument("expansion", help=r"text to paste; \n for a new line")
+    sa.set_defaults(func=_cmd_snippets_add)
+    sr = snsub.add_parser("remove")
+    sr.add_argument("trigger")
+    sr.set_defaults(func=_cmd_snippets_remove)
 
     eo = sub.add_parser("edit-overlay", help="(internal) launch edit-mode overlay")
     eo.add_argument("selection", help="path to selection text file")

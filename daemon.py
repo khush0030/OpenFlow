@@ -87,6 +87,7 @@ from paste import (paste, get_active_app, capture_front_app, capture_paste_targe
                    focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
+from snippets import Snippets
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
@@ -343,6 +344,7 @@ class Daemon:
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
         ))
         self.dictionary = Dictionary.load()
+        self.snippets = Snippets.load()
         self.history = History()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
@@ -477,6 +479,15 @@ class Daemon:
             return None
         return getattr(target, "name", None) or get_active_app()
 
+    def _active_snippets(self) -> Snippets | None:
+        """The snippet store, re-read if snippets.json changed; None when
+        snippets are off or there are none."""
+        snips = getattr(self, "snippets", None)
+        if snips is None or not (self.cfg.get("snippets") or {}).get("enabled", True):
+            return None
+        snips.refresh()
+        return snips if snips.items else None
+
     def _post_process(self, raw: str, tone: ToneMode | None = None,
                       language: LanguageMode | None = None, target=None) -> str:
         """Dictionary + cleanup for the current modes, or the given ones
@@ -486,6 +497,26 @@ class Daemon:
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
 
+        # Snippets (snippets.py): a dictation that is only a trigger pastes
+        # the stored text; otherwise triggers ride through as placeholders
+        # and done() puts the stored text back.
+        snips, slots = self._active_snippets(), []
+        if snips is not None:
+            whole = snips.whole(corrected)
+            if whole is not None:
+                print("[daemon] snippet: whole dictation is a trigger", flush=True)
+                return whole
+            corrected, slots = snips.protect(corrected)
+
+        def done(out: str) -> str:
+            if not slots:
+                return out
+            back = Snippets.restore(out, slots)
+            if back is None:   # the model dropped or mangled a placeholder
+                self._warn("snippet placeholder lost in cleanup — pasting the uncleaned text")
+                back = Snippets.restore(corrected, slots)
+            return back
+
         m_lang = (language or self.state.language).value
         m_tone = (tone or self.state.tone).value
 
@@ -493,35 +524,35 @@ class Daemon:
         # chat hop for raw/verbatim — that's the default path and the lag.
         if m_lang == "en_to_hi":
             try:
-                return self.ai.translate_en_to_hi(corrected)
+                return done(self.ai.translate_en_to_hi(corrected))
             except Exception as e:
                 log_exception("daemon.pipeline", "EN→HI failed — pasting English", e)
-                return corrected
+                return done(corrected)
         if m_lang == "hi_roman" and any("\u0900" <= ch <= "\u097F" for ch in corrected):
             try:
-                return self.ai.transliterate_to_roman(corrected)
+                return done(self.ai.transliterate_to_roman(corrected))
             except Exception as e:
                 log_exception("daemon.pipeline", "transliterate failed", e)
-                return corrected
+                return done(corrected)
         if m_tone in ("raw", "verbatim"):
-            return corrected
+            return done(corrected)
 
         glossary = None
         if self._inject_glossary():
             lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
             glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
         try:
-            return self.ai.cleanup(
+            return done(self.ai.cleanup(
                 corrected,
                 mode=m_tone,
                 context_app=self._context_app(target),
                 language=m_lang,
                 glossary=glossary,
                 examples=self._style_examples(),
-            )
+            ))
         except Exception as e:
             log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
-            return corrected
+            return done(corrected)
 
     # -- Hotkey callbacks ------------------------------------------------
 
@@ -718,6 +749,8 @@ class Daemon:
             self.cfg["general"] = ch.general   # always_english_output, hindi_script
         if ch.apps is not None:
             self.cfg["apps"] = ch.apps         # per-app tones / context hints
+        if ch.snippets is not None:
+            self.cfg["snippets"] = ch.snippets
         # Only a changed config value moves the daemon's tone/language, so a
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:

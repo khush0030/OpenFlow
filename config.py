@@ -24,6 +24,7 @@ import tomli_w
 CONFIG_DIR = Path(os.path.expanduser("~/.openflow"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 DICT_PATH = CONFIG_DIR / "dictionary.json"
+SNIPPETS_PATH = CONFIG_DIR / "snippets.json"
 HISTORY_PATH = CONFIG_DIR / "history.sqlite"
 
 
@@ -90,6 +91,10 @@ DEFAULTS: dict[str, Any] = {
         # "com.apple.mail" = "professional". Replaces the default tone for
         # that app; a tone switched to with F6 for the session still wins.
         "tones": {},
+    },
+    "snippets": {
+        # Spoken trigger -> stored text, from snippets.json (snippets.py).
+        "enabled": True,
     },
 }
 
