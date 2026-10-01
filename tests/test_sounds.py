@@ -88,4 +88,4 @@ def test_cue_files_are_bundled_and_short(cue):
     assert path.exists(), path
     with wave.open(str(path)) as w:
         seconds = w.getnframes() / w.getframerate()
-    assert 0.03 < seconds < 0.3
+    assert 0.03 < seconds < 0.5  # short cues, including the room tail

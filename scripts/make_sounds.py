@@ -1,8 +1,10 @@
 """Render OpenFlow's dictation cues into assets/sounds/*.wav.
 
 Run once after changing a cue: .venv/bin/python scripts/make_sounds.py
-Soft, short tones: sine partials with a fast attack and an exponential
-decay, peaking well below full scale so they sit under the user's audio.
+"Wood" set (chosen by the user 2026-10-01): soft woodblock knocks — a
+resonant body plus a touch of filtered noise for the strike — with a short
+room tail so they don't sound dry. Start rises, stop falls, cancel is one
+low knock, error is a low falling pair.
 """
 from __future__ import annotations
 
@@ -12,35 +14,62 @@ from pathlib import Path
 import numpy as np
 
 RATE = 44100
+PEAK = 0.5
 OUT = Path(__file__).resolve().parent.parent / "assets" / "sounds"
+_rng = np.random.default_rng(7)  # fixed seed: identical files on every render
 
 
-def tone(f0: float, f1: float, ms: float, decay: float, peak: float) -> np.ndarray:
-    """A sine gliding f0→f1 with a soft second harmonic and a 4 ms attack."""
-    n = int(RATE * ms / 1000)
-    t = np.arange(n) / RATE
-    freq = np.linspace(f0, f1, n)
-    phase = 2 * np.pi * np.cumsum(freq) / RATE
-    wave_ = np.sin(phase) + 0.18 * np.sin(2 * phase)
-    attack = np.minimum(1.0, t / 0.004)
-    env = attack * np.exp(-t * decay)
-    return peak * wave_ * env / np.max(np.abs(wave_))
+def _t(ms: float) -> np.ndarray:
+    return np.arange(int(RATE * ms / 1000)) / RATE
 
 
-def silence(ms: float) -> np.ndarray:
+def _env(t: np.ndarray, attack: float, decay: float) -> np.ndarray:
+    return np.minimum(1, t / attack) * np.exp(-t * decay)
+
+
+def _lowpass(x: np.ndarray, cutoff: float) -> np.ndarray:
+    a = np.exp(-2 * np.pi * cutoff / RATE)
+    y = np.empty_like(x)
+    acc = 0.0
+    for i, v in enumerate(x):
+        acc = (1 - a) * v + a * acc
+        y[i] = acc
+    return y
+
+
+def _room(x: np.ndarray, ms: float = 180, amount: float = 0.12) -> np.ndarray:
+    """Tiny synthetic reverb tail."""
+    t = _t(ms)
+    ir = _rng.standard_normal(len(t)) * np.exp(-t * 28)
+    ir[0] = 0
+    n = len(x) + len(t)
+    wet = np.convolve(x, ir)[:n]
+    wet = np.pad(wet, (0, n - len(wet)))
+    dry = np.concatenate([x, np.zeros(len(t))])
+    return dry + amount * wet / (np.max(np.abs(wet)) + 1e-9) * np.max(np.abs(x))
+
+
+def _knock(f: float, ms: float = 90) -> np.ndarray:
+    t = _t(ms)
+    body = np.sin(2 * np.pi * f * t) * _env(t, 0.0008, 45)
+    strike = _lowpass(_rng.standard_normal(len(t)), 3000) * _env(t, 0.0005, 300)
+    return body + 0.5 * strike
+
+
+def _gap(ms: float) -> np.ndarray:
     return np.zeros(int(RATE * ms / 1000))
 
 
 CUES = {
-    "start":  lambda: tone(740, 1110, 70, 38, 0.32),   # rising tick
-    "stop":   lambda: tone(1110, 740, 80, 34, 0.28),   # falling tick
-    "cancel": lambda: tone(260, 200, 90, 30, 0.30),    # muted thud
-    "error":  lambda: np.concatenate([tone(392, 392, 70, 30, 0.26), silence(45),
-                                      tone(294, 294, 100, 24, 0.26)]),  # low double
+    "start":  lambda: _room(np.concatenate([_knock(660), _gap(25), _knock(990)])),
+    "stop":   lambda: _room(np.concatenate([_knock(990), _gap(25), _knock(660)])),
+    "cancel": lambda: _room(_knock(330, 120)),
+    "error":  lambda: _room(np.concatenate([_knock(392), _gap(70), _knock(294, 120)])),
 }
 
 
 def write(name: str, samples: np.ndarray) -> None:
+    samples = PEAK * samples / (np.max(np.abs(samples)) + 1e-9)
     pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2")
     with wave.open(str(OUT / f"{name}.wav"), "wb") as w:
         w.setnchannels(1)
