@@ -4,7 +4,8 @@ Run once after changing a cue: .venv/bin/python scripts/make_sounds.py
 "Wood" set (chosen by the user 2026-10-01): soft woodblock knocks — a
 resonant body plus a touch of filtered noise for the strike — with a short
 room tail so they don't sound dry. Start rises, stop falls, cancel is one
-low knock, error is a low falling pair.
+low knock, error is a low falling pair. Hands-free sessions get their own
+three-knock start and stop.
 """
 from __future__ import annotations
 
@@ -65,6 +66,11 @@ CUES = {
     "stop":   lambda: _room(np.concatenate([_knock(990), _gap(25), _knock(660)])),
     "cancel": lambda: _room(_knock(330, 120)),
     "error":  lambda: _room(np.concatenate([_knock(392), _gap(70), _knock(294, 120)])),
+    # Hands-free (double-tap) sessions: three knocks, a wider climb/fall.
+    "handsfree_start": lambda: _room(np.concatenate(
+        [_knock(523, 75), _gap(20), _knock(784, 75), _gap(20), _knock(1175, 85)])),
+    "handsfree_stop":  lambda: _room(np.concatenate(
+        [_knock(1175, 75), _gap(20), _knock(784, 75), _gap(20), _knock(523, 85)])),
 }
 
 

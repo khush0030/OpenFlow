@@ -94,3 +94,12 @@ def test_cue_files_are_bundled_and_short(cue):
 def test_the_suite_never_loads_real_sounds():
     # conftest.py guard: no test may make a sound on the user's machine.
     assert sounds._load("start") is None
+
+
+@pytest.mark.parametrize("prev,new,cue", [
+    ("idle", "recording", "handsfree_start"),
+    ("recording", "processing", "handsfree_stop"),
+    ("recording", "cancelled", "cancel"),
+])
+def test_hands_free_sessions_use_their_own_cues(prev, new, cue):
+    assert sounds.cue_for_transition(prev, new, hands_free=True) == cue

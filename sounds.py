@@ -5,6 +5,8 @@ Four short cues, rendered by scripts/make_sounds.py into assets/sounds/:
   stop   — falling tick when recording stops and transcription begins
   cancel — muted thud when a recording is cancelled (✕ / Esc)
   error  — low double tone when transcription fails
+  handsfree_start / handsfree_stop — three-knock variants for double-tap
+                   (hands-free) sessions, so you can tell the modes apart
 
 We use NSSound via pyobjc instead of pulling in a heavy audio library — the
 recorder already owns sounddevice and we don't want to compete for the
@@ -16,8 +18,8 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-Cue = Literal["start", "stop", "cancel", "error"]
-CUES: tuple[Cue, ...] = ("start", "stop", "cancel", "error")
+Cue = Literal["start", "stop", "cancel", "error", "handsfree_start", "handsfree_stop"]
+CUES: tuple[Cue, ...] = ("start", "stop", "cancel", "error", "handsfree_start", "handsfree_stop")
 DEFAULT_VOLUME = 0.35
 
 _ASSETS = Path(__file__).resolve().parent / "assets" / "sounds"
@@ -37,13 +39,13 @@ def configure(enabled: bool, volume: float) -> None:
     _volume = min(1.0, max(0.0, float(volume)))
 
 
-def cue_for_transition(prev: str, new: str) -> Cue | None:
+def cue_for_transition(prev: str, new: str, hands_free: bool = False) -> Cue | None:
     """Which cue a widget state change plays. Undo/Retry re-runs kept audio,
     so cancelled/error → processing is silent (no recording just ended)."""
     if new == "recording" and prev not in _RECORDING:
-        return "start"
+        return "handsfree_start" if hands_free else "start"
     if new == "processing" and prev in _RECORDING:
-        return "stop"
+        return "handsfree_stop" if hands_free else "stop"
     if new == "cancelled" and prev in _RECORDING:
         return "cancel"
     if new == "error" and prev != "error":

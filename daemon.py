@@ -523,7 +523,9 @@ class Daemon:
             # Every way of starting/stopping (hotkey, widget, Esc) passes
             # through here, so the cues stay consistent.
             new = msg.get("state", "idle")
-            cue = sounds.cue_for_transition(getattr(self, "_last_flow_state", "idle"), new)
+            hold = getattr(self, "_hold", None)
+            cue = sounds.cue_for_transition(getattr(self, "_last_flow_state", "idle"), new,
+                                            hands_free=bool(getattr(hold, "hands_free", False)))
             self._last_flow_state = new
             if cue:
                 sounds.play(cue)

@@ -576,3 +576,13 @@ def test_level_and_config_messages_play_nothing(env, monkeypatch):
     d._send_widget({"type": "level", "rms": 0.5})
     d._send_widget({"type": "config", "position": "left"})
     assert played == []
+
+
+def test_hands_free_session_plays_hands_free_cues(env, monkeypatch):
+    played = []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    d = make_daemon()
+    d._hold = type("Hold", (), {"hands_free": True})()
+    d._flow.recording_started()
+    d._flow.processing()
+    assert played == ["handsfree_start", "handsfree_stop"]

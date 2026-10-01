@@ -132,6 +132,11 @@ class HoldOrToggle:
     def _now_ms() -> float:
         return time.monotonic() * 1000.0
 
+    @property
+    def hands_free(self) -> bool:
+        """True while a double-tap (hands-free) session is running."""
+        return self._mode == "toggle"
+
     def _on_press(self, key) -> None:
         # Diag: log every press until the user has triggered ours at least
         # once, so we can confirm pynput is seeing events + what physical
@@ -162,11 +167,11 @@ class HoldOrToggle:
         gap = now - self._last_tap_release_ms
         if self._last_tap_release_ms and gap < self.DOUBLE_TAP_GAP_MS:
             print(f"[hotkey] press: DOUBLE-TAP detected (gap={gap:.0f}ms) -> toggle start", flush=True)
+            self._mode = "toggle"  # set first: hands_free is read during the callback
             try:
                 self.on_press_cb()
             except Exception as e:
                 print(f"[hotkey] toggle-start handler error: {e}", flush=True)
-            self._mode = "toggle"
             self._last_tap_release_ms = 0.0
             return
 
