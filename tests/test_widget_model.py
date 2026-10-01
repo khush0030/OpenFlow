@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 
 from ui import widget_copy as copy
-from ui.widget_geometry import (GAP, Rect, clamp_to_screen, nearest_dock, popup_rect,
-                                widget_rect, widget_size)
+from ui.widget_geometry import (BOTTOM_INSET, GAP, Rect, clamp_to_screen, nearest_dock,
+                                popup_max_height, popup_rect, widget_rect, widget_size)
 from ui.widget_theme import INK, PAPER, resolve
 
 SCREEN = Rect(0, 25, 1440, 800)
@@ -80,6 +80,22 @@ def test_clamp_oversized_popup_pins_to_start():
     w = widget_rect("idle", "right", SCREEN)
     c = clamp_to_screen(popup_rect(w, (340, 2000), "right"), SCREEN, "right")
     assert c.y == SCREEN.y + GAP
+
+
+@pytest.mark.parametrize("pos", ["left", "right"])
+def test_popup_max_height_side_docks_use_full_height(pos):
+    w = widget_rect("card", pos, SCREEN)
+    assert popup_max_height(w, SCREEN, pos) == SCREEN.h - 2 * GAP
+
+
+def test_popup_max_height_bottom_dock_is_space_above_widget():
+    screen = Rect(0, 33, 1470, 853)
+    w = widget_rect("card", "bottom", screen)
+    cap = popup_max_height(w, screen, "bottom")
+    assert cap == w.y - screen.y - 2 * GAP
+    assert cap == screen.h - w.h - BOTTOM_INSET - 2 * GAP
+    r = popup_rect(w, (340, cap), "bottom")
+    assert r.y == screen.y + GAP
 
 
 def test_nearest_dock():

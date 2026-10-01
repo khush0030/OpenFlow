@@ -154,19 +154,42 @@ def _inside(card, w) -> bool:
     return fw.shape_rect(card).contains(QRectF(tl.x(), tl.y(), w.width(), w.height()))
 
 
-def test_long_card_scrolls_and_fits_screen(fa, monkeypatch):
-    monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: SCREEN_13)
-    text = " ".join(WORDS[i % len(WORDS)] for i in range(400))
-    fa._on_message({"type": "state", "state": "card", "text": text})
+def _long_text(n: int = 400) -> str:
+    return " ".join(WORDS[i % len(WORDS)] for i in range(n))
+
+
+def _assert_card_fits(fa, screen: fw.Rect) -> None:
     card = fa.popup
-    r = card.target_rect
-    assert r.y >= SCREEN_13.y + 10 and r.bottom <= SCREEN_13.bottom - 10
-    assert round(fa.widget.target_rect.x - r.right) == 10
+    assert isinstance(card, fw.Card)
+    r, w = card.target_rect, fa.widget.target_rect
+    assert r.y >= screen.y + 10 and r.bottom <= screen.bottom - 10
+    assert r.x >= screen.x and r.right <= screen.right
+    gap = {"right": w.x - r.right, "left": r.x - w.right, "bottom": w.y - r.bottom}
+    assert round(gap[fa.position]) == 10
     assert card.height() == round(r.h) + 2 * fw.M
     card.layout().activate()
     assert _inside(card, card.copy_button) and _inside(card, card.close_button)
     assert card.body_scroll.verticalScrollBar().maximum() > 0
-    assert "regional breakdown" in card.body_label.text()
+
+
+@pytest.mark.parametrize("screen", [SCREEN_13, fw.Rect(0, 33, 1470, 853)],
+                         ids=["y25", "y33"])
+@pytest.mark.parametrize("pos", ["right", "left", "bottom"])
+def test_long_card_scrolls_and_fits_screen(fa, monkeypatch, pos, screen):
+    monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: screen)
+    fa.choose("position", pos)
+    fa._on_message({"type": "state", "state": "card", "text": _long_text()})
+    _assert_card_fits(fa, screen)
+    assert "regional breakdown" in fa.popup.body_label.text()
+
+
+def test_switching_dock_rebuilds_card_with_new_cap(fa, monkeypatch):
+    monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: SCREEN_13)
+    fa._on_message({"type": "state", "state": "card", "text": _long_text()})
+    card = fa.popup
+    fa.choose("position", "bottom")
+    assert fa.popup is not card
+    _assert_card_fits(fa, SCREEN_13)
 
 
 def test_short_card_does_not_scroll(fa):
@@ -235,3 +258,42 @@ def test_toast_and_countdown_timers_stop_when_expired():
     c._elapsed = 15.0
     c._step()
     assert fired == [1] and not c._timer.isActive()
+
+
+def _start_drag(fa) -> None:
+    fa.widget._press = QPointF(0, 0)
+    fa.widget.dragging = True
+    fa.begin_drag()
+
+
+def test_disconnect_mid_drag_cancels_drag(fa):
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    _start_drag(fa)
+    zones = list(fa.zones.values())
+    fa._on_message({"type": "state", "state": "error", "text": ""})  # deferred
+    fa._on_message({"type": "_disconnected"})
+    assert not fa.widget.dragging and fa.widget._press is None
+    assert fa.zones == {} and not any(z.isVisible() for z in zones)
+    assert fa.popup is None  # nothing pops up while disconnected
+    fa._on_message({"type": "config", "position": "right",
+                    "appearance": "paper", "hold_key": "cmd_r"})
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget.view == "recording"
+    assert fa.widget.isVisible()
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (26, 102)
+
+
+def test_config_during_drag_waits_for_drop(fa):
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    before = fa.widget.target_rect
+    _start_drag(fa)
+    fa._on_message({"type": "config", "position": "left",
+                    "appearance": "ink", "hold_key": "alt_r"})
+    assert fa.widget.target_rect == before
+    assert fa.position == "right" and fa.theme is PAPER
+    fa.widget.dragging = False
+    fa.end_drag(QPointF(SCREEN.cx, SCREEN.bottom - 10))
+    assert fa.theme is INK and fa.hold_key == "alt_r"
+    assert fa.position == "bottom"  # the user's drop wins over the stored config
+    assert fa.client.sent[-1] == {"action": "set_position", "value": "bottom"}
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (46, 8)

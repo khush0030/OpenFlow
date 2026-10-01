@@ -28,8 +28,8 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
 from ui import widget_copy as copy
 from ui.fonts import load_fonts
 from ui.vibrancy import pin_overlay
-from ui.widget_geometry import (DRAG_THRESHOLD, GAP, POSITIONS, Rect, clamp_to_screen,
-                                nearest_dock, popup_rect, widget_rect)
+from ui.widget_geometry import (DRAG_THRESHOLD, POSITIONS, Rect, clamp_to_screen,
+                                nearest_dock, popup_max_height, popup_rect, widget_rect)
 from ui.widget_theme import APPEARANCES, FONT_SERIF, FONT_UI, Theme, resolve
 from widget_channel import SOCKET_PATH, WidgetClient
 
@@ -505,6 +505,7 @@ class FlowWidget(QWidget):
 
     def hideEvent(self, _e) -> None:
         self._sync_frames()
+        self.app.cancel_drag()  # a hidden widget never gets its mouse release
 
     def set_level(self, rms: float) -> None:
         self._level = 0.6 * self._level + 0.4 * max(0.0, min(1.0, rms * 9))
@@ -729,6 +730,7 @@ class FlowApp(QObject):
         self.widget = FlowWidget(self)
         self.popup: Surface | None = None
         self._popup_key: tuple | None = None
+        self._pending_config: dict | None = None  # config that arrived mid-drag
         self.zones: dict[str, DockZone] = {}
         self._screen: Rect | None = None
         # Socket callbacks arrive on a background thread; the signal hops to the UI thread.
@@ -778,13 +780,11 @@ class FlowApp(QObject):
         elif kind == "level":
             self.widget.set_level(float(m.get("rms", 0.0)))
         elif kind == "config":
-            if m.get("position") in POSITIONS:
-                self.position = m["position"]
-            if m.get("appearance") in APPEARANCES:
-                self.appearance = m["appearance"]
-            self.hold_key = m.get("hold_key") or self.hold_key
-            self.theme = resolve(self.appearance, self._system_dark())
-            add_shadow(self.widget, self.theme)
+            if self.widget.dragging:
+                # don't yank the widget mid-drag; replayed at the drop
+                self._pending_config = {**(self._pending_config or {}), **m}
+                return
+            self._apply_config(m)
             self.relayout(animate=False)
             self.widget.show_pinned()
         elif kind == "state":
@@ -795,6 +795,22 @@ class FlowApp(QObject):
             self._apply_state_view()
             self.relayout()
             self.widget.show_pinned()
+
+    def _apply_config(self, m: dict) -> None:
+        if m.get("position") in POSITIONS:
+            self.position = m["position"]
+        if m.get("appearance") in APPEARANCES:
+            self.appearance = m["appearance"]
+        self.hold_key = m.get("hold_key") or self.hold_key
+        self.theme = resolve(self.appearance, self._system_dark())
+        add_shadow(self.widget, self.theme)
+
+    def _apply_pending(self) -> None:
+        """Apply config/state that arrived while a drag was in progress."""
+        if self._pending_config is not None:
+            self._apply_config(self._pending_config)
+            self._pending_config = None
+        self._apply_state_view()
 
     def _apply_state_view(self) -> None:
         if not (self.widget.view == "hover" and self.state == "idle"):
@@ -843,7 +859,7 @@ class FlowApp(QObject):
             self.popup = None
             self._popup_key = None
 
-    def _make_popup(self) -> Surface | None:
+    def _make_popup(self, max_height: float) -> Surface | None:
         v, th = self.widget.view, self.theme
         if v == "hover":
             return Tooltip(th, copy.DICTATE, copy.hold_label(self.hold_key))
@@ -854,19 +870,20 @@ class FlowApp(QObject):
         if v == "error":
             return Toast(th, copy.ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "card":
-            screen = self._screen or self._screen_rect()
             return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
-                        max_height=screen.h - 2 * GAP)
+                        max_height=max_height)
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:
         """Rebuild the pop-up for the current view, placed from the widget's
         final rect (never mid-animation) so it can't overlap the widget."""
         screen = self._screen or self._screen_rect()
-        key = (self.widget.view, self.text, self.theme.name, self.hold_key, screen.h)
+        max_h = popup_max_height(anchor, screen, self.position)
+        key = (self.widget.view, self.text, self.theme.name, self.hold_key,
+               self.position, max_h)
         if self.popup is None or key != self._popup_key:
             self._close_popup()
-            popup = self._make_popup()
+            popup = self._make_popup(max_h)
             if popup is None:
                 return
             self.popup, self._popup_key = popup, key
@@ -893,15 +910,30 @@ class FlowApp(QObject):
     def end_drag(self, gpos: QPointF) -> None:
         near = nearest_dock(gpos.x(), gpos.y(), self.widget.view,
                             self._screen or self._screen_rect())
+        self._close_zones()
+        self._apply_pending()  # before the drop, so the user's dock choice wins
+        if near != self.position:
+            self.position = near
+            self.send("set_position", near)
+        self.relayout(animate=True)
+
+    def cancel_drag(self) -> None:
+        """Abandon a press/drag that will never get its release (widget hidden)."""
+        w = self.widget
+        w._press = None
+        if not w.dragging and not self.zones:
+            return
+        w.dragging = False
+        self._close_zones()
+        self._apply_pending()
+        if w.isVisible():
+            self.relayout(animate=False)
+
+    def _close_zones(self) -> None:
         for zone in self.zones.values():
             zone.close()
             zone.deleteLater()
         self.zones.clear()
-        if near != self.position:
-            self.position = near
-            self.send("set_position", near)
-        self._apply_state_view()  # any state that arrived mid-drag
-        self.relayout(animate=True)
 
     # right-click menu
     def show_menu(self, gpos: QPoint) -> None:

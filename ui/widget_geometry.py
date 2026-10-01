@@ -74,6 +74,15 @@ def popup_rect(widget: Rect, size: tuple[float, float], position: str) -> Rect:
     return Rect(widget.x - GAP - w, widget.cy - h / 2, w, h)
 
 
+def popup_max_height(widget: Rect, screen: Rect, position: str) -> float:
+    """Tallest pop-up that fits with GAP margins. Side docks centre the pop-up
+    beside the widget (it can slide the full height); the bottom dock stacks
+    it above the widget, so only the space above the widget is usable."""
+    if position == "bottom":
+        return widget.y - screen.y - 2 * GAP
+    return screen.h - 2 * GAP
+
+
 def clamp_to_screen(rect: Rect, screen: Rect, position: str) -> Rect:
     """Slide a pop-up back inside the screen (GAP margin) along the axis that
     runs parallel to the docked edge, so its GAP from the widget is kept.
