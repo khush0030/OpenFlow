@@ -280,6 +280,10 @@ def _signal_edit_overlay(status: str) -> None:
 
 
 class Daemon:
+    # A dictation that arrives while another is processing queues behind it
+    # (run ids keep the widget right); only a stuck pipeline makes it fail.
+    _BUSY_WAIT_S = 60.0
+
     def __init__(self) -> None:
         self.cfg = cfg_mod.load()
         self.state = DaemonState(
@@ -687,11 +691,11 @@ class Daemon:
     def _pipeline_worker(self, audio, ctx: RunContext | None, run: int) -> None:
         ctx = ctx or RunContext()
         target = ctx.target
-        if not self._busy.acquire(blocking=False):
-            # Another dictation is still processing: keep this audio and
+        if not self._busy.acquire(timeout=self._BUSY_WAIT_S):
+            # The previous dictation never finished: keep this audio and
             # offer Retry rather than dropping it.
-            print("[daemon] already processing — offering Retry.", flush=True)
-            self._flow.failed(audio, ctx, run=run)
+            print("[daemon] previous dictation still processing — offering Retry.", flush=True)
+            self._flow.failed(audio, ctx, run=run) or self._stale(run)
             return
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()

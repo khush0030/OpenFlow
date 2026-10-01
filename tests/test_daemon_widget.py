@@ -201,8 +201,9 @@ def test_older_pipeline_result_keeps_newer_undo_window(env, monkeypatch):
 
 # -- Review fix 2: Undo/Retry while another pipeline is busy ---------------
 
-def test_undo_while_busy_offers_retry_and_keeps_audio(env):
+def test_undo_while_busy_too_long_offers_retry_and_keeps_audio(env):
     d = make_daemon()
+    d._BUSY_WAIT_S = 0.05                    # stand-in for the 60 s queue wait
     d._busy.acquire()                        # dictation 1 still in flight
     d.recorder.is_recording = True
     d._flow.recording_started()
@@ -505,3 +506,25 @@ def test_pump_never_pastes_card_while_widget_disconnected(env, monkeypatch):
     assert not any(c[0] == "paste" for c in env["calls"])
     assert asked == []
     assert d._flow.state == CARD
+
+
+# -- Final review 4: a busy run queues instead of reporting an error ------
+
+def test_second_dictation_waits_for_the_first_and_then_pastes(env):
+    d = make_daemon()
+    d._busy.acquire()                        # dictation 1 still in flight
+    run = d._flow.processing()
+    t = threading.Thread(target=work, args=(d, run))
+    t.start()
+    t.join(0.2)
+    assert t.is_alive()                      # queued, not failed
+    assert d._flow.state == PROCESSING
+    d._busy.release()
+    t.join(2)
+    assert not t.is_alive()
+    assert ("paste", "hello world") in env["calls"]
+    assert d._flow.state == IDLE
+
+
+def test_busy_wait_is_generous():
+    assert dm.Daemon._BUSY_WAIT_S >= 60
