@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import datetime
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PyQt6 import sip
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from control_channel import ControlError, DaemonNotRunning
 from history import History
+from hub_async import deliver_queued
+from ui.hub import workers
 from ui.hub.context import HubContext
 from ui.hub.pages import home
 from ui.hub.pages.home import HomePage
@@ -251,3 +256,86 @@ def test_narrow_window_stacks_banner_button(db, monkeypatch):
     page.resize(1044, 808)
     assert page._banner_layout.direction() == QBoxLayout.Direction.LeftToRight
     page.hide()
+
+
+# ── status off the UI thread ──────────────────────────────────────────────
+class SlowControl(FakeControl):
+    """status blocks until released, like a wedged daemon."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.gate = threading.Event()
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.threads = []
+        self._lock = threading.Lock()
+
+    def call(self, cmd, timeout=5.0, **args):
+        self.threads.append((cmd, threading.current_thread().name))
+        if cmd == "status":
+            with self._lock:
+                self.in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self.in_flight)
+            try:
+                self.gate.wait(5)
+                return super().call(cmd, timeout=timeout, **args)
+            finally:
+                with self._lock:
+                    self.in_flight -= 1
+        return super().call(cmd, timeout=timeout, **args)
+
+
+def _status_calls(ctl) -> int:
+    return [c for c, _a in ctl.calls].count("status")
+
+
+@pytest.mark.real_workers
+def test_slow_status_does_not_block_the_ui_thread(db, monkeypatch):
+    ctl = SlowControl(status={**STATUS, "state": "recording"})
+    t0 = time.monotonic()
+    page, _ = make(db, control=ctl, monkeypatch=monkeypatch)
+    page.status_timer.stop()
+    for _ in range(5):                      # timer ticks while the call is stuck
+        page.refresh_status()
+    assert time.monotonic() - t0 < 0.5     # nothing waited on the daemon
+    assert deliver_queued(lambda: ctl.in_flight == 1, 1.0)
+    assert "Recording" not in page.status_text.text()
+    ctl.gate.set()
+    assert deliver_queued(lambda: "Recording" in page.status_text.text())
+    assert page.status_dot_color == home.S.ACCENT
+    assert ctl.max_in_flight == 1
+    assert _status_calls(ctl) == 1          # skipped ticks were dropped, not queued
+    assert ctl.threads == [("status", "hub-worker")]
+    page.refresh_status()                   # the next tick polls again
+    assert deliver_queued(lambda: _status_calls(ctl) == 2)
+
+
+@pytest.mark.real_workers
+def test_status_after_page_destroyed_is_ignored(db, monkeypatch):
+    ctl = SlowControl()
+    page, _ = make(db, control=ctl, monkeypatch=monkeypatch)
+    page.status_timer.stop()
+    assert deliver_queued(lambda: ctl.in_flight == 1, 1.0)
+    sip.delete(page)
+    ctl.gate.set()
+    assert deliver_queued(lambda: not workers._LIVE)     # delivered, dropped, no crash
+
+
+@pytest.mark.real_workers
+def test_daemon_down_offline_text_arrives_async(db, monkeypatch):
+    page, _ = make(db, control=FakeControl(error=DaemonNotRunning()), monkeypatch=monkeypatch)
+    page.status_timer.stop()
+    assert deliver_queued(lambda: page.status_text.text() == "OpenFlow isn't running")
+    assert page.status_dot_color == home.S.MUTED
+
+
+@pytest.mark.real_workers
+def test_paste_again_runs_off_the_ui_thread(db, monkeypatch):
+    ctl = SlowControl()
+    ctl.gate.set()
+    page, _ = make(db, control=ctl, monkeypatch=monkeypatch)
+    page.status_timer.stop()
+    page.rows[0].paste_btn.click()
+    assert deliver_queued(lambda: page.rows[0].note.text() == "Pasted")
+    assert ("paste_text", "hub-worker") in ctl.threads
+    assert ("paste_text", "MainThread") not in ctl.threads

@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 import config as cfg_mod
 from openflow_logger import log_exception
 from ui.hub import style as S
+from ui.hub import workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.hub.pages import _controls as C
@@ -449,17 +450,25 @@ class SettingsPage(Page):
             self._save("sounds", "volume", value)
 
     def _play_cues(self) -> None:
-        try:
-            self.ctx.call("play_cues", timeout=2.0)
-        except DaemonNotRunning:
+        if not self.play_btn.isEnabled():
+            return
+        self.play_btn.setEnabled(False)          # cues take ~2 s; one run at a time
+        workers.run_in_thread(self, lambda: self.ctx.call("play_cues", timeout=2.0),
+                              self._play_cues_done)
+
+    def _play_cues_done(self, _r, err) -> None:
+        self.play_btn.setEnabled(True)
+        if isinstance(err, DaemonNotRunning):
             self.play_note.setText(NOT_RUNNING)
             self.play_note.show()
-            return
-        except ControlError as e:
-            self.play_note.setText(f"Couldn't play: {e}")
+        elif isinstance(err, ControlError):
+            self.play_note.setText(f"Couldn't play: {err}")
             self.play_note.show()
-            return
-        self.play_note.hide()
+        elif err is not None:
+            self.play_note.setText("Couldn't play just now. Try again.")
+            self.play_note.show()
+        else:
+            self.play_note.hide()
 
     # ── widget ───────────────────────────────────────────────────────────
     def _build_widget(self, lay: QVBoxLayout) -> None:
@@ -569,7 +578,7 @@ class SettingsPage(Page):
             else:
                 self._key_status(f"Didn't work: {error}", S.DANGER)
 
-        C.run_in_thread(self, lambda: check_sarvam_key(key, model), done)
+        workers.run_in_thread(self, lambda: check_sarvam_key(key, model), done)
 
     # ── privacy ──────────────────────────────────────────────────────────
     def _history_cap(self) -> int:

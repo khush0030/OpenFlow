@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 
 import config as cfg_mod
 from ui.hub import style as S
+from ui.hub import workers
 from ui.hub.context import ControlError
 from ui.hub.page import Page
 from ui.hub.pages.dictionary import Segmented, transparent_scroll
@@ -239,6 +240,10 @@ class TonesPage(Page):
         super().__init__(ctx)
         self._tone: str | None = None
         self._lang: str | None = None
+        # Daemon calls go out one at a time on a worker; while one is out the
+        # latest value per command waits here (an older one is superseded).
+        self._daemon_busy = False
+        self._daemon_pending: dict[str, str] = {}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -386,12 +391,28 @@ class TonesPage(Page):
             log.exception("saving general.%s failed", key)
 
     def _tell_daemon(self, cmd: str, value: str) -> None:
-        try:
-            self.ctx.call(cmd, value=value)
-        except ControlError:      # DaemonNotRunning included: config applies at next start
-            pass
-        except Exception:
-            log.exception("control call %s failed", cmd)
+        """Tell the running daemon (off the UI thread). The value is already
+        saved to config.toml, so a daemon that isn't running picks it up at
+        its next start."""
+        self._daemon_pending.pop(cmd, None)
+        self._daemon_pending[cmd] = value
+        if not self._daemon_busy:
+            self._send_next()
+
+    def _send_next(self) -> None:
+        if not self._daemon_pending:
+            return
+        cmd = next(iter(self._daemon_pending))
+        value = self._daemon_pending.pop(cmd)
+        self._daemon_busy = True
+        workers.run_in_thread(self, lambda: self.ctx.call(cmd, value=value),
+                              lambda _r, err: self._daemon_done(cmd, err))
+
+    def _daemon_done(self, cmd: str, err) -> None:
+        self._daemon_busy = False
+        if err is not None and not isinstance(err, ControlError):
+            log.error("control call %s failed: %r", cmd, err)
+        self._send_next()
 
     def _on_tone(self, value: str) -> None:
         try:

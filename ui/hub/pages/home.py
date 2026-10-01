@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QHBoxLayout, QLab
 import stats
 from ui import widget_copy
 from ui.hub import style as S
+from ui.hub import workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.hub.pages import _charts as C
@@ -207,6 +208,7 @@ class HomePage(Page):
         self._hold_key = "cmd_r"
         self.rows: list[EntryRow] = []
         self.status_dot_color = S.MUTED
+        self._status_in_flight = False   # one status call at a time; ticks never pile up
 
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(POLL_MS)
@@ -480,28 +482,46 @@ class HomePage(Page):
         self.list_layout.addStretch(1)
 
     def _paste_again(self, row: EntryRow) -> None:
-        try:
-            self.ctx.call("paste_text", text=row.entry.final)
-        except DaemonNotRunning:
-            row.show_note("OpenFlow isn't running · start it to paste again.", S.DANGER)
-        except ControlError as exc:
-            row.show_note(f"Couldn't paste: {exc}", S.DANGER)
-        else:
-            row.show_note("Pasted", S.SAGE_TEXT, 1500)
+        text = row.entry.final
+
+        def done(_r, err) -> None:
+            if isinstance(err, DaemonNotRunning):
+                row.show_note("OpenFlow isn't running · start it to paste again.", S.DANGER)
+            elif isinstance(err, ControlError):
+                row.show_note(f"Couldn't paste: {err}", S.DANGER)
+            elif err is not None:
+                row.show_note("Couldn't paste just now. Try again.", S.DANGER)
+            else:
+                row.show_note("Pasted", S.SAGE_TEXT, 1500)
+        # The row is the parent: if the list re-renders first, the reply is dropped.
+        workers.run_in_thread(row, lambda: self.ctx.call("paste_text", text=text), done)
 
     def _open_history(self) -> None:
         self.ctx.navigate("history", query=self.search.text().strip())
 
     # ── live status ──
     def refresh_status(self) -> None:
-        try:
-            st = self.ctx.call("status", timeout=1.0)
-        except DaemonNotRunning:
+        """Ask the daemon for its status on a worker thread (it can take up
+        to the timeout when the daemon is wedged). A tick that comes while
+        the previous call is still out is skipped."""
+        if self._status_in_flight:
+            return
+        self._status_in_flight = True
+        workers.run_in_thread(self, lambda: self.ctx.call("status", timeout=1.0),
+                              self._status_done)
+
+    def _status_done(self, st, err) -> None:
+        self._status_in_flight = False
+        if isinstance(err, DaemonNotRunning):
             self._offline("OpenFlow isn't running")
-            return
-        except ControlError:
+        elif err is not None or not isinstance(st, dict):
+            if err is not None and not isinstance(err, ControlError):
+                print(f"[hub.home] status failed: {err!r}", flush=True)
             self._offline("OpenFlow isn't responding")
-            return
+        else:
+            self._apply_status(st)
+
+    def _apply_status(self, st: dict) -> None:
         old_key = self._hold_key
         self._hold_key = st.get("hold_key") or self._hold_key
         key = widget_copy.key_name(self._hold_key)

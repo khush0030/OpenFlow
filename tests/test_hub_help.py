@@ -41,23 +41,6 @@ def status(mic=True, ax=True, im=True) -> dict:
 
 
 
-def _sync_run(parent, fn, on_done):
-    try:
-        result, error = fn(), None
-    except BaseException as e:
-        result, error = None, e
-    on_done(result, error)
-
-
-@pytest.fixture(autouse=True)
-def _no_event_loop(monkeypatch):
-    # Worker threads report back through queued signals; spinning the event
-    # loop for them would also fire timers other test modules left behind
-    # (the flow widget's pyobjc pinning segfaults offscreen). Run inline.
-    from ui.hub.pages import _controls
-    monkeypatch.setattr(_controls, "run_in_thread", _sync_run)
-
-
 @pytest.fixture
 def tmp_config(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg_mod, "CONFIG_DIR", tmp_path)
@@ -225,3 +208,31 @@ def test_privacy_footer(make_page):
     page, _ = make_page({"status": status()})
     assert page.footer.text() == ("OpenFlow · your words stay on this Mac, except the audio "
                                   "sent to Sarvam for transcription.")
+
+
+@pytest.mark.real_workers
+def test_permission_poll_runs_off_the_ui_thread_one_at_a_time(make_page):
+    import threading
+    import time
+    from hub_async import deliver_queued
+    gate, seen = threading.Event(), []
+
+    page, ctl = make_page({"status": status(ax=False)})
+    orig = ctl.call
+
+    def slow(cmd, timeout=5.0, **args):
+        seen.append(threading.current_thread().name)
+        gate.wait(5)
+        return orig(cmd, timeout=timeout, **args)
+    ctl.call = slow
+    t0 = time.monotonic()
+    page.shown()
+    page.poll.stop()
+    for _ in range(4):
+        page.refresh_permissions()
+    assert time.monotonic() - t0 < 0.5
+    assert deliver_queued(lambda: seen, 1.0)
+    gate.set()
+    assert deliver_queued(
+        lambda: page.perm_rows["accessibility"].state_label.text() == "Not allowed")
+    assert seen == ["hub-worker"]

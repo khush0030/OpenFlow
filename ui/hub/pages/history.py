@@ -15,8 +15,7 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
-from PyQt6.QtCore import (QObject, QPointF, QRect, QRectF, QRunnable, QSize, Qt,
-                          QThreadPool, QTimer, pyqtSignal, pyqtSlot)
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import (QColor, QFontMetricsF, QGuiApplication, QIcon, QKeySequence,
                          QPainter, QPainterPath, QPen, QPixmap, QTextLayout)
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
@@ -26,6 +25,7 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
 from history import Entry, History
 from stats import word_count
 from ui.hub import style as S
+from ui.hub import workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.widget_copy import TONE_LABELS
@@ -84,48 +84,6 @@ def when_label(ts: float) -> str:
 
 def _words(n: int) -> str:
     return f"{n} word" if n == 1 else f"{n} words"
-
-
-# ── background calls ─────────────────────────────────────────────────────
-class _Relay(QObject):
-    """Lives on the UI thread; the worker emits, the slot runs here."""
-    finished = pyqtSignal(object, object)
-
-    def __init__(self, done) -> None:
-        super().__init__()
-        self._done = done
-        self.finished.connect(self._deliver)
-
-    @pyqtSlot(object, object)
-    def _deliver(self, result, error) -> None:
-        _LIVE.discard(self)
-        try:
-            self._done(result, error)
-        except Exception as e:  # noqa: BLE001 — never let a slot abort Qt
-            print(f"[hub.history] callback failed: {e!r}", flush=True)
-
-
-_LIVE: set[_Relay] = set()
-
-
-class _Job(QRunnable):
-    def __init__(self, fn, relay: _Relay) -> None:
-        super().__init__()
-        self._fn, self._relay = fn, relay
-
-    def run(self) -> None:
-        try:
-            result, error = self._fn(), None
-        except BaseException as e:  # noqa: BLE001
-            result, error = None, e
-        self._relay.finished.emit(result, error)
-
-
-def qt_run_async(fn, done) -> None:
-    """Run fn on the global thread pool; call done(result, error) on the UI thread."""
-    relay = _Relay(done)
-    _LIVE.add(relay)
-    QThreadPool.globalInstance().start(_Job(fn, relay))
 
 
 # ── small widgets ────────────────────────────────────────────────────────
@@ -641,7 +599,10 @@ class HistoryPage(Page):
                  run_async: RunAsync | None = None) -> None:
         super().__init__(ctx)
         self._clock = clock
-        self._run_async = run_async or qt_run_async
+        # Daemon calls (paste, rerun — seconds —, status) never run on the UI
+        # thread; replies that land after the page is gone are dropped.
+        self._run_async = run_async or (lambda fn, done: workers.run_in_thread(self, fn, done))
+        self._probe_in_flight = False
         self._filter = "all"
         self._query = ""
         self._tones: list[str] = []
@@ -1127,7 +1088,12 @@ class HistoryPage(Page):
 
     # -- daemon status --------------------------------------------------------
     def _probe_daemon(self) -> None:
+        if self._probe_in_flight:                 # quick page flips: one probe at a time
+            return
+        self._probe_in_flight = True
+
         def done(_r, err) -> None:
+            self._probe_in_flight = False
             self._set_offline(isinstance(err, DaemonNotRunning))
         self._run_async(lambda: self.ctx.call("status", timeout=2.0), done)
 
