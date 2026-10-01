@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from prompts import PROMPTS
+from prompts import PROMPTS, context_note
 from sarvam import chat_complete, resolve_api_key
 
 
@@ -39,7 +39,7 @@ class AIProcessor:
         self,
         text: str,
         mode: str = "verbatim",
-        context_app: str | None = None,  # noqa: ARG002 — kept for callers
+        context_app: str | None = None,
         *,
         language: str | None = None,
         glossary: str | None = None,
@@ -51,6 +51,10 @@ class AIProcessor:
             return text
         system = PROMPTS.get(mode) or PROMPTS["verbatim"]
         extras: list[str] = []
+        # The app being dictated into (prompts.CONTEXT_HINTS).
+        note = context_note(context_app, mode)
+        if note:
+            extras.append(note)
         if language in ("hinglish", "hi", "hi_roman", "auto"):
             extras.append(
                 "The speaker often uses Indian English and Hindi–English "

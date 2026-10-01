@@ -122,8 +122,8 @@ def make_daemon():
     d._edit_pending = False
     d._cancel_pending = False
     d._paste_target = None
-    d._stt_opts = lambda: TranscribeOptions(language_code="en-IN", mode="transcribe")
-    d._post_process = lambda raw: raw
+    d._stt_opts = lambda tone=None: TranscribeOptions(language_code="en-IN", mode="transcribe")
+    d._post_process = lambda raw, **kw: raw
     d._edit_selection = ""
     # Run pipelines inline so Undo/Retry sequences are deterministic.
     d._start_worker = d._pipeline_worker

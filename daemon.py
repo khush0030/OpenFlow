@@ -388,12 +388,12 @@ class Daemon:
 
     # -- Pipeline pieces -------------------------------------------------
 
-    def _stt_opts(self) -> TranscribeOptions:
+    def _stt_opts(self, tone: ToneMode | None = None) -> TranscribeOptions:
         """Map OpenFlow language mode → Saaras language_code + mode."""
         m = self.state.language.value
         always_en = self.cfg["general"].get("always_english_output", True)
         sr = int(self.cfg["audio"].get("sample_rate", 16000))
-        tone_raw = self.state.tone.value == "raw"
+        tone_raw = (tone or self.state.tone).value == "raw"
 
         def _opts(language_code: str | None, mode: str) -> TranscribeOptions:
             if tone_raw and mode == "transcribe":
@@ -452,10 +452,35 @@ class Daemon:
             return bool(d["inject_into_cleanup"])
         return True
 
+    def _tone_for(self, target) -> ToneMode:
+        """Tone for a dictation into `target`: its [apps.tones] entry stands
+        in for the default tone. A tone switched to for the session (F6, the
+        hub), i.e. not the configured default, is an explicit choice and wins."""
+        tone = self.state.tone
+        default = (self.cfg.get("general") or {}).get("default_tone")
+        if default is not None and tone.value != default:
+            return tone
+        name = getattr(target, "name", None)
+        override = cfg_mod.app_tone(self.cfg.get("apps"), name,
+                                    getattr(target, "bundle_id", None))
+        if override is None:
+            return tone
+        try:
+            return ToneMode(override)
+        except ValueError:
+            self._warn(f"apps.tones: {name!r} = {override!r} is not a tone — using {tone.value}")
+            return tone
+
+    def _context_app(self, target) -> str | None:
+        """App name for the cleanup prompt's context hint, if enabled."""
+        if not (self.cfg.get("apps") or {}).get("context_hints", True):
+            return None
+        return getattr(target, "name", None) or get_active_app()
+
     def _post_process(self, raw: str, tone: ToneMode | None = None,
-                      language: LanguageMode | None = None) -> str:
+                      language: LanguageMode | None = None, target=None) -> str:
         """Dictionary + cleanup for the current modes, or the given ones
-        (control `rerun`)."""
+        (control `rerun`). target: the paste target, for the app context."""
         if not raw:
             return ""
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
@@ -489,7 +514,7 @@ class Daemon:
             return self.ai.cleanup(
                 corrected,
                 mode=m_tone,
-                context_app=get_active_app(),
+                context_app=self._context_app(target),
                 language=m_lang,
                 glossary=glossary,
                 examples=self._style_examples(),
@@ -691,6 +716,8 @@ class Daemon:
                   f"volume={ch.sounds['volume']}", flush=True)
         if ch.general is not None:
             self.cfg["general"] = ch.general   # always_english_output, hindi_script
+        if ch.apps is not None:
+            self.cfg["apps"] = ch.apps         # per-app tones / context hints
         # Only a changed config value moves the daemon's tone/language, so a
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:
@@ -908,7 +935,10 @@ class Daemon:
         self.state.notify()
         try:
             t0 = time.time()
-            opts = self._stt_opts()
+            tone = self._tone_for(target)
+            if tone != self.state.tone:
+                print(f"[daemon] tone for {getattr(target, 'name', '?')}: {tone.value}", flush=True)
+            opts = self._stt_opts(tone)
             try:
                 raw = self.transcriber.transcribe(audio, opts)
             except Exception as e:
@@ -930,7 +960,7 @@ class Daemon:
                 final = self.ai.edit_selection(ctx.selection, instruction)
                 _signal_edit_overlay("done")
             else:
-                final = self._post_process(raw)
+                final = self._post_process(raw, tone=tone, target=target)
 
             t2 = time.time()
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
@@ -958,7 +988,7 @@ class Daemon:
                 self.history.add(
                     raw=raw,
                     final=final,
-                    tone=self.state.tone.value,
+                    tone=tone.value,
                     lang=self.state.language.value,
                     duration=audio.size / self.cfg["audio"]["sample_rate"],
                     app=getattr(target, "name", None) or None,

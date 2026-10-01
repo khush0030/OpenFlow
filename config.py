@@ -81,6 +81,16 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "size_cap": 500,
     },
+    "apps": {
+        # Tell cleanup which app the text is for (prompts.CONTEXT_HINTS):
+        # chat apps casual, mail formal, editors/terminals keep code tokens.
+        # Never changes the tone, and raw/verbatim never reach cleanup.
+        "context_hints": True,
+        # Per-app tone, by app name or bundle id, e.g. Slack = "casual",
+        # "com.apple.mail" = "professional". Replaces the default tone for
+        # that app; a tone switched to with F6 for the session still wins.
+        "tones": {},
+    },
 }
 
 WIDGET_POSITIONS = ("left", "bottom", "right")
@@ -208,6 +218,21 @@ def save_setting(section: str, key: str, value: Any) -> None:
     user = _read_user()
     user.setdefault(section, {})[key] = value
     save(user)
+
+
+def app_tone(apps: dict[str, Any] | None, name: str | None,
+             bundle_id: str | None = None) -> str | None:
+    """The [apps.tones] entry for an app, matched case-insensitively on its
+    bundle id, its name, or its name without ".app"; None if there is none."""
+    tones = (apps or {}).get("tones")
+    if not isinstance(tones, dict) or not tones:
+        return None
+    by_key = {str(k).strip().lower(): v for k, v in tones.items()}
+    n = (name or "").strip().lower()
+    for key in ((bundle_id or "").strip().lower(), n, n.removesuffix(".app")):
+        if key and isinstance(by_key.get(key), str):
+            return by_key[key]
+    return None
 
 
 def save_widget_setting(key: str, value: str) -> None:
