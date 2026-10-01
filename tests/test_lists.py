@@ -155,11 +155,21 @@ def test_finally_alone_needs_an_announcement():
     assert lists.find("Two steps. First, we review the PR. Finally, we merge it.") is not None
 
 
-def test_run_on_last_item_is_left_to_the_model():
-    found = lists.find("One is that the deck is late. Second is that the budget is over. "
-                       "Let me know what you think.")
-    assert found.ambiguous_tail
-    assert lists.render(found) is None
+@pytest.mark.parametrize("closing", ["Let me know what you think.", "Thanks!",
+                                     "What do you think?", "Bas itna hi."])
+def test_closing_remark_goes_after_the_list(closing):
+    text = f"One is that the deck is late. Second is that the budget is over. {closing}"
+    found = lists.find(text)
+    assert lists.render(found) == (
+        f"1. The deck is late.\n2. The budget is over.\n\n{closing}")
+    assert same_words(text, lists.render(found), found.removable)
+
+
+def test_more_about_the_last_point_stays_in_it():
+    text = ("First, the deck is late. Second, the budget is over. "
+            "Finance flagged it twice last week.")
+    assert fmt(text) == ("1. The deck is late.\n"
+                         "2. The budget is over. Finance flagged it twice last week.")
 
 
 def test_announces():

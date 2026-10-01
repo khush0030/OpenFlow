@@ -104,10 +104,9 @@ def test_verbatim_bullets_and_spoken_breaks_are_local(daemon):
     assert daemon.ai.formats == []
 
 
-def test_verbatim_run_on_list_uses_the_model(daemon):
-    daemon.ai.format_result = RUN_ON_LIST
+def test_verbatim_run_on_list_is_local(daemon):
     assert daemon._post_process(RUN_ON) == RUN_ON_LIST
-    assert daemon.ai.formats == [(RUN_ON, ["list"])]
+    assert daemon.ai.formats == []
 
 
 def test_verbatim_long_dictation_gets_paragraphs(daemon):
@@ -118,18 +117,19 @@ def test_verbatim_long_dictation_gets_paragraphs(daemon):
 
 
 @pytest.mark.parametrize("bad", [
-    "1. The deck is very late.\n2. The budget is over.\n\nLet me know.",   # added a word
-    "1. The deck is late.\n2. Budget's over.",                             # reworded
-    "Sure! Here is the list:\n1. The deck is late.\n2. The budget is over.\n\nLet me know.",
+    LONG.replace("Separately,", "\n\nSeparately, and also,"),               # added words
+    LONG.replace(" Separately, I wanted", "\n\nI wanted"),                   # dropped one
+    LONG.replace("the client", "our client"),                                # reworded
+    "Here is the text with paragraphs:\n\n" + LONG,                         # preamble
 ])
 def test_verbatim_model_changing_words_falls_back(daemon, bad):
     daemon.ai.format_result = bad
-    assert daemon._post_process(RUN_ON) == RUN_ON
+    assert daemon._post_process(LONG) == LONG
 
 
 def test_verbatim_model_failure_falls_back(daemon):
     daemon.ai.format_error = RuntimeError("timeout")
-    assert daemon._post_process(RUN_ON) == RUN_ON
+    assert daemon._post_process(LONG) == LONG
 
 
 def test_email_layout_only_in_mail_apps(daemon):
@@ -148,11 +148,19 @@ def test_snippets_still_restore_after_formatting(daemon):
 
 def test_snippets_restore_through_the_model_path(daemon):
     daemon.snippets.add("my email", "khush@example.com")
-    daemon.ai.format_result = "1. Mail {{snippet1}} today.\n2. The budget is over.\n\nLet me know."
-    out = daemon._post_process("One is that mail my email today. Second is that the budget "
-                               "is over. Let me know.")
-    assert daemon.ai.formats[0][0].startswith("One is that mail {{snippet1}}")
-    assert out == "1. Mail khush@example.com today.\n2. The budget is over.\n\nLet me know."
+    text = LONG + " Mail it to my email."
+    daemon.ai.format_result = (LONG.replace(" Separately,", "\n\nSeparately,")
+                               + " Mail it to {{snippet1}}.")
+    out = daemon._post_process(text)
+    assert daemon.ai.formats[0][0].endswith("Mail it to {{snippet1}}.")
+    assert out.endswith("Mail it to khush@example.com.") and "\n\nSeparately," in out
+
+
+def test_snippets_survive_a_lost_placeholder(daemon):
+    daemon.snippets.add("my email", "khush@example.com")
+    daemon.ai.format_result = LONG + " Mail it to me."
+    out = daemon._post_process(LONG + " Mail it to my email.")
+    assert out == LONG + " Mail it to khush@example.com."
 
 
 def test_whole_snippet_trigger_still_wins(daemon):
@@ -229,10 +237,10 @@ def _capture(monkeypatch):
 
 def test_format_only_prompt(monkeypatch):
     ai, calls = _capture(monkeypatch)
-    ai.format_only("x {{snippet1}}", ["list", "paragraphs"])
+    ai.format_only("x {{snippet1}}", ["paragraphs"])
     [(system, user)] = calls
     assert system.startswith(FORMAT_ONLY)
-    assert FORMAT_TASKS["list"] in system and FORMAT_TASKS["paragraphs"] in system
+    assert FORMAT_TASKS["paragraphs"] in system
     assert "{{snippet1}}" in system and user == "x {{snippet1}}"
 
 

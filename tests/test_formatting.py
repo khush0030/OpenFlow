@@ -95,10 +95,16 @@ def test_list_is_formatted_locally_without_a_model():
     assert local.text.startswith("Things I need:\n- Milk")
 
 
-def test_run_on_list_asks_for_the_model():
+def test_run_on_list_is_still_local():
     t = "One is that the deck is late. Second is that the budget is over. Let me know."
     local = f.format_local(t)
-    assert local.model_tasks == ["list"] and local.text == t
+    assert local.model_tasks == []
+    assert local.text == "1. The deck is late.\n2. The budget is over.\n\nLet me know."
+
+
+def test_long_list_needs_no_paragraph_call():
+    t = "Three things. " + " ".join(f"{w}, {LONG[:120]}" for w in ("First", "Second", "Third"))
+    assert f.format_local(t).model_tasks == []
 
 
 def test_long_dictation_asks_for_paragraphs():
