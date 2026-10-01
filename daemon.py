@@ -89,6 +89,8 @@ from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
 from sarvam import STT_URL, warm
 from dictionary import Dictionary
+from autolearn import AutoLearner, Correction, PasteWatch
+from paste import MAX_FIELD_CHARS, ax_field_text, ax_same_element
 from snippets import Snippets
 import formatting
 from prompts import app_kind as prompts_app_kind
@@ -203,6 +205,13 @@ def _hotkey_is_valid(action: str, value: str) -> bool:
 def _config_mtime() -> float:
     try:
         return cfg_mod.CONFIG_PATH.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _file_mtime(path) -> float:
+    try:
+        return path.stat().st_mtime
     except OSError:
         return 0.0
 
@@ -347,6 +356,10 @@ class Daemon:
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
         self.dictionary = Dictionary.load()
+        self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
+        self._autolearner = AutoLearner(cfg_mod.SUGGESTIONS_PATH, cfg_mod.DICT_PATH,
+                                        on_learned=self._on_learned)
+        self._paste_watch: PasteWatch | None = None
         self.snippets = Snippets.load()
         self.history = History()
         self._busy = threading.Lock()
@@ -842,6 +855,11 @@ class Daemon:
         if ch.hotkeys is not None:
             self._pending_hotkeys = ch.hotkeys
             self._apply_pending_hotkeys()
+        if ch.dictionary is not None:
+            self.cfg["dictionary"] = ch.dictionary
+            if not self._auto_learn():
+                self._stop_paste_watch()
+            print(f"[daemon] dictionary auto_learn -> {self._auto_learn()}", flush=True)
         if ch.cleanup is not None:
             self.cfg["cleanup"] = ch.cleanup
             self.ai.provider = make_cleanup_provider(self.cfg)
@@ -949,6 +967,7 @@ class Daemon:
                         cfg_mtime = mtime
                         self._reload_config()
                     self._apply_pending_hotkeys()
+                    self._reload_dictionary_if_changed()
                 watchdog.poll(self._widget.connected)
             except Exception as e:
                 print(f"[daemon] widget pump error: {e}", flush=True)
@@ -1023,6 +1042,58 @@ class Daemon:
             log_exception("daemon.undo", "undo last paste failed", e)
             return
         print(f"[daemon] undo last paste -> {status}", flush=True)
+
+    # -- Auto-learn: corrections right after a paste (autolearn.py) --------
+
+    def _auto_learn(self) -> bool:
+        d = self.cfg.get("dictionary") or {}
+        return bool(d.get("auto_learn", True))
+
+    def _watch_paste(self, text: str, target) -> None:
+        """Watch the field we just pasted into for a word the user fixes."""
+        pid = getattr(target, "pid", 0) or 0
+        if not self._auto_learn() or pid <= 0:
+            return
+        self._paste_watch = PasteWatch(
+            text, pid,
+            read_field=lambda p: ax_field_text(p, max_chars=MAX_FIELD_CHARS),
+            front_pid=lambda: getattr(capture_front_app(), "pid", None),
+            same_element=ax_same_element,
+            on_correction=self._on_autolearn_correction,
+        ).start()
+
+    def _stop_paste_watch(self) -> None:
+        watch, self._paste_watch = getattr(self, "_paste_watch", None), None
+        if watch is not None:
+            watch.stop()
+
+    def _on_autolearn_correction(self, c: Correction) -> None:
+        # Logs never carry what was typed; AutoLearner logs a learned term.
+        try:
+            status = self._autolearner.observe(c.heard, c.term)
+        except Exception as e:
+            log_exception("daemon.autolearn", "could not record a correction", e)
+            return
+        if status == "suggested":
+            print("[autolearn] correction noted as a suggestion", flush=True)
+
+    def _on_learned(self, d: Dictionary) -> None:
+        self.dictionary = d
+        self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
+
+    def _reload_dictionary_if_changed(self) -> None:
+        """dictionary.json changed (the hub, a suggestion accepted there):
+        use it from the next dictation on."""
+        mtime = _file_mtime(cfg_mod.DICT_PATH)
+        if mtime == getattr(self, "_dict_mtime", mtime):
+            return
+        self._dict_mtime = mtime
+        try:
+            self.dictionary = Dictionary.load_from(cfg_mod.DICT_PATH)
+        except Exception as e:   # mid-write or hand-broken: keep the old one
+            log_exception("daemon.dictionary", "dictionary.json unreadable — keeping current", e)
+            return
+        print(f"[daemon] dictionary reloaded ({len(self.dictionary.terms)} words)", flush=True)
 
     def on_edit_mode(self) -> None:
         # Capture currently selected text (Cmd+C), then start recording.
@@ -1164,9 +1235,12 @@ class Daemon:
                 print("[daemon] no text box focused — showing card", flush=True)
                 self._flow.show_card(final, run=run) or self._stale(run)
             else:
+                self._stop_paste_watch()
                 paste_status = paste(final, target=target)
                 self.state.last_paste_at = time.time()
                 print(f"[daemon] paste {paste_status}", flush=True)
+                if paste_status == "pasted":
+                    self._watch_paste(final, target)
                 if paste_status in ("clipboard", "failed"):
                     # Accessibility missing or paste failed: never lose the
                     # text (spec §8).
@@ -1218,6 +1292,9 @@ class Daemon:
             "rerun": self._ctl_rerun,
             "play_cues": self._ctl_play_cues,
             "check": self._ctl_check,
+            "dictionary_suggestions": self._ctl_dictionary_suggestions,
+            "accept_suggestion": self._ctl_accept_suggestion,
+            "dismiss_suggestion": self._ctl_dismiss_suggestion,
         }
 
     def _start_control_channel(self) -> None:
@@ -1308,6 +1385,19 @@ class Daemon:
     def _ctl_check(self) -> dict:
         import doctor
         return {"checks": doctor.run_checks()}
+
+    def _ctl_dictionary_suggestions(self) -> dict:
+        return {"suggestions": self._autolearner.suggestions()}
+
+    def _ctl_accept_suggestion(self, term: str) -> dict:
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError("no term")
+        return {"accepted": self._autolearner.accept(term)}
+
+    def _ctl_dismiss_suggestion(self, term: str) -> dict:
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError("no term")
+        return {"dismissed": self._autolearner.dismiss(term)}
 
     # -- Lifecycle -------------------------------------------------------
 
