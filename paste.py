@@ -8,6 +8,7 @@ from __future__ import annotations
 import subprocess
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 _HAS_QUARTZ = False
@@ -123,9 +124,12 @@ def capture_front_app() -> PasteTarget | None:
 def capture_paste_target() -> PasteTarget | None:
     """App + focused AX element at the caret, captured on key-down."""
     target = capture_front_app()
+    ax = None
     if target is not None:
         enable_manual_accessibility(target.pid)
-    ax = _ax_focused_element()
+        ax = _ax_app_focus(target.pid)[1]
+    if ax is None:
+        ax = _ax_focused_element()
     if target is None and ax is None:
         return None
     if target is None:
@@ -172,17 +176,64 @@ EDITABLE_ROLES = frozenset({"AXTextField", "AXTextArea", "AXComboBox", "AXSearch
 GENERIC_ROLES = frozenset({"AXGroup", "AXWebArea", "AXUnknown"})
 
 
-def classify_focus(role: str | None, range_settable: bool | None) -> bool | None:
+def classify_focus(role: str | None, range_settable: bool | None,
+                   lazy_ax: bool = True) -> bool | None:
     """True = editable text field; False = a clearly non-text element is
-    focused (show the couldn't-paste card); None = unsure, including generic
-    container roles that may hide a text box (paste as usual)."""
+    focused (show the couldn't-paste card); None = unsure (paste as usual).
+    Generic containers are unsure only in apps that build their AX tree
+    lazily (Chromium / Electron), where a text box may be hiding behind them."""
     if role is None and range_settable is None:
         return None
     if role in EDITABLE_ROLES or range_settable:
         return True
-    if role in GENERIC_ROLES:
+    if role in GENERIC_ROLES and lazy_ax:
         return None
     return False
+
+
+# Chromium-based apps without an Electron framework in the bundle.
+_LAZY_AX_BUNDLES = frozenset({
+    "com.google.Chrome", "com.google.Chrome.canary", "com.brave.Browser",
+    "com.microsoft.edgemac", "company.thebrowser.Browser", "com.vivaldi.Vivaldi",
+    "org.chromium.Chromium", "com.operasoftware.Opera",
+})
+
+
+def _builds_ax_lazily(pid: int) -> bool:
+    """Chromium / Electron apps build their accessibility tree on demand."""
+    try:
+        from AppKit import NSRunningApplication  # type: ignore
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if app is None:
+            return True
+        if str(app.bundleIdentifier() or "") in _LAZY_AX_BUNDLES:
+            return True
+        url = app.bundleURL()
+        root = Path(str(url.path())) if url is not None else None
+        return bool(root and (root / "Contents/Frameworks/Electron Framework.framework").exists())
+    except Exception:
+        return True  # unsure → keep pasting
+
+
+_AX_ERROR_NO_VALUE = -25212  # kAXErrorNoValue: the app has nothing focused
+
+
+def _ax_app_focus(pid: int):
+    """Ask the app itself what has keyboard focus. The system-wide query
+    fails outright (kAXErrorCannotComplete) on this macOS, so this is the
+    primary source. Returns ("focused", el) / ("none", None) / ("unknown", None)."""
+    if not _HAS_AX or pid <= 0:
+        return ("unknown", None)
+    try:
+        err, el = AXUIElementCopyAttributeValue(
+            AXUIElementCreateApplication(pid), "AXFocusedUIElement", None)
+    except Exception:
+        return ("unknown", None)
+    if err == 0 and el is not None:
+        return ("focused", el)
+    if err == _AX_ERROR_NO_VALUE:
+        return ("none", None)
+    return ("unknown", None)
 
 
 def _ax_copy(el, attr: str):
@@ -226,12 +277,19 @@ def focused_editable(target: PasteTarget | None = None) -> bool | None:
     if target is not None and target.ax_element is not None:
         el = target.ax_element
     if el is None:
+        status, el = _ax_app_focus(pid)
+        if status == "none":
+            # Nothing focused means nowhere to type — except in Chromium /
+            # Electron apps, which can say so while their AX tree builds.
+            return None if _builds_ax_lazily(pid) else False
+    if el is None:
         el = _ax_focused_element()
     if el is None:
         return None
     role = _ax_copy(el, "AXRole")
     return classify_focus(str(role) if role is not None else None,
-                          _ax_settable(el, "AXSelectedTextRange"))
+                          _ax_settable(el, "AXSelectedTextRange"),
+                          lazy_ax=_builds_ax_lazily(pid))
 
 
 def set_clipboard(text: str) -> bool:
