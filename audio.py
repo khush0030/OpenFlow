@@ -24,7 +24,7 @@ class Recorder:
         self._q: queue.Queue[np.ndarray] = queue.Queue()
         self._lock = threading.Lock()
         self._recording = False
-        # Live RMS sampler — recording pill subscribes via current_rms().
+        # Live RMS sampler — the flow widget pump reads current_rms.
         # Single-slot value updated on every audio block; thread-safe via GIL.
         self._rms: float = 0.0
 

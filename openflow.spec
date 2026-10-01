@@ -87,8 +87,8 @@ if is_macos:
         bundle_identifier="com.openflow.dictation",
         info_plist={
             "LSUIElement": True,         # tray-only, no Dock icon
-            # Background tray app: App Nap throttles the pill-pump heartbeat
-            # and the flow bar quits thinking the daemon died.
+            # Background tray app: App Nap throttles the widget-pump loop
+            # (mic level, Undo/Retry timers, widget watchdog).
             "NSAppSleepDisabled": True,
             "CFBundleShortVersionString": "0.1.0",
             "NSMicrophoneUsageDescription":

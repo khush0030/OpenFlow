@@ -79,14 +79,19 @@ from transcribe import Transcriber, TranscribeOptions
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
 if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
     from hotkeys import HoldToTalk, HotkeySet
+    _ESCAPE_CHORD = "esc"       # pynput's name for the key
 else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet
-from paste import paste, get_active_app, capture_paste_target
+    _ESCAPE_CHORD = "escape"
+from paste import (paste, get_active_app, capture_paste_target, focused_editable,
+                   set_clipboard)
 from ai import AIProcessor, AIConfig
 from dictionary import Dictionary
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
+from flow_state import CARD, FlowController, FlowHooks
+from widget_channel import WidgetServer
 
 
 # Cycling order — preserve pre-refactor sequence.
@@ -156,22 +161,18 @@ def _spawn_ui(subcommand: list[str], dev_script: str,
         return None
 
 
-def _pill_alive(proc: subprocess.Popen | None) -> bool:
-    """Aliveness for the watchdog. Frozen spawns go through `open`, whose
-    Popen exits immediately — fall back to pgrep for the real process."""
-    if getattr(sys, "frozen", False):
-        try:
-            r = subprocess.run(["pgrep", "-f", "recording-pill"],
-                               capture_output=True, timeout=2.0)
-            return r.returncode == 0
-        except Exception:
-            return True  # fail open: don't respawn-storm on pgrep hiccups
-    return proc is not None and proc.poll() is None
+def _spawn_flow_widget() -> subprocess.Popen | None:
+    return _spawn_ui(["flow-widget"], "ui/flow_widget.py")
+
+
+def _config_mtime() -> float:
+    try:
+        return cfg_mod.CONFIG_PATH.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 _EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
-_PILL_STATE = Path("/tmp/openflow-pill.state.json")
-_PILL_CONTROL = Path("/tmp/openflow-pill.control.json")
 _ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
 
 
@@ -205,27 +206,6 @@ def _maybe_run_onboarding_blocking() -> None:
         subprocess.run(cmd, env=_child_env())
     except Exception as e:
         print(f"[daemon] onboarding launch failed: {e}", flush=True)
-
-
-def _write_pill_state(state: str, rms: float = 0.0, elapsed: float = 0.0,
-                      tone: str = "", lang: str = "") -> None:
-    """state: 'idle' | 'recording' | 'processing' | 'exit'. The persistent
-    pill polls this file; ts lets it detect a dead daemon and quit."""
-    try:
-        _PILL_STATE.write_text(json.dumps({
-            "state": state,
-            "rms": float(rms),
-            "elapsed": float(elapsed),
-            "tone": tone,
-            "lang": lang,
-            "ts": time.time(),
-        }))
-    except Exception:
-        pass
-
-
-def _spawn_recording_pill() -> subprocess.Popen | None:
-    return _spawn_ui(["recording-pill"], "ui/recording_pill.py")
 
 
 def _spawn_edit_overlay(selection: str) -> None:
@@ -281,11 +261,8 @@ class Daemon:
         self._edit_pending = False  # for edit-mode
         self._tray: TrayApp | None = None
         self._stop_evt = threading.Event()
-        # Persistent flow bar (recording pill) — spawned once by the pump,
-        # respawned by its watchdog if the subprocess dies.
-        self._pill_proc: subprocess.Popen | None = None
-        self._record_started_at = 0.0
         self._cancel_pending = False
+        self._build_flow_widget()
         # Last non-OpenFlow frontmost app — paste target (Wispr-style).
         self._paste_target = None
 
@@ -448,94 +425,145 @@ class Daemon:
         self.recorder.start()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
-        # Prime the state file so the persistent pill morphs to the waveform
-        # immediately instead of waiting for the next pump tick.
-        self._record_started_at = time.time()
-        _write_pill_state("recording", rms=0.0, elapsed=0.0,
-                          tone=self.state.tone.value, lang=self.state.language.value)
+        self._flow.recording_started()
 
-    def _pill_pump(self) -> None:
-        """Persistent flow-bar companion loop. Runs for the daemon's whole
-        life: streams idle/recording/processing state to the state file,
-        drains chip/button clicks from the control file, and respawns the
-        pill subprocess if it dies."""
-        # Clear any stale control file from a previous session.
+    # -- Flow widget wiring ----------------------------------------------
+
+    def _build_flow_widget(self) -> None:
+        # Flow widget: state machine here, view in a separate process
+        # connected over ~/.openflow/widget.sock (spec 2026-09-30).
+        self._flow = FlowController(
+            emit=self._send_widget,
+            hooks=FlowHooks(
+                start_recording=self.on_record_start,
+                finish_recording=self.on_record_stop,
+                cancel_recording=self._cancel_recording,
+                rerun=self._rerun,
+                copy_text=set_clipboard,
+                save_setting=self._save_widget_setting,
+            ),
+            silence_threshold=float(self.cfg["audio"].get("silence_threshold", 0.01)),
+        )
+        self._widget = WidgetServer(on_message=self._flow.handle_action,
+                                    on_connect=self._on_widget_connect)
+
+    def _start_widget_channel(self) -> None:
         try:
-            if _PILL_CONTROL.exists():
-                _PILL_CONTROL.unlink()
-        except Exception:
-            pass
-        last_idle_write = 0.0
-        last_respawn = 0.0
-        last_alive_check = 0.0
+            self._widget.start()
+        except OSError as e:
+            # EADDRINUSE: another daemon owns the socket. Dictation still
+            # works; only the on-screen widget is missing.
+            log_exception("daemon.widget", "widget socket unavailable — running without the flow widget", e)
+            self._widget = None
+            return
+        threading.Thread(target=self._widget_pump, name="widget-pump", daemon=True).start()
+
+    def _send_widget(self, msg: dict) -> None:
+        server = getattr(self, "_widget", None)
+        if server is not None:
+            server.send(msg)
+
+    def _widget_config(self) -> dict:
+        w = self.cfg.get("widget") or {}
+        return {"type": "config",
+                "position": w.get("position", "right"),
+                "appearance": w.get("appearance", "paper"),
+                "hold_key": self.cfg["hotkeys"].get("record_hold", "")}
+
+    def _on_widget_connect(self) -> None:
+        print("[daemon] flow widget connected", flush=True)
+        self._send_widget(self._widget_config())
+        self._send_widget(self._flow.message())
+
+    def _cancel_recording(self) -> None:
+        if not self.recorder.is_recording:
+            return  # already stopped: a stray flag would cancel the next take
+        self._cancel_pending = True
+        try:
+            self.on_record_stop()
+        finally:
+            self._cancel_pending = False
+
+    def _on_escape(self) -> None:
+        if self.recorder.is_recording:
+            self._flow.handle_action({"action": "cancel"})
+
+    def _rerun(self, audio, target) -> None:
+        """Undo / Retry: run the pipeline again on kept audio."""
+        self._paste_target = target
+        threading.Thread(target=self._pipeline_worker, args=(audio, False),
+                         daemon=True).start()
+
+    def _save_widget_setting(self, key: str, value: str) -> None:
+        """Drag-to-dock / menu choice from the widget. Updating self.cfg too
+        keeps the config watcher from treating our own write as external."""
+        try:
+            cfg_mod.save_widget_setting(key, value)
+        except (ValueError, OSError) as e:
+            log_exception("daemon.widget", f"could not save widget {key}={value!r}", e)
+        else:
+            self.cfg.setdefault("widget", {})[key] = value
+        # On failure this snaps the widget back to the saved value.
+        self._send_widget(self._widget_config())
+
+    def _reload_widget_config(self) -> None:
+        """Pick up [widget] changes made in the Settings window."""
+        fresh = cfg_mod.read_widget_settings()
+        if fresh != (self.cfg.get("widget") or {}):
+            self.cfg["widget"] = dict(fresh)
+            self._send_widget(self._widget_config())
+
+    def _widget_pump(self) -> None:
+        """Streams mic level, runs the Undo/Retry timers, does click-to-paste
+        for the card, and keeps the widget process alive."""
+        last_tick = 0.0
+        last_cfg_check = 0.0
+        cfg_mtime = _config_mtime()
+        last_seen = time.monotonic() - 5.0   # spawn the widget right away
+        last_spawn = 0.0
         while not self._stop_evt.is_set():
+            now = time.monotonic()
             try:
-                now = time.time()
                 if self.recorder.is_recording:
-                    _write_pill_state(
-                        "recording",
-                        rms=self.recorder.current_rms,
-                        elapsed=now - self._record_started_at,
-                        tone=self.state.tone.value,
-                        lang=self.state.language.value,
-                    )
-                elif self.state.recording == RecordingState.PROCESSING:
-                    _write_pill_state("processing",
-                                      tone=self.state.tone.value,
-                                      lang=self.state.language.value)
-                elif now - last_idle_write >= 0.5:
-                    # Idle only needs to keep ts fresh for the pill's
-                    # dead-daemon check; 2 Hz is plenty.
-                    _write_pill_state("idle",
-                                      tone=self.state.tone.value,
-                                      lang=self.state.language.value)
-                    last_idle_write = now
-
-                # Drain control file (idle-chip / cancel / confirm clicks).
-                if _PILL_CONTROL.exists():
-                    try:
-                        data = json.loads(_PILL_CONTROL.read_text())
-                        _PILL_CONTROL.unlink()
-                        action = data.get("action")
-                        if action == "start":
-                            if (not self.recorder.is_recording
-                                    and self.state.recording == RecordingState.IDLE):
-                                print("[daemon] pill start — beginning recording", flush=True)
-                                self.on_record_start()
-                        elif action == "cancel" and self.recorder.is_recording:
-                            print("[daemon] pill cancel — discarding recording", flush=True)
-                            self._cancel_pending = True
-                            self.on_record_stop()
-                        elif action == "confirm" and self.recorder.is_recording:
-                            print("[daemon] pill confirm — finishing recording", flush=True)
-                            self.on_record_stop()
-                    except Exception as e:
-                        print(f"[daemon] control parse error: {e}", flush=True)
-
-                # Watchdog: (re)spawn the pill. Aliveness via pgrep when
-                # frozen (LS `open` Popen exits immediately) — check at
-                # 2s cadence, respawn at most once per 3s.
-                if now - last_alive_check >= 2.0:
-                    last_alive_check = now
-                    if not _pill_alive(self._pill_proc) and now - last_respawn > 3.0:
-                        if last_respawn:
-                            print("[daemon] pill died — respawning", flush=True)
-                        self._pill_proc = _spawn_recording_pill()
-                        last_respawn = now
+                    rms = self.recorder.current_rms
+                    self._send_widget({"type": "level", "rms": rms})
+                    self._flow.level(rms)
+                if now - last_tick >= 0.25:
+                    last_tick = now
+                    self._flow.tick()
+                    if self._flow.state == CARD and focused_editable() is True:
+                        text = self._flow.text
+                        print("[daemon] text box focused — pasting card text", flush=True)
+                        paste(text)
+                        self._flow.dismiss()  # no-op if a new recording replaced the card
+                if now - last_cfg_check >= 2.0:
+                    # Settings window writes config.toml from another process.
+                    last_cfg_check = now
+                    mtime = _config_mtime()
+                    if mtime != cfg_mtime:
+                        cfg_mtime = mtime
+                        self._reload_widget_config()
+                if self._widget.connected:
+                    last_seen = now
+                elif now - last_seen >= 5.0 and now - last_spawn >= 10.0:
+                    print("[daemon] flow widget not connected — spawning", flush=True)
+                    _spawn_flow_widget()
+                    last_spawn = now
             except Exception as e:
-                print(f"[daemon] pill pump error: {e}", flush=True)
+                print(f"[daemon] widget pump error: {e}", flush=True)
             self._stop_evt.wait(0.05)
 
     def on_record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
         audio = self.recorder.stop()
-        # If pill cancel was requested, drop audio + skip pipeline.
         if self._cancel_pending:
+            # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
             self.state.recording = RecordingState.IDLE
             self.state.notify()
-            print("[daemon] recording discarded (cancel).", flush=True)
+            print("[daemon] recording cancelled (undo available).", flush=True)
+            self._flow.cancelled(audio, self._paste_target)
             return
         sr = self.cfg["audio"]["sample_rate"]
         dur = audio.size / sr
@@ -544,13 +572,15 @@ class Daemon:
             print("[daemon] too short, ignoring.", flush=True)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
+            self._flow.done()
             return
         edit_mode = self._edit_pending
         self._edit_pending = False
-        # Mark processing *before* the worker spins up so the pill never
-        # flashes back to idle between recorder stop and worker start.
+        # Mark processing before the worker starts so the widget never
+        # flashes back to idle in between.
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
+        self._flow.processing()
         threading.Thread(target=self._pipeline_worker, args=(audio, edit_mode), daemon=True).start()
 
     def on_undo(self) -> None:
@@ -586,16 +616,31 @@ class Daemon:
 
     # -- Worker ----------------------------------------------------------
 
+    def _widget_is_ours(self) -> bool:
+        """False while a newer recording is live: that recording owns the
+        widget, so a finished pipeline must not flip it to idle/card/error."""
+        if self.recorder.is_recording:
+            print("[daemon] new recording live — leaving the widget alone", flush=True)
+            return False
+        return True
+
     def _pipeline_worker(self, audio, edit_mode: bool) -> None:
         if not self._busy.acquire(blocking=False):
             print("[daemon] already processing, skip.", flush=True)
             return
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
+        target = self._paste_target
         try:
             t0 = time.time()
             opts = self._stt_opts()
-            raw = self.transcriber.transcribe(audio, opts)
+            try:
+                raw = self.transcriber.transcribe(audio, opts)
+            except Exception as e:
+                log_exception("daemon.pipeline", "transcription failed — offering Retry", e)
+                if self._widget_is_ours():
+                    self._flow.failed(audio, target)
+                return
             t1 = time.time()
             print(
                 f"[daemon] sarvam-stt {t1-t0:.2f}s mode={opts.mode} "
@@ -603,6 +648,8 @@ class Daemon:
                 flush=True,
             )
             if not raw.strip():
+                if self._widget_is_ours():
+                    self._flow.done()
                 return
 
             if edit_mode:
@@ -616,12 +663,28 @@ class Daemon:
             t2 = time.time()
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
+                if self._widget_is_ours():
+                    self._flow.done()
                 return
 
             self.state.last_pasted = final
-            paste_status = paste(final, target=self._paste_target)
-            self.state.last_paste_at = time.time()
-            print(f"[daemon] paste {paste_status}", flush=True)
+            if not edit_mode and focused_editable(target) is False:
+                set_clipboard(final)
+                print("[daemon] no text box focused — showing card", flush=True)
+                if self._widget_is_ours():
+                    self._flow.show_card(final)
+            else:
+                paste_status = paste(final, target=target)
+                self.state.last_paste_at = time.time()
+                print(f"[daemon] paste {paste_status}", flush=True)
+                # (a stale "clipboard" result needs no card: the text is
+                # already on the clipboard)
+                if self._widget_is_ours():
+                    if paste_status == "clipboard":
+                        # Accessibility missing: never lose the text (spec §8).
+                        self._flow.show_card(final)
+                    else:
+                        self._flow.done()
             self.history.add(
                 raw=raw,
                 final=final,
@@ -631,6 +694,8 @@ class Daemon:
             )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
+            if self._widget_is_ours():
+                self._flow.done()
         finally:
             self._busy.release()
             self.state.recording = RecordingState.IDLE
@@ -658,16 +723,15 @@ class Daemon:
         undo_key = self.cfg["hotkeys"].get("undo_paste")
         if undo_key:
             chords[undo_key] = self.on_undo
+        chords[_ESCAPE_CHORD] = self._on_escape  # cancel a recording (spec §4, state 7)
         if chords:
             self._chords = HotkeySet(chords)
             self._chords.start()
             time.sleep(0.4)  # let second listener settle too
 
-        # Persistent flow bar: prime the state file, then start the pump.
-        # The pump's watchdog performs the initial spawn and any respawns.
-        _write_pill_state("idle", tone=self.state.tone.value,
-                          lang=self.state.language.value)
-        threading.Thread(target=self._pill_pump, name="pill-pump", daemon=True).start()
+        # Flow widget: open the socket, then the pump spawns the widget
+        # process and keeps it alive.
+        self._start_widget_channel()
 
         sv = self.cfg.get("sarvam") or {}
         print(
@@ -702,14 +766,9 @@ class Daemon:
             print("\n[daemon] shutting down.", flush=True)
         finally:
             self._stop_evt.set()
-            # Tell the pill to quit now instead of waiting out its 10s
-            # stale-daemon timeout.
-            _write_pill_state("exit")
-            if self._pill_proc is not None:
-                try:
-                    self._pill_proc.terminate()
-                except Exception:
-                    pass
+            self._send_widget({"type": "exit"})
+            if self._widget is not None:
+                self._widget.stop()
             if self._hold:
                 self._hold.stop()
             if self._chords:

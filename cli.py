@@ -87,18 +87,6 @@ def _cmd_flow_widget(args: argparse.Namespace) -> int:
     return widget_main()
 
 
-def _cmd_recording_pill(args: argparse.Namespace) -> int:
-    """Launch recording pill (subprocess target)."""
-    from ui.recording_pill import main as pill_main
-    return pill_main()
-
-
-def _cmd_result_overlay(args: argparse.Namespace) -> int:
-    """Launch post-dictation result overlay (subprocess target)."""
-    from ui.result_overlay import main as overlay_main
-    return overlay_main()
-
-
 def _cmd_onboarding(args: argparse.Namespace) -> int:
     """Launch onboarding wizard."""
     from ui.onboarding import main as on_main
@@ -235,8 +223,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("settings", help="open settings window").set_defaults(func=_cmd_settings)
     sub.add_parser("history-viewer", help="open history viewer").set_defaults(func=_cmd_history_viewer)
     sub.add_parser("flow-widget", help="(internal) launch the on-screen flow widget").set_defaults(func=_cmd_flow_widget)
-    sub.add_parser("recording-pill", help="(internal) launch recording pill").set_defaults(func=_cmd_recording_pill)
-    sub.add_parser("result-overlay", help="(internal) launch post-dictation result overlay").set_defaults(func=_cmd_result_overlay)
     sub.add_parser("onboarding", help="run first-time onboarding wizard").set_defaults(func=_cmd_onboarding)
 
     h = sub.add_parser("history")
