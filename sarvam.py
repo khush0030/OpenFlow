@@ -6,6 +6,7 @@ one vendor end-to-end.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -201,12 +202,17 @@ def speech_to_text(
     mode: str = "transcribe",
     language_code: str | None = None,
     timeout: float = 25.0,
+    keyterms: list[str] | None = None,
 ) -> STTResult:
     data: dict[str, str] = {
         "model": model,
         "mode": mode,
         "language_code": language_code or "unknown",
     }
+    # Names/terms to bias recognition toward (screen_context.py). Saaras v4
+    # only: up to 50 terms, one JSON-encoded array in one form field.
+    if keyterms and model.startswith("saaras:v4"):
+        data["keyterms"] = json.dumps(list(keyterms)[:50], ensure_ascii=False)
     files = {"file": ("clip.wav", wav_bytes, "audio/wav")}
     resp = _request_with_retry(
         "POST",

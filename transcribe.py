@@ -27,6 +27,8 @@ class TranscribeOptions:
     # RMS below this is silence: leading/trailing silence is trimmed before
     # upload ([audio].silence_threshold). None leaves the audio as recorded.
     silence_threshold: float | None = None
+    # Saaras v4 keyterms: names on screen to bias recognition toward.
+    keyterms: tuple[str, ...] = ()
 
 
 # Kept on each side of the speech so soft word edges (fricatives, trailing
@@ -119,6 +121,9 @@ class Transcriber:
         wavs = [audio_to_wav_bytes(chunk, sr) for chunk in chunks]
         t1 = time.monotonic()
 
+        # Only when there are any, so the request is otherwise unchanged.
+        extra = {"keyterms": list(opts.keyterms)} if opts.keyterms else {}
+
         def send(wav: bytes) -> STTResult:
             return speech_to_text(
                 wav,
@@ -126,6 +131,7 @@ class Transcriber:
                 model=self.model,
                 mode=opts.mode,
                 language_code=opts.language_code,
+                **extra,
             )
 
         if len(wavs) == 1:
