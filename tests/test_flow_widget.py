@@ -427,3 +427,21 @@ def test_hover_works_while_another_app_is_active(fa, monkeypatch):
     assert isinstance(fa.popup, fw.Tooltip)
     fa._hover.update(QPointF(400, 400))
     assert fa.widget.view == "idle"
+
+
+def test_idle_handle_is_flat_no_shadow_or_rim(fa):
+    # User decision 2026-10-01: the idle bar is flat; the recording pill keeps
+    # its soft shadow so it lifts off the content beneath it.
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    eff = fa.widget.graphicsEffect()
+    assert eff is None or not eff.isEnabled()
+    fa.widget._anim.stop()
+    fa.widget.setGeometry(fw.window_geometry(fa.widget.target_rect))
+    img = fa.widget.grab().toImage()
+    # no near-white rim pixels anywhere on the bar
+    whites = [(x, y) for x in range(img.width()) for y in range(img.height())
+              if (c := img.pixelColor(x, y)).alpha() > 40
+              and min(c.red(), c.green(), c.blue()) > 200]
+    assert whites == []
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget.graphicsEffect() is not None and fa.widget.graphicsEffect().isEnabled()

@@ -500,6 +500,7 @@ class FlowWidget(QWidget):
         self._frames = QTimer(self)
         self._frames.timeout.connect(self._on_frame)
         add_shadow(self, app.theme)
+        self.sync_shadow()
 
     # state + geometry
     @property
@@ -510,7 +511,15 @@ class FlowWidget(QWidget):
         self.view = view
         self._hot = hot
         self._sync_frames()
+        self.sync_shadow()
         self.update()
+
+    def sync_shadow(self) -> None:
+        # The idle bar is flat (user decision 2026-10-01); the larger pills
+        # keep their soft shadow so they lift off the content beneath.
+        eff = self.graphicsEffect()
+        if eff is not None:
+            eff.setEnabled(self.view != "idle")
 
     def _sync_frames(self) -> None:
         want = self.isVisible() and self.view in ANIMATED_VIEWS
@@ -593,11 +602,9 @@ class FlowWidget(QWidget):
         p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
 
     def _paint_handle(self, p: QPainter, r: QRectF, th: Theme) -> None:
-        fill = qc(th.accent)
-        fill.setAlpha(230)
-        p.setPen(QPen(QColor(255, 255, 255, 230), 1))
-        p.setBrush(fill)
-        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 4, 4)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(qc(th.accent))
+        p.drawRoundedRect(r, 4, 4)
 
     def _paint_dictate(self, p: QPainter, r: QRectF, th: Theme) -> None:
         hot = self._hot == "dictate"
@@ -847,6 +854,7 @@ class FlowApp(QObject):
         self.hold_key = m.get("hold_key") or self.hold_key
         self.theme = resolve(self.appearance, self._system_dark())
         add_shadow(self.widget, self.theme)
+        self.widget.sync_shadow()
 
     def _apply_pending(self) -> None:
         """Apply config/state that arrived while a drag was in progress."""
@@ -1020,6 +1028,7 @@ class FlowApp(QObject):
     def apply_appearance(self) -> None:
         self.theme = resolve(self.appearance, self._system_dark())
         add_shadow(self.widget, self.theme)
+        self.widget.sync_shadow()
         self.widget.update()
         if self.widget.target_rect is not None:
             self._sync_popup(self.widget.target_rect)
