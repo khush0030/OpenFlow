@@ -9,6 +9,7 @@ dependencies = [
     "pyperclip",
     "pynput",
     "httpx",
+    "websockets>=13",
     "scipy",
     "rumps>=0.4.0",
     "darkdetect>=0.8",

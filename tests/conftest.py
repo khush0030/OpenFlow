@@ -22,6 +22,7 @@ openflow_logger._ERROR_LOG = _TEST_LOG_DIR / "errors.log"
 
 import login_item
 import sounds
+import stream_stt
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +31,15 @@ def _never_play_real_sounds(monkeypatch):
     # test run knocks and ticks through the user's speakers while they work.
     # Tests that exercise playback patch _load with their own fake.
     monkeypatch.setattr(sounds, "_load", lambda cue: None)
+
+
+@pytest.fixture(autouse=True)
+def _never_open_real_websockets(monkeypatch):
+    # Streaming STT connects to Sarvam at key-down; tests pass a fake
+    # `connect`, and anything that slips through fails instead of dialing out.
+    def refuse(url, headers, timeout):
+        raise ConnectionRefusedError("tests never open real WebSockets")
+    monkeypatch.setattr(stream_stt, "_ws_connect", refuse)
 
 
 @pytest.fixture(autouse=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 import queue
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -27,12 +28,23 @@ class Recorder:
         # Live RMS sampler — the flow widget pump reads current_rms.
         # Single-slot value updated on every audio block; thread-safe via GIL.
         self._rms: float = 0.0
+        # Called with each mic block as it arrives (on the audio thread), on
+        # top of the queue stop() drains: the streaming transcriber's feed.
+        # Must be quick and must not raise into PortAudio.
+        self.on_block: Callable[[np.ndarray], None] | None = None
 
     def _callback(self, indata: np.ndarray, frames: int, time, status) -> None:  # noqa: ARG002
         if status:
             # Underruns/overruns can spam; print once.
             print(f"[audio] status: {status}", flush=True)
-        self._q.put(indata.copy())
+        block = indata.copy()
+        self._q.put(block)
+        listener = self.on_block
+        if listener is not None:
+            try:
+                listener(block.reshape(-1))
+            except Exception:
+                pass
         try:
             self._rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
         except Exception:

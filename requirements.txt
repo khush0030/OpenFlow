@@ -69,3 +69,4 @@ tqdm==4.67.3
 typer==0.25.1
 typing-inspection==0.4.2
 typing_extensions==4.15.0
+websockets==17.1
