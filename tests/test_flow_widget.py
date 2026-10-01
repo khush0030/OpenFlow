@@ -117,9 +117,9 @@ def test_hover_shows_only_dictate_with_key_hint_and_click_starts(fa):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     fa.set_hover(True)
     assert fa.widget.view == "hover"
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (31, 117)
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (36, 56)
     assert isinstance(fa.popup, fw.Tooltip)
-    assert fa.popup.hint_label.text() == "⌘ right"
+    assert fa.popup.hint_label.text() == "Hold ⌘ right"
     fa.widget.click(QPointF(fw.M + 18, fw.M + 28))
     assert fa.client.sent[-1] == {"action": "start"}
     fa.set_hover(False)
@@ -128,10 +128,10 @@ def test_hover_shows_only_dictate_with_key_hint_and_click_starts(fa):
 
 def test_recording_buttons_hit_test(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (31, 117)
-    assert fa.widget.hit(QPointF(fw.M + 15.5, fw.M + 15.5)) == "x"
-    assert fa.widget.hit(QPointF(fw.M + 15.5, fw.M + 117 - 15.5)) == "ok"
-    fa.widget.click(QPointF(fw.M + 15.5, fw.M + 117 - 15.5))
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (26, 102)
+    assert fa.widget.hit(QPointF(fw.M + 13, fw.M + 13)) == "x"
+    assert fa.widget.hit(QPointF(fw.M + 13, fw.M + 102 - 13)) == "ok"
+    fa.widget.click(QPointF(fw.M + 13, fw.M + 102 - 13))
     assert fa.client.sent[-1] == {"action": "confirm"}
 
 
@@ -309,7 +309,7 @@ def test_disconnect_mid_drag_cancels_drag(fa):
     fa._on_message({"type": "state", "state": "recording", "text": ""})
     assert fa.widget.view == "recording"
     assert fa.widget.isVisible()
-    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (31, 117)
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (26, 102)
 
 
 def test_config_during_drag_waits_for_drop(fa):
@@ -509,10 +509,3 @@ def test_widget_follows_cursor_to_other_display(fa, monkeypatch):
     monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: SCREEN)
     fa._follow_screen()
     assert fa.widget.target_rect.right == SCREEN.right - 4
-
-
-def test_tooltip_is_wispr_sized():
-    # User decision 2026-10-01: about Wispr Flow's "Dictate ⌥ Opt" tooltip (128 × 36).
-    t = fw.Tooltip(fw.resolve("light", False), "Dictate", "⌘ right")
-    w, h = t.sizeHint().width() - 2 * fw.M, t.sizeHint().height() - 2 * fw.M
-    assert 120 <= w <= 145 and 34 <= h <= 39

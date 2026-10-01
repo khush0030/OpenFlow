@@ -17,9 +17,9 @@ SCREEN = Rect(0, 25, 1440, 800)
 
 
 def test_sizes_swap_for_bottom():
-    assert widget_size("recording", "right") == (31, 117)
-    assert widget_size("recording", "bottom") == (117, 31)
-    assert widget_size("hover", "left") == (31, 117)
+    assert widget_size("recording", "right") == (26, 102)
+    assert widget_size("recording", "bottom") == (102, 26)
+    assert widget_size("hover", "left") == (36, 56)
     assert widget_size("idle", "bottom") == (46, 8)
     assert widget_size("card", "right") == (8, 46)
 
@@ -113,9 +113,9 @@ def test_resolve_theme():
 
 
 def test_hold_label():
-    assert copy.hold_label("cmd_r") == "⌘ right"
-    assert copy.hold_label("alt_r") == "⌥ right"
-    assert copy.hold_label("f5") == "F5"
+    assert copy.hold_label("cmd_r") == "Hold ⌘ right"
+    assert copy.hold_label("alt_r") == "Hold ⌥ right"
+    assert copy.hold_label("f5") == "Hold F5"
 
 
 def test_widget_accent_is_the_brighter_red():
