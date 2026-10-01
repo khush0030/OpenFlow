@@ -1,8 +1,9 @@
-"""Daemon <-> flow widget channel (spec section 6).
+"""Daemon <-> UI process channel (flow widget spec section 6).
 
 Newline-delimited JSON over a Unix domain socket. The daemon runs a
-WidgetServer; the widget process connects with a WidgetClient. A live
+WidgetServer; the UI process connects with a WidgetClient. A live
 connection is the liveness signal for both sides (no polling, no pgrep).
+The flow widget and the edit-mode overlay each get their own socket.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ from typing import Callable, Optional
 from openflow_logger import log_exception
 
 SOCKET_PATH = str(Path(os.path.expanduser("~/.openflow")) / "widget.sock")
+EDIT_OVERLAY_SOCKET_PATH = str(Path(os.path.expanduser("~/.openflow")) / "edit-overlay.sock")
 
 # send() may run under the FlowController lock, so a hung peer must never
 # stall it for long. The timeout is per-socket; the reader treats a recv
@@ -106,10 +108,12 @@ class _Conn:
 
 class WidgetServer:
     def __init__(self, path: str = SOCKET_PATH, on_message: Optional[Handler] = None,
-                 on_connect: Optional[Callable[[], None]] = None) -> None:
+                 on_connect: Optional[Callable[[], None]] = None,
+                 on_disconnect: Optional[Callable[[], None]] = None) -> None:
         self.path = path
         self._on_message = on_message
         self._on_connect = on_connect
+        self._on_disconnect = on_disconnect
         self._conn: Optional[_Conn] = None
         self._lock = threading.Lock()
         self._sock: Optional[socket.socket] = None
@@ -188,8 +192,16 @@ class WidgetServer:
 
     def _closed(self, conn: _Conn) -> None:
         with self._lock:
-            if self._conn is conn:
+            current = self._conn is conn
+            if current:
                 self._conn = None
+        # Only the live peer going away counts: not one a newer client
+        # replaced, and not our own stop().
+        if current and self._on_disconnect is not None and not self._stopped.is_set():
+            try:
+                self._on_disconnect()
+            except Exception as exc:
+                log_exception("widget_channel", "on_disconnect raised", exc)
 
     @property
     def connected(self) -> bool:
