@@ -151,9 +151,8 @@ Try it (a text box to dictate into). Same trigger as today.
   template image (adapts to light/dark). Recording: dot terracotta (non-template
   variant). Processing: smaller dot. Drawn as PNG @1x/@2x into `assets/tray/`
   (replaces the PIL placeholder).
-- **Idle widget bar: B, "Grip"**: bar base size 10 × 46 (drawn 9 × 40 at 86%),
-  radius = half width, widget red, three white grip dots (3·S pt, gap 3·S)
-  centred. Dock zones and hit areas follow the new size.
+- **Idle widget bar: A, unchanged**: the plain red bar stays (user switched
+  from B to A, 2026-10-01).
 - **Hover mic: B, "Solid mic"**: filled capsule body, stroked stand and stem
   (same 24-unit glyph proportions as today), white on the red hot pill.
 
