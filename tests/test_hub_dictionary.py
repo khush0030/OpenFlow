@@ -214,3 +214,51 @@ def test_shown_rereads_the_file(dict_file):
     dict_file.write_text(json.dumps({"terms": TERMS[:1]}))
     page.shown()
     assert page.visible_words() == ["Oltaflock"]
+
+
+# -- Suggested (auto-learn) ------------------------------------------------------
+
+def write_suggestions(dict_file, rows):
+    (dict_file.parent / "dictionary_suggestions.json").write_text(json.dumps({"suggestions": rows}))
+
+
+ASHTON = {"term": "Ashton", "heard": ["ashtan"], "count": 1,
+          "first_seen": "2026-10-01T10:00:00+00:00", "last_seen": "2026-10-01T10:00:00+00:00"}
+
+
+def test_suggested_hidden_when_there_are_none(dict_file):
+    page = make_page(dict_file)
+    assert page.suggested_words() == []
+    assert page.suggested.isHidden()
+
+
+def test_suggested_lists_pending_words(dict_file):
+    write_suggestions(dict_file, [ASHTON, {**ASHTON, "term": "Nope", "dismissed": True}])
+    page = make_page(dict_file)
+    assert page.suggested_words() == ["Ashton"]
+    assert not page.suggested.isHidden()
+
+
+def test_add_suggestion_puts_it_in_the_dictionary(dict_file):
+    write_suggestions(dict_file, [ASHTON])
+    page = make_page(dict_file)
+    page.accept_suggestion("Ashton")
+    assert on_disk(dict_file)["Ashton"]["phonetic_hints"] == ["ashtan"]
+    assert "Ashton" in page.visible_words()
+    assert page.suggested_words() == [] and page.suggested.isHidden()
+
+
+def test_dismiss_suggestion_keeps_dictionary_unchanged(dict_file):
+    write_suggestions(dict_file, [ASHTON])
+    page = make_page(dict_file)
+    page.dismiss_suggestion("Ashton")
+    assert "Ashton" not in on_disk(dict_file)
+    assert page.suggested_words() == []
+    saved = json.loads((dict_file.parent / "dictionary_suggestions.json").read_text())
+    assert saved["suggestions"][0]["dismissed"] is True
+
+
+def test_corrupt_suggestions_file_shows_nothing(dict_file):
+    (dict_file.parent / "dictionary_suggestions.json").write_text("{nope")
+    page = make_page(dict_file)
+    assert page.suggested_words() == []

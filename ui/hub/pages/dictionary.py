@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 import dictionary as dict_mod
+from autolearn import AutoLearner, read_suggestions
 from dictionary import Dictionary, Term
 from ui.hub import style as S
 from ui.hub.page import Page
@@ -314,6 +315,7 @@ class DictionaryPage(Page):
         self._editing: str | None = None       # canonical being edited
         self._confirm_delete = False
         self._rows: list[TermRow] = []
+        self._suggestions_shown: list[str] = []
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(40, 34, 40, 28)
@@ -348,6 +350,8 @@ class DictionaryPage(Page):
         outer.addSpacing(10)
         outer.addWidget(intro)
         outer.addSpacing(22)
+        self.suggested = self._build_suggested()
+        outer.addWidget(self.suggested)
 
         body = QHBoxLayout()
         body.setSpacing(22)
@@ -459,11 +463,81 @@ class DictionaryPage(Page):
         card.body.addLayout(buttons)
         return card
 
+    # ── suggested (auto-learn, autolearn.py) ─────────────────────────────
+    def _build_suggested(self) -> QWidget:
+        """Words you corrected once after a paste. A second fix adds them on
+        its own; Add / Dismiss decide now. Hidden when there are none."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 18)
+        lay.setSpacing(8)
+        lay.addWidget(S.eyebrow("Suggested"))
+        self._suggested_rows = QVBoxLayout()
+        self._suggested_rows.setSpacing(6)
+        lay.addLayout(self._suggested_rows)
+        box.hide()
+        return box
+
+    def _learner(self) -> AutoLearner:
+        path = Path(self.ctx.dictionary_path)
+        return AutoLearner(path.parent / "dictionary_suggestions.json", path)
+
+    def suggested_words(self) -> list[str]:
+        return list(self._suggestions_shown)
+
+    def _render_suggested(self) -> None:
+        while self._suggested_rows.count():
+            item = self._suggested_rows.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        rows = read_suggestions(self._learner().suggestions_path)
+        self._suggestions_shown = [r["term"] for r in rows]
+        for r in rows:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(10)
+            word = QLabel(r["term"])
+            word.setFont(S.serif(17))
+            word.setStyleSheet(f"color:{S.INK};")
+            h.addWidget(word)
+            heard = ", ".join(r.get("heard") or [])
+            if heard:
+                h.addWidget(S.muted(f"heard as {heard}", 13))
+            h.addStretch(1)
+            add = S.button("Add", primary=True)
+            add.setAccessibleName(f"Add {r['term']}")
+            add.clicked.connect(lambda _=False, t=r["term"]: self.accept_suggestion(t))
+            no = S.button("Dismiss")
+            no.setAccessibleName(f"Dismiss {r['term']}")
+            no.clicked.connect(lambda _=False, t=r["term"]: self.dismiss_suggestion(t))
+            h.addWidget(add)
+            h.addWidget(no)
+            self._suggested_rows.addWidget(row)
+        self.suggested.setVisible(bool(rows))
+
+    def accept_suggestion(self, term: str) -> None:
+        try:
+            self._learner().accept(term)
+            self._load()
+            self._render()
+            self._render_suggested()
+        except Exception:
+            log.exception("adding a suggested word failed")
+
+    def dismiss_suggestion(self, term: str) -> None:
+        try:
+            self._learner().dismiss(term)
+            self._render_suggested()
+        except Exception:
+            log.exception("dismissing a suggested word failed")
+
     # ── data ─────────────────────────────────────────────────────────────
     def shown(self, **kwargs) -> None:
         try:
             self._load()
             self._render()
+            self._render_suggested()
         except Exception:  # never let a slot raise into Qt
             log.exception("dictionary page refresh failed")
 
