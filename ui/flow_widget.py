@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                              QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                              QVBoxLayout, QWidget)
 
+from openflow_logger import get_logger, log_exception
 from ui import widget_copy as copy
 from ui.fonts import load_fonts
 from ui.vibrancy import pin_overlay
@@ -78,6 +79,17 @@ def make_overlay(w: QWidget) -> None:
                      | Qt.WindowType.WindowDoesNotAcceptFocus)
     w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
     w.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+
+
+# The widget runs under LaunchServices in the app bundle, where print()
+# output goes nowhere; diagnostics go to ~/.openflow/openflow.log instead.
+_log = get_logger("flow_widget")
+
+
+def _pin(w: QWidget) -> None:
+    if not pin_overlay(w):
+        _log.warning("pin_overlay failed for %s; it may not show on every Space",
+                     type(w).__name__)
 
 
 def add_shadow(w: QWidget, theme: Theme) -> None:
@@ -160,7 +172,7 @@ class Surface(QWidget):
         self.target_rect = rect
         self.setGeometry(window_geometry(rect))
         self.show()
-        QTimer.singleShot(0, lambda: pin_overlay(self))
+        QTimer.singleShot(0, lambda: _pin(self))
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
@@ -432,7 +444,7 @@ class DockZone(QWidget):
     def show_at(self, rect: Rect) -> None:
         self.setGeometry(window_geometry(Rect(rect.x - 3, rect.y - 3, rect.w + 6, rect.h + 6)))
         self.show()
-        QTimer.singleShot(0, lambda: pin_overlay(self))
+        QTimer.singleShot(0, lambda: _pin(self))
 
     def set_hot(self, hot: bool) -> None:
         if hot != self.hot:
@@ -524,7 +536,7 @@ class FlowWidget(QWidget):
     def show_pinned(self) -> None:
         if not self.isVisible():
             self.show()
-            QTimer.singleShot(0, lambda: pin_overlay(self))
+            QTimer.singleShot(0, lambda: _pin(self))
 
     def _on_frame(self) -> None:
         if self.view in RECORDING_VIEWS:
@@ -756,12 +768,14 @@ class FlowApp(QObject):
         if self.client.connected:
             return
         if self.client.connect():
+            _log.info("connected to daemon")
             self._lost_since = None
             return
         if self._lost_since is None:
             self._lost_since = time.monotonic()
         elif time.monotonic() - self._lost_since > 30:
-            QApplication.quit()  # daemon gone for good; it respawns us when back
+            _log.info("no daemon for 30 s; quitting (it respawns us when back)")
+            QApplication.quit()
 
     def send(self, action: str, value: str | None = None) -> None:
         msg = {"action": action}
@@ -770,12 +784,21 @@ class FlowApp(QObject):
         self.client.send(msg)
 
     def _on_message(self, m: dict) -> None:
+        # Never raise out of a Qt slot: PyQt6 aborts the process.
+        try:
+            self._dispatch(m)
+        except Exception as e:
+            log_exception("flow_widget", "widget message handler failed", e)
+
+    def _dispatch(self, m: dict) -> None:
         kind = m.get("type")
         if kind == "_disconnected":
+            _log.info("lost the daemon connection; hiding and reconnecting")
             self._lost_since = time.monotonic()
             self._close_popup()
             self.widget.hide()
         elif kind == "exit":
+            _log.info("daemon asked the widget to exit")
             QApplication.quit()
         elif kind == "level":
             self.widget.set_level(float(m.get("rms", 0.0)))
@@ -996,7 +1019,7 @@ def _accessory_app() -> None:
         from AppKit import NSApplication  # type: ignore
         NSApplication.sharedApplication().setActivationPolicy_(1)
     except Exception as e:
-        print(f"[widget] activation-policy set failed: {e}", flush=True)
+        log_exception("flow_widget", "activation-policy set failed", e)
 
 
 def main() -> int:
@@ -1004,8 +1027,11 @@ def main() -> int:
     qapp.setQuitOnLastWindowClosed(False)
     _accessory_app()
     load_fonts()
+    _log.info("flow widget starting (pid %d)", os.getpid())
     app = FlowApp(qapp)  # noqa: F841 — must live as long as the event loop
-    return qapp.exec()
+    code = qapp.exec()
+    _log.info("flow widget exiting (code %d)", code)
+    return code
 
 
 if __name__ == "__main__":

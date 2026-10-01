@@ -58,6 +58,33 @@ class FakeClient:
         pass
 
 
+class FakeLog:
+    """Stands in for the openflow logger so tests never touch ~/.openflow logs."""
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, str]] = []
+
+    def _rec(self, level):
+        return lambda msg, *args, **kw: self.lines.append((level, msg % args if args else msg))
+
+    def __getattr__(self, level):
+        if level in ("debug", "info", "warning", "error", "exception"):
+            return self._rec(level)
+        raise AttributeError(level)
+
+    def text(self) -> str:
+        return "\n".join(f"{lvl}: {msg}" for lvl, msg in self.lines)
+
+
+@pytest.fixture(autouse=True)
+def wlog(monkeypatch):
+    log = FakeLog()
+    monkeypatch.setattr(fw, "_log", log, raising=False)
+    monkeypatch.setattr(fw, "log_exception",
+                        lambda comp, msg="", exc=None: log.lines.append(("exception", msg)),
+                        raising=False)
+    return log
+
+
 @pytest.fixture
 def fa(monkeypatch):
     monkeypatch.setattr(fw, "WidgetClient", FakeClient)
@@ -322,3 +349,48 @@ def test_changed_config_still_relayouts(fa):
                     "appearance": "ink", "hold_key": "cmd_r"})
     assert fa.position == "left" and fa.theme is INK
     assert fa.widget.target_rect.x == SCREEN.x + 4
+
+
+# -- Final review 7: widget diagnostics reach openflow.log -------------------
+
+def test_connection_changes_are_logged(fa, wlog):
+    fa.client.connected = False
+    fa._try_connect()
+    fa._on_message({"type": "_disconnected"})
+    assert "connected to daemon" in wlog.text()
+    assert "lost the daemon connection" in wlog.text()
+
+
+def test_exit_and_self_quit_are_logged(fa, wlog, monkeypatch):
+    quits = []
+    monkeypatch.setattr(fw.QApplication, "quit", staticmethod(lambda: quits.append(1)))
+    fa._on_message({"type": "exit"})
+    fa.client.connected = False
+    fa.client.connect = lambda: False
+    fa._lost_since = 0.0                       # gone for "ever"
+    fa._try_connect()
+    assert len(quits) == 2
+    assert "daemon asked the widget to exit" in wlog.text()
+    assert "no daemon for 30 s" in wlog.text()
+
+
+def test_pin_overlay_failure_is_logged(fa, wlog, monkeypatch):
+    monkeypatch.setattr(fw, "pin_overlay", lambda w: False)
+    fa.widget.hide()
+    fa.widget.show_pinned()
+    _app.processEvents()
+    assert "pin_overlay failed" in wlog.text()
+
+
+def test_message_handler_error_is_logged_not_raised(fa, wlog, monkeypatch):
+    def boom():
+        raise RuntimeError("bad state")
+    monkeypatch.setattr(fa, "_apply_state_view", boom)
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    assert ("exception", "widget message handler failed") in wlog.lines
+
+
+def test_activation_policy_failure_is_logged(wlog, monkeypatch):
+    monkeypatch.setitem(sys.modules, "AppKit", None)   # import fails
+    fw._accessory_app()
+    assert "activation-policy" in wlog.text()
