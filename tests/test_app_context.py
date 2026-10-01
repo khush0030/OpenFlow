@@ -21,7 +21,7 @@ def system_prompt(monkeypatch, **kw) -> str:
     """The system prompt cleanup() would send, without sending it."""
     ai = AIProcessor()
     sent = {}
-    monkeypatch.setattr(ai, "_call", lambda system, user: sent.update(system=system) or user)
+    monkeypatch.setattr(ai, "_call", lambda system, user, *_: sent.update(system=system) or user)
     ai.cleanup("hello there", **kw)
     return sent["system"]
 
@@ -64,7 +64,7 @@ def test_cleanup_prompt_without_app_has_no_note(monkeypatch):
 
 def test_raw_cleanup_never_calls_the_model(monkeypatch):
     ai = AIProcessor()
-    monkeypatch.setattr(ai, "_call", lambda s, u: pytest.fail("raw must not call the model"))
+    monkeypatch.setattr(ai, "_call", lambda s, u, *_: pytest.fail("raw must not call the model"))
     assert ai.cleanup("as is", mode="raw", context_app="Slack") == "as is"
 
 
@@ -137,6 +137,7 @@ def daemon(monkeypatch):
         "audio": {"sample_rate": 16000},
         "dictionary": {"fuzzy_threshold": 85, "inject_into_cleanup": False},
         "apps": {"context_hints": True, "tones": {"Slack": "casual", "Terminal": "raw"}},
+        "cleanup": {"skip_max_words": 0},   # these tests are about the prompt, not the skip
     }
     d.state = DaemonState(tone=ToneMode.VERBATIM, language=LanguageMode.EN)
     d.ai = FakeAI()

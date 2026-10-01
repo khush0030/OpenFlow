@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import io
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +24,41 @@ class TranscribeOptions:
     # transcribe | translate | verbatim | translit | codemix
     mode: str = "transcribe"
     sample_rate: int = 16000
+    # RMS below this is silence: leading/trailing silence is trimmed before
+    # upload ([audio].silence_threshold). None leaves the audio as recorded.
+    silence_threshold: float | None = None
+
+
+# Kept on each side of the speech so soft word edges (fricatives, trailing
+# consonants) under the threshold aren't clipped.
+TRIM_PAD_S = 0.25
+_TRIM_FRAME_S = 0.02
+
+
+def trim_silence(
+    audio: np.ndarray,
+    sample_rate: int,
+    threshold: float,
+    pad_s: float = TRIM_PAD_S,
+) -> np.ndarray:
+    """Drop leading/trailing silence (20 ms frames with RMS < threshold),
+    keeping `pad_s` around the speech. Audio with no frame at or above the
+    threshold comes back unchanged: a quiet mic is for STT to judge, and an
+    empty upload would only fail."""
+    frame = max(1, int(sample_rate * _TRIM_FRAME_S))
+    n = audio.size // frame
+    if n == 0 or threshold <= 0:
+        return audio
+    frames = np.asarray(audio[: n * frame], dtype=np.float32).reshape(n, frame)
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    loud = np.flatnonzero(rms >= threshold)
+    if loud.size == 0:
+        return audio
+    pad = int(pad_s * sample_rate)
+    start = max(0, int(loud[0]) * frame - pad)
+    end = audio.size if loud[-1] == n - 1 else (int(loud[-1]) + 1) * frame
+    end = min(audio.size, end + pad)
+    return audio[start:end]
 
 
 def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
@@ -41,6 +78,10 @@ class Transcriber:
         self.model = model
         self.api_key_env = api_key_env
         self._api_key: str | None = None
+        # Seconds spent in the last transcribe call: "encode" (WAV) and
+        # "stt" (Sarvam round trips). Read by the daemon for stage timing.
+        self.last_timings: dict[str, float] = {}
+        self.last_trimmed_s = 0.0     # silence cut from the last clip
 
     def preload(self) -> None:
         """Resolve the API key early so the first dictation isn't the one that fails."""
@@ -62,31 +103,65 @@ class Transcriber:
     def transcribe_detailed(
         self, audio: np.ndarray, opts: TranscribeOptions | None = None
     ) -> STTResult:
+        self.last_timings = {}
+        self.last_trimmed_s = 0.0
         if audio.size == 0:
             return STTResult(transcript="")
         opts = opts or TranscribeOptions()
         key = self._ensure_key()
         sr = opts.sample_rate
+        t0 = time.monotonic()
+        if opts.silence_threshold is not None:
+            trimmed = trim_silence(audio, sr, opts.silence_threshold)
+            self.last_trimmed_s = (audio.size - trimmed.size) / sr
+            audio = trimmed
         chunks = _split_audio(audio, sr, STT_MAX_SECONDS)
-        parts: list[str] = []
-        last = STTResult(transcript="")
-        for chunk in chunks:
-            wav = audio_to_wav_bytes(chunk, sr)
-            last = speech_to_text(
+        wavs = [audio_to_wav_bytes(chunk, sr) for chunk in chunks]
+        t1 = time.monotonic()
+
+        def send(wav: bytes) -> STTResult:
+            return speech_to_text(
                 wav,
                 api_key=key,
                 model=self.model,
                 mode=opts.mode,
                 language_code=opts.language_code,
             )
-            if last.transcript:
-                parts.append(last.transcript)
+
+        if len(wavs) == 1:
+            results = [send(wavs[0])]
+        else:
+            results = _send_parallel(send, wavs)
+        self.last_timings = {"encode": t1 - t0, "stt": time.monotonic() - t1}
+        parts = [r.transcript for r in results if r.transcript]
+        last = results[-1]
         return STTResult(
             transcript=" ".join(parts).strip(),
             language_code=last.language_code,
             language_probability=last.language_probability,
             request_id=last.request_id,
         )
+
+
+# Long dictations are rare and Sarvam rate-limits per key; a few in flight
+# at once is enough to make a 2-minute clip cost about one round trip.
+MAX_PARALLEL_CHUNKS = 4
+
+
+def _send_parallel(send, wavs: list[bytes]) -> list[STTResult]:
+    """Run `send` over every chunk concurrently; results keep chunk order.
+    If any chunk still fails after sarvam's own retries, the whole call
+    raises (the first failing chunk's error) instead of pasting a transcript
+    with a silent hole in it — the daemon keeps the audio and offers Retry."""
+    workers = min(len(wavs), MAX_PARALLEL_CHUNKS)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stt-chunk") as pool:
+        futures = [pool.submit(send, wav) for wav in wavs]
+        try:
+            return [f.result() for f in futures]
+        except BaseException:
+            for f in futures:
+                f.cancel()     # don't start chunks nobody will use
+            raise
 
 
 def _split_audio(audio: np.ndarray, sample_rate: int, max_seconds: float) -> list[np.ndarray]:

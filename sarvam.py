@@ -7,6 +7,7 @@ one vendor end-to-end.
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -39,15 +40,19 @@ class STTResult:
     request_id: str | None = None
 
 
-def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:
-    """Env → Keychain → ~/.openflow/.env / repo .env. Raises if missing."""
+def find_api_key(
+    api_key_env: str = DEFAULT_API_KEY_ENV,
+    keyring_user: str = KEYRING_USER,
+) -> str | None:
+    """Env → Keychain (service "openflow", account `keyring_user`) →
+    ~/.openflow/.env / repo .env. None if the key is nowhere."""
     load_env()
     key = os.environ.get(api_key_env, "").strip()
     if key:
         return key
     try:
         import keyring  # type: ignore
-        key = (keyring.get_password(KEYRING_SERVICE, KEYRING_USER) or "").strip()
+        key = (keyring.get_password(KEYRING_SERVICE, keyring_user) or "").strip()
         if key:
             os.environ[api_key_env] = key
             return key
@@ -73,6 +78,14 @@ def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:
                             return key
         except Exception:
             pass
+    return None
+
+
+def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:
+    """Env → Keychain → ~/.openflow/.env / repo .env. Raises if missing."""
+    key = find_api_key(api_key_env)
+    if key:
+        return key
     raise SarvamError(
         f"Missing Sarvam API key. Set ${api_key_env}, run onboarding, "
         "or place it in ~/.openflow/.env"
@@ -98,12 +111,52 @@ def _error_message(resp: httpx.Response) -> str:
 
 _client: httpx.Client | None = None
 
+# How long an idle pooled connection is kept. httpx's default (5s) dropped
+# it between almost every pair of dictations, so each one paid a fresh
+# TCP + TLS handshake. A connection the server has closed in the meantime
+# is detected and replaced before reuse.
+KEEPALIVE_S = 120.0
+
 
 def _http() -> httpx.Client:
     global _client
     if _client is None or _client.is_closed:
-        _client = httpx.Client(timeout=25.0)
+        _client = httpx.Client(
+            timeout=25.0,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                                keepalive_expiry=KEEPALIVE_S),
+        )
     return _client
+
+
+# Warm-up: a bare HEAD to a host opens (or refreshes) the pooled connection,
+# so the dictation's real request skips the handshake. Sent at key-down; the
+# user is still talking while it runs. No key, no payload, no quota.
+WARM_EVERY_S = 10.0
+_warm_lock = threading.Lock()
+_warmed_at: dict[str, float] = {}
+
+
+def warm(url: str | None, *, clock=time.monotonic) -> bool:
+    """Open a connection to `url`'s host in the background, at most once per
+    WARM_EVERY_S per host. Returns True if a warm-up was started."""
+    if not url:
+        return False
+    origin = httpx.URL(url).copy_with(path="/", query=None)
+    host = str(origin)
+    now = clock()
+    with _warm_lock:
+        if now - _warmed_at.get(host, float("-inf")) < WARM_EVERY_S:
+            return False
+        _warmed_at[host] = now
+
+    def run() -> None:
+        try:
+            _http().head(host, timeout=5.0)
+        except Exception:
+            pass       # best effort: the real request connects as before
+    threading.Thread(target=run, name="http-warm", daemon=True).start()
+    return True
 
 
 def _request_with_retry(

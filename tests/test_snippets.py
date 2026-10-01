@@ -152,7 +152,7 @@ def test_cleanup_prompt_explains_placeholders(monkeypatch):
     from ai import AIProcessor
     ai = AIProcessor()
     sent = {}
-    monkeypatch.setattr(ai, "_call", lambda system, user: sent.update(system=system) or user)
+    monkeypatch.setattr(ai, "_call", lambda system, user, *_: sent.update(system=system) or user)
     ai.cleanup("mail {{snippet1}} now", mode="casual")
     assert "{{snippet1}} stand for text" in sent["system"]
     ai.cleanup("plain text", mode="casual")

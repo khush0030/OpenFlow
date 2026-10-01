@@ -22,6 +22,14 @@ class Entry:
     lang: str
     duration: float
     app: str | None = None     # paste target app; None before it was recorded
+    # Per-stage latency in seconds (see TIMING_STAGES); None for rows saved
+    # before timings were recorded, or a stage the run skipped.
+    t_record: float | None = None
+    t_encode: float | None = None
+    t_stt: float | None = None
+    t_cleanup: float | None = None
+    t_paste: float | None = None
+    t_total: float | None = None
 
 
 SCHEMA = """
@@ -33,12 +41,23 @@ CREATE TABLE IF NOT EXISTS dictations (
   tone TEXT NOT NULL,
   lang TEXT NOT NULL,
   duration REAL NOT NULL,
-  app TEXT
+  app TEXT,
+  t_record REAL,
+  t_encode REAL,
+  t_stt REAL,
+  t_cleanup REAL,
+  t_paste REAL,
+  t_total REAL
 );
 CREATE INDEX IF NOT EXISTS idx_dictations_ts ON dictations(ts DESC);
 """
 
-_COLS = "id, ts, raw, final, tone, lang, duration, app"
+# Pipeline stages timed per dictation, in pipeline order. Each is stored
+# in a `t_<stage>` REAL column (seconds).
+TIMING_STAGES = ("record", "encode", "stt", "cleanup", "paste", "total")
+_TIMING_COLS = tuple(f"t_{s}" for s in TIMING_STAGES)
+
+_COLS = "id, ts, raw, final, tone, lang, duration, app, " + ", ".join(_TIMING_COLS)
 
 
 def _like(text: str) -> str:
@@ -69,6 +88,10 @@ class History:
             cols = {r[1] for r in c.execute("PRAGMA table_info(dictations)")}
             if "app" not in cols:
                 c.execute("ALTER TABLE dictations ADD COLUMN app TEXT")
+            # Same for the per-stage timing columns: NULL for older rows.
+            for col in _TIMING_COLS:
+                if col not in cols:
+                    c.execute(f"ALTER TABLE dictations ADD COLUMN {col} REAL")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -81,14 +104,22 @@ class History:
 
     def add(self, raw: str, final: str, tone: str, lang: str, duration: float,
             app: str | None = None, cap: int | None = None,
-            ts: float | None = None) -> None:
+            ts: float | None = None,
+            timings: dict[str, float] | None = None) -> None:
         """Insert a dictation. With a positive `cap` ([history] size_cap),
-        the oldest rows are then pruned so at most `cap` remain."""
+        the oldest rows are then pruned so at most `cap` remain. `timings`
+        maps TIMING_STAGES names to seconds; missing stages are stored NULL."""
+        t = timings or {}
+        stage_vals = tuple(
+            None if t.get(s) is None else float(t[s]) for s in TIMING_STAGES
+        )
         with self._conn() as c:
             c.execute(
-                "INSERT INTO dictations(ts, raw, final, tone, lang, duration, app) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (time.time() if ts is None else ts, raw, final, tone, lang, duration, app),
+                "INSERT INTO dictations(ts, raw, final, tone, lang, duration, app, "
+                + ", ".join(_TIMING_COLS) + ") "
+                "VALUES(" + ",".join("?" * (7 + len(_TIMING_COLS))) + ")",
+                (time.time() if ts is None else ts, raw, final, tone, lang, duration, app,
+                 *stage_vals),
             )
             if cap and cap > 0:
                 c.execute(

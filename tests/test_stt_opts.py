@@ -69,6 +69,16 @@ def test_always_en_override() -> None:
             print(f"  always_en override: {lang.value:9} -> translate ({opts.language_code!r})")
 
 
+def test_silence_threshold_comes_from_audio_config() -> None:
+    import daemon as dm
+    d = _make_daemon(always_en=False, lang=LanguageMode.EN)
+    assert dm.Daemon._stt_opts(d).silence_threshold == 0.01     # default
+    d.cfg["audio"]["silence_threshold"] = 0.02
+    for lang in LanguageMode:
+        d.state = DaemonState(tone=ToneMode.VERBATIM, language=lang)
+        assert dm.Daemon._stt_opts(d).silence_threshold == 0.02
+
+
 def test_raw_tone_uses_verbatim() -> None:
     import daemon as dm
     d = _make_daemon(always_en=False, lang=LanguageMode.EN, tone=ToneMode.RAW)

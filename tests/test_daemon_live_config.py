@@ -118,6 +118,22 @@ def test_no_change_does_nothing(env):
     assert env["sounds"] == [] and d._widget.sent == []
 
 
+def test_cleanup_provider_is_re_picked_when_cleanup_changes(env, monkeypatch):
+    picked = []
+
+    def fake_make(cfg):
+        picked.append(dict(cfg.get("cleanup") or {}))
+        return type("P", (), {"name": "groq", "model": "m"})()
+    monkeypatch.setattr(dm, "make_cleanup_provider", fake_make)
+    d = make_daemon()
+    d.ai = type("AI", (), {"provider": None})()
+    write("cleanup", provider="groq")
+    d._reload_config()
+    assert picked and picked[-1]["provider"] == "groq"
+    assert d.ai.provider.name == "groq"
+    assert d.cfg["cleanup"]["provider"] == "groq"
+
+
 def test_sounds_apply_immediately(env):
     d = make_daemon()
     write("sounds", enabled=False, volume=0.9)

@@ -17,7 +17,7 @@ from prompts import PROMPTS, SELF_CORRECTION, SELF_CORRECTION_TONES
 def sent(monkeypatch, text="meet at 2pm, no wait, 3pm", **kw):
     ai = AIProcessor()
     calls = []
-    monkeypatch.setattr(ai, "_call", lambda system, user: calls.append((system, user)) or user)
+    monkeypatch.setattr(ai, "_call", lambda system, user, *_: calls.append((system, user)) or user)
     ai.cleanup(text, **kw)
     return calls
 

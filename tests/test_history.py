@@ -61,12 +61,48 @@ def test_old_db_is_migrated_and_keeps_its_rows(tmp_path):
     c.close()
 
     h = History(path)
-    assert _columns(path)[-1] == "app"
+    assert "app" in _columns(path)
     [e] = h.recent()
     assert (e.raw, e.final, e.app) == ("hi there", "Hi there.", None)
 
     History(path)                      # second open: no duplicate-column error
     assert _columns(path).count("app") == 1
+
+
+def test_old_db_gets_timing_columns_null(tmp_path):
+    path = tmp_path / "old.sqlite"
+    c = sqlite3.connect(path)
+    c.executescript(OLD_SCHEMA)
+    c.execute("ALTER TABLE dictations ADD COLUMN app TEXT")   # a pre-timing db
+    c.execute("INSERT INTO dictations(ts, raw, final, tone, lang, duration, app) "
+              "VALUES(1.0, 'hi', 'Hi.', 'verbatim', 'auto', 2.0, 'Notes')")
+    c.commit()
+    c.close()
+
+    h = History(path)
+    cols = _columns(path)
+    for stage in hist_mod.TIMING_STAGES:
+        assert f"t_{stage}" in cols
+    [e] = h.recent()
+    assert e.app == "Notes"
+    assert (e.t_record, e.t_stt, e.t_total) == (None, None, None)
+
+    History(path)                      # second open: no duplicate-column error
+    assert _columns(path).count("t_total") == 1
+
+
+def test_add_stores_timings(h):
+    h.add(raw="a", final="A.", tone="verbatim", lang="auto", duration=1.0,
+          timings={"record": 0.01, "encode": 0.002, "stt": 0.9, "cleanup": 0.0,
+                   "paste": 0.12, "total": 1.05})
+    h.add(raw="b", final="B.", tone="verbatim", lang="auto", duration=1.0,
+          timings={"stt": 0.5})
+    by_final = {e.final: e for e in h.recent()}
+    a, b = by_final["A."], by_final["B."]
+    assert (a.t_record, a.t_encode, a.t_stt, a.t_cleanup, a.t_paste, a.t_total) == \
+        pytest.approx((0.01, 0.002, 0.9, 0.0, 0.12, 1.05))
+    assert b.t_stt == pytest.approx(0.5)
+    assert (b.t_record, b.t_cleanup, b.t_total) == (None, None, None)
 
 
 def test_add_stores_app(h):

@@ -27,7 +27,7 @@ hidden += collect_submodules("rapidfuzz")
 hidden += collect_submodules("scipy.io")
 hidden += collect_submodules("AppKit")
 hidden += collect_submodules("ui")
-hidden += ["sarvam", "transcribe", "ai", "permissions", "httpcore", "h11", "anyio", "certifi"]
+hidden += ["sarvam", "transcribe", "ai", "llm", "permissions", "httpcore", "h11", "anyio", "certifi"]
 # The hub imports its pages lazily (importlib), which PyInstaller's import
 # scan can't follow, so list them (and the Qt modules it needs) explicitly.
 hidden += ["ui.hub", "ui.hub.app", "ui.hub.page", "ui.hub.style", "ui.hub.context",
