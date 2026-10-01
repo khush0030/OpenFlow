@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -10,7 +12,7 @@ import numpy as np
 import pytest
 
 import transcribe as tr
-from sarvam import STTResult
+from sarvam import SarvamError, STTResult
 
 SR = 16000
 
@@ -34,6 +36,88 @@ def test_records_encode_and_stt_timings(stt):
     assert out == "part1"
     assert set(t.last_timings) == {"encode", "stt"}
     assert all(v >= 0 for v in t.last_timings.values())
+
+
+def _long_audio(n_chunks: int) -> np.ndarray:
+    """n_chunks STT_MAX_SECONDS chunks, chunk i filled with value (i+1)/100."""
+    per = int(tr.STT_MAX_SECONDS * SR)
+    return np.concatenate([np.full(per, (i + 1) / 100, dtype=np.float32)
+                           for i in range(n_chunks)])
+
+
+def _chunk_index(wav: bytes) -> int:
+    """Recover which chunk a WAV came from by its sample value."""
+    from scipy.io import wavfile
+    import io
+    _, data = wavfile.read(io.BytesIO(wav))
+    return int(round(data[len(data) // 2] / 32767 * 100)) - 1
+
+
+def test_chunks_are_sent_concurrently_and_keep_order(monkeypatch):
+    n = 3
+    barrier = threading.Barrier(n, timeout=5)    # all n must be in flight at once
+
+    def fake(wav, *, api_key, model, mode, language_code):
+        i = _chunk_index(wav)
+        barrier.wait()
+        time.sleep(0.05 * (n - i))               # later chunks finish first
+        return STTResult(transcript=f"c{i}", language_code="hi-IN")
+    monkeypatch.setattr(tr, "speech_to_text", fake)
+    monkeypatch.setattr(tr, "resolve_api_key", lambda env: "k")
+    res = tr.Transcriber().transcribe_detailed(_long_audio(n))
+    assert res.transcript == "c0 c1 c2"
+    assert res.language_code == "hi-IN"
+
+
+def test_empty_chunk_transcripts_are_skipped(monkeypatch):
+    def fake(wav, **kw):
+        i = _chunk_index(wav)
+        return STTResult(transcript="" if i == 1 else f"c{i}")
+    monkeypatch.setattr(tr, "speech_to_text", fake)
+    monkeypatch.setattr(tr, "resolve_api_key", lambda env: "k")
+    assert tr.Transcriber().transcribe(_long_audio(3)) == "c0 c2"
+
+
+def test_a_failed_chunk_fails_the_whole_transcript(monkeypatch):
+    def fake(wav, **kw):
+        i = _chunk_index(wav)
+        if i == 1:
+            raise SarvamError("Sarvam 500: boom", 500)
+        return STTResult(transcript=f"c{i}")
+    monkeypatch.setattr(tr, "speech_to_text", fake)
+    monkeypatch.setattr(tr, "resolve_api_key", lambda env: "k")
+    with pytest.raises(SarvamError, match="boom"):
+        tr.Transcriber().transcribe(_long_audio(3))
+
+
+def test_parallelism_is_capped(monkeypatch):
+    lock = threading.Lock()
+    live = {"now": 0, "peak": 0}
+
+    def fake(wav, **kw):
+        with lock:
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+        time.sleep(0.02)
+        with lock:
+            live["now"] -= 1
+        return STTResult(transcript="x")
+    monkeypatch.setattr(tr, "speech_to_text", fake)
+    monkeypatch.setattr(tr, "resolve_api_key", lambda env: "k")
+    tr.Transcriber().transcribe(_long_audio(tr.MAX_PARALLEL_CHUNKS + 2))
+    assert live["peak"] <= tr.MAX_PARALLEL_CHUNKS
+
+
+def test_single_chunk_runs_on_the_calling_thread(monkeypatch):
+    seen = []
+
+    def fake(wav, **kw):
+        seen.append(threading.current_thread())
+        return STTResult(transcript="one")
+    monkeypatch.setattr(tr, "speech_to_text", fake)
+    monkeypatch.setattr(tr, "resolve_api_key", lambda env: "k")
+    assert tr.Transcriber().transcribe(np.full(SR, 0.1, dtype=np.float32)) == "one"
+    assert seen == [threading.current_thread()]
 
 
 def test_empty_audio_clears_timings(stt):

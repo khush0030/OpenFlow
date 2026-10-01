@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -73,31 +74,53 @@ class Transcriber:
         key = self._ensure_key()
         sr = opts.sample_rate
         chunks = _split_audio(audio, sr, STT_MAX_SECONDS)
-        parts: list[str] = []
-        last = STTResult(transcript="")
-        encode_s = stt_s = 0.0
-        for chunk in chunks:
-            t0 = time.monotonic()
-            wav = audio_to_wav_bytes(chunk, sr)
-            t1 = time.monotonic()
-            encode_s += t1 - t0
-            last = speech_to_text(
+        t0 = time.monotonic()
+        wavs = [audio_to_wav_bytes(chunk, sr) for chunk in chunks]
+        t1 = time.monotonic()
+
+        def send(wav: bytes) -> STTResult:
+            return speech_to_text(
                 wav,
                 api_key=key,
                 model=self.model,
                 mode=opts.mode,
                 language_code=opts.language_code,
             )
-            stt_s += time.monotonic() - t1
-            if last.transcript:
-                parts.append(last.transcript)
-        self.last_timings = {"encode": encode_s, "stt": stt_s}
+
+        if len(wavs) == 1:
+            results = [send(wavs[0])]
+        else:
+            results = _send_parallel(send, wavs)
+        self.last_timings = {"encode": t1 - t0, "stt": time.monotonic() - t1}
+        parts = [r.transcript for r in results if r.transcript]
+        last = results[-1]
         return STTResult(
             transcript=" ".join(parts).strip(),
             language_code=last.language_code,
             language_probability=last.language_probability,
             request_id=last.request_id,
         )
+
+
+# Long dictations are rare and Sarvam rate-limits per key; a few in flight
+# at once is enough to make a 2-minute clip cost about one round trip.
+MAX_PARALLEL_CHUNKS = 4
+
+
+def _send_parallel(send, wavs: list[bytes]) -> list[STTResult]:
+    """Run `send` over every chunk concurrently; results keep chunk order.
+    If any chunk still fails after sarvam's own retries, the whole call
+    raises (the first failing chunk's error) instead of pasting a transcript
+    with a silent hole in it — the daemon keeps the audio and offers Retry."""
+    workers = min(len(wavs), MAX_PARALLEL_CHUNKS)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stt-chunk") as pool:
+        futures = [pool.submit(send, wav) for wav in wavs]
+        try:
+            return [f.result() for f in futures]
+        except BaseException:
+            for f in futures:
+                f.cancel()     # don't start chunks nobody will use
+            raise
 
 
 def _split_audio(audio: np.ndarray, sample_rate: int, max_seconds: float) -> list[np.ndarray]:
