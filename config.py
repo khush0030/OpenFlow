@@ -44,7 +44,8 @@ DEFAULTS: dict[str, Any] = {
     "hotkeys": {
         # F5 collides with macOS Siri; right-option is unbound and easy to reach.
         "record_hold": "alt_r",
-        "record_toggle": "<cmd>+<shift>+<space>",
+        # Hands-free is a double-tap of record_hold; the old record_toggle
+        # chord was never bound and is dropped by _migrate.
         "edit_mode": "<cmd>+<shift>+e",
         "cycle_mode": "f6",
         "undo_paste": "<cmd>+<shift>+z",
@@ -134,7 +135,19 @@ def _migrate(user: dict[str, Any]) -> bool:
     if "sarvam" not in user:
         user["sarvam"] = dict(DEFAULTS["sarvam"])
         changed = True
+    hk = user.get("hotkeys")
+    if isinstance(hk, dict) and "record_toggle" in hk:
+        del hk["record_toggle"]
+        changed = True
     return changed
+
+
+def _read_user() -> dict[str, Any]:
+    """config.toml as written, or {} if there is none."""
+    if not CONFIG_PATH.exists():
+        return {}
+    with open(CONFIG_PATH, "rb") as f:
+        return _toml_read.load(f)
 
 
 def load() -> dict[str, Any]:
@@ -147,6 +160,14 @@ def load() -> dict[str, Any]:
         user = _toml_read.load(f)
     if _migrate(user):
         save(user)
+    return _deep_merge(DEFAULTS, user)
+
+
+def read() -> dict[str, Any]:
+    """The config on disk merged over defaults, migrated in memory only.
+    For the daemon's live-apply poll: never creates or rewrites the file."""
+    user = _read_user()
+    _migrate(user)
     return _deep_merge(DEFAULTS, user)
 
 
@@ -188,11 +209,16 @@ def save_setting(section: str, key: str, value: Any) -> None:
 
 def read_widget_settings() -> dict[str, Any]:
     """Current [widget] table from disk, merged over defaults."""
-    user: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "rb") as f:
-            user = _toml_read.load(f)
-    return {**DEFAULTS["widget"], **user.get("widget", {})}
+    return {**DEFAULTS["widget"], **_read_user().get("widget", {})}
+
+
+def save_setting(section: str, key: str, value: Any) -> None:
+    """Persist one setting, leaving the rest of the file as-is (tomli_w
+    rewrites it, so comments are not kept). Atomic, like save()."""
+    ensure_dirs()
+    user = _read_user()
+    user.setdefault(section, {})[key] = value
+    save(user)
 
 
 def save_widget_setting(key: str, value: str) -> None:
@@ -200,10 +226,4 @@ def save_widget_setting(key: str, value: str) -> None:
     allowed = {"position": WIDGET_POSITIONS, "appearance": WIDGET_APPEARANCES}
     if value not in allowed.get(key, ()):
         raise ValueError(f"invalid widget setting {key}={value!r}")
-    ensure_dirs()
-    user: dict[str, Any] = {}
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "rb") as f:
-            user = _toml_read.load(f)
-    user.setdefault("widget", {})[key] = value
-    save(user)
+    save_setting("widget", key, value)

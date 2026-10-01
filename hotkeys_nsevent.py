@@ -83,6 +83,26 @@ def _parse_keycode(name: str) -> int:
     raise ValueError(f"unknown hotkey: {name!r}")
 
 
+def is_valid_hold_key(name: str) -> bool:
+    """Can HoldOrToggle bind this name? (Live config apply checks before
+    swapping listeners, so a typo keeps the old key.)"""
+    try:
+        _parse_keycode(name)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def is_valid_chord(chord: str) -> bool:
+    """Can HotkeySet bind this chord? Every token must be known."""
+    return HotkeySet._compile_chord(chord) is not None
+
+
+# Monitors are installed on a background thread after this long, so they
+# don't race rumps' NSApp start-up. A live rebind passes a shorter delay.
+INSTALL_DELAY_S = 2.5
+
+
 _VK_TO_FLAG = {
     _VK["cmd_l"]:   _FLAG_COMMAND,
     _VK["cmd_r"]:   _FLAG_COMMAND,
@@ -133,6 +153,7 @@ class HoldOrToggle:
         self._press_ms = 0.0
         self._last_tap_release_ms = 0.0
         self._monitor = None
+        self._stopped = False
         self._match_seen = False
 
     @staticmethod
@@ -234,7 +255,7 @@ class HoldOrToggle:
         except Exception as e:
             print(f"[hotkey] handler error: {e}", flush=True)
 
-    def start(self) -> None:
+    def start(self, install_delay_s: float | None = None) -> None:
         ax = accessibility_trusted()
         if ax is False:
             print("[hotkey] WARNING: Accessibility not granted — paste will be clipboard-only. "
@@ -243,11 +264,14 @@ class HoldOrToggle:
             request_accessibility_trust()
         # Defer install so we don't race rumps' NSApp creation. A background
         # thread waits for NSApp to settle, then installs the monitor.
-        threading.Thread(target=self._deferred_install, daemon=True).start()
+        delay = INSTALL_DELAY_S if install_delay_s is None else install_delay_s
+        threading.Thread(target=self._install_monitor, args=(delay,), daemon=True).start()
 
-    def _deferred_install(self) -> None:
+    def _install_monitor(self, delay_s: float) -> None:
         # Give rumps NSApp.run() a moment to set up its main run loop.
-        time.sleep(2.5)
+        time.sleep(delay_s)
+        if self._stopped:
+            return  # replaced by a rebind before it was ever installed
         try:
             from AppKit import NSEvent  # type: ignore
         except Exception as e:
@@ -256,8 +280,11 @@ class HoldOrToggle:
         mask = _MASK_KEYDOWN | _MASK_KEYUP | _MASK_FLAGS_CHANGED
         self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._handler)
         print(f"[hotkey] NSEvent global monitor installed (vk={self.target_vk}, name={self.key_name!r})", flush=True)
+        if self._stopped:
+            self.stop()  # stop() ran while we were installing
 
     def stop(self) -> None:
+        self._stopped = True
         if self._monitor is not None:
             try:
                 from AppKit import NSEvent  # type: ignore
@@ -280,6 +307,7 @@ class HotkeySet:
     def __init__(self, bindings: dict[str, Callable[[], None]]) -> None:
         self.bindings = bindings
         self._monitor = None
+        self._stopped = False
         self._compiled = []
         for chord, cb in bindings.items():
             spec = self._compile_chord(chord)
@@ -288,7 +316,8 @@ class HotkeySet:
 
     @staticmethod
     def _compile_chord(s: str):
-        """Return (vk, required_flag_mask) for the chord, or None."""
+        """Return (vk, required_flag_mask) for the chord, or None if any
+        token is unknown (so "cmd+bogus+e" is not silently bound as cmd+e)."""
         parts = [p.strip().lower() for p in s.replace(" ", "").split("+")]
         parts = [p[1:-1] if p.startswith("<") and p.endswith(">") else p for p in parts]
         mask = 0
@@ -312,6 +341,10 @@ class HotkeySet:
                                "o":31,"u":32,"i":34,"p":35,"l":37,"j":38,"k":40,
                                "n":45,"m":46}
                     key_vk = mapping.get(p)
+                    if key_vk is None:
+                        return None
+                else:
+                    return None
         if key_vk is None:
             return None
         return (key_vk, mask)
@@ -338,11 +371,14 @@ class HotkeySet:
         except Exception as e:
             print(f"[hotkey] chord listener error: {e}", flush=True)
 
-    def start(self) -> None:
-        threading.Thread(target=self._deferred_install, daemon=True).start()
+    def start(self, install_delay_s: float | None = None) -> None:
+        delay = INSTALL_DELAY_S if install_delay_s is None else install_delay_s
+        threading.Thread(target=self._install_monitor, args=(delay,), daemon=True).start()
 
-    def _deferred_install(self) -> None:
-        time.sleep(2.5)
+    def _install_monitor(self, delay_s: float) -> None:
+        time.sleep(delay_s)
+        if self._stopped:
+            return  # replaced by a rebind before it was ever installed
         try:
             from AppKit import NSEvent  # type: ignore
         except Exception:
@@ -350,8 +386,11 @@ class HotkeySet:
         mask = _MASK_KEYDOWN
         self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._handler)
         print(f"[hotkey] NSEvent chord monitor installed ({len(self._compiled)} chords)", flush=True)
+        if self._stopped:
+            self.stop()  # stop() ran while we were installing
 
     def stop(self) -> None:
+        self._stopped = True
         if self._monitor is not None:
             try:
                 from AppKit import NSEvent  # type: ignore

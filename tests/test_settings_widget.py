@@ -88,3 +88,53 @@ def test_widget_save_failure_is_logged_not_raised(tmp_config, monkeypatch, bad):
     tab._on_widget("position", "left")          # must not raise
     assert len(logged) == 1
     assert cfg["widget"]["position"] == "right"  # mirror skipped
+
+
+# -- Launch at login (spec §5.6, §6.5) -----------------------------------------
+
+import login_item
+
+
+def test_launch_at_login_toggle_writes_and_removes_the_plist(tmp_config):
+    cfg = cfg_mod.load()
+    saves = []
+    tab = GeneralTab(cfg, lambda: saves.append(1))
+    assert not tab.autolaunch.isChecked()
+    tab.autolaunch.setChecked(True)
+    assert login_item.is_enabled()
+    assert cfg["general"]["auto_launch"] is True and saves
+    tab.autolaunch.setChecked(False)
+    assert not login_item.default_plist_path().exists()
+    assert cfg["general"]["auto_launch"] is False
+
+
+def test_launch_at_login_reflects_the_plist_not_the_config(tmp_config):
+    login_item.enable(program=["/bin/true"])
+    cfg = cfg_mod.load()
+    assert cfg["general"]["auto_launch"] is False
+    tab = GeneralTab(cfg, lambda: None)
+    assert tab.autolaunch.isChecked()
+    assert cfg["general"]["auto_launch"] is True
+
+
+def test_launch_at_login_failure_reverts_the_toggle(tmp_config, monkeypatch):
+    def boom(*a, **k):
+        raise PermissionError("read-only LaunchAgents")
+    monkeypatch.setattr(login_item, "enable", boom)
+    cfg = cfg_mod.load()
+    tab = GeneralTab(cfg, lambda: None)
+    tab.autolaunch.setChecked(True)          # must not raise (PyQt aborts)
+    assert not tab.autolaunch.isChecked()
+    assert cfg["general"]["auto_launch"] is False
+
+
+# -- record_toggle retired (spec §5.6) -----------------------------------------
+
+def test_hotkeys_tab_has_no_record_toggle(tmp_config):
+    from ui.settings_tabs.hotkeys import HotkeysTab, _DEFAULTS
+    cfg = cfg_mod.load()
+    tab = HotkeysTab(cfg, lambda: None)
+    assert "record_toggle" not in tab.fields and "record_toggle" not in _DEFAULTS
+    tab._reset_defaults()
+    assert "record_toggle" not in cfg["hotkeys"]
+    assert {k: cfg_mod.DEFAULTS["hotkeys"][k] for k in _DEFAULTS} == _DEFAULTS

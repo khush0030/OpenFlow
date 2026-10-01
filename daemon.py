@@ -78,10 +78,10 @@ from transcribe import Transcriber, TranscribeOptions
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
 if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
-    from hotkeys import HoldToTalk, HotkeySet
+    from hotkeys import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "esc"       # pynput's name for the key
 else:
-    from hotkeys_nsevent import HoldToTalk, HotkeySet
+    from hotkeys_nsevent import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "escape"
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
                    focused_editable, set_clipboard)
@@ -94,6 +94,7 @@ from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, FlowController, FlowHooks
 from widget_channel import WidgetServer
 from control_channel import ControlServer
+from config_apply import plan_changes, resolve_hotkeys
 import sounds
 
 
@@ -181,6 +182,17 @@ def _spawn_ui(subcommand: list[str], dev_script: str,
 
 def _spawn_flow_widget() -> subprocess.Popen | None:
     return _spawn_ui(["flow-widget"], "ui/flow_widget.py")
+
+
+# A live rebind installs the new key monitors after this long (start-up uses
+# the listener's own, longer delay so it doesn't race NSApp).
+REBIND_INSTALL_DELAY_S = 0.3
+
+
+def _hotkey_is_valid(action: str, value: str) -> bool:
+    if action == "record_hold":
+        return is_valid_hold_key(value)
+    return value == "" or is_valid_chord(value)   # empty = unbound
 
 
 def _config_mtime() -> float:
@@ -656,6 +668,88 @@ class Daemon:
             self.cfg["widget"] = dict(fresh)
             self._send_widget(self._widget_config())
 
+    # -- Live config (app-hub spec §6.4) -----------------------------------
+
+    def _reload_config(self) -> None:
+        """config.toml changed on disk (Settings, the hub, a hand edit):
+        apply whatever changed to the running daemon."""
+        try:
+            fresh = cfg_mod.read()
+        except Exception as e:   # mid-edit TOML, unreadable file
+            self._warn(f"config.toml unreadable — keeping current settings: {e}")
+            return
+        self._apply_config(fresh)
+
+    def _apply_config(self, fresh: dict) -> None:
+        ch = plan_changes(self.cfg, fresh)
+        if ch.widget is not None:
+            self.cfg["widget"] = ch.widget
+            self._send_widget(self._widget_config())
+        if ch.sounds is not None:
+            sounds.configure(enabled=ch.sounds["enabled"], volume=ch.sounds["volume"])
+            self.cfg["sounds"] = ch.sounds
+            print(f"[daemon] sounds -> enabled={ch.sounds['enabled']} "
+                  f"volume={ch.sounds['volume']}", flush=True)
+        if ch.general is not None:
+            self.cfg["general"] = ch.general   # always_english_output, hindi_script
+        # Only a changed config value moves the daemon's tone/language, so a
+        # menu bar or F6 choice survives unrelated config writes.
+        if ch.tone is not None:
+            self.set_tone(_coerce_tone(ch.tone))
+        if ch.language is not None:
+            self.set_language(_coerce_lang(ch.language))
+        if ch.hotkeys is not None:
+            self._pending_hotkeys = ch.hotkeys
+            self._apply_pending_hotkeys()
+
+    def _apply_pending_hotkeys(self) -> None:
+        """Re-register changed hotkeys. Waits while a recording is live: the
+        old hold key's release (or next press) must still end it."""
+        requested = getattr(self, "_pending_hotkeys", None)
+        if requested is None or self.recorder.is_recording:
+            return
+        self._pending_hotkeys = None
+        current = self.cfg["hotkeys"]
+        effective, rejected = resolve_hotkeys(requested, current, _hotkey_is_valid)
+        for action, value in rejected:
+            self._warn(f"hotkeys.{action} = {value!r} is not a key OpenFlow can bind — "
+                       f"keeping {current.get(action, '')!r}")
+        if all(effective[a] == current.get(a, "") for a in effective):
+            return
+        try:
+            self._rebind_hotkeys(current, effective)
+        except Exception as e:
+            self._warn(f"could not re-register hotkeys — keeping the old ones: {e}")
+            return
+        hold_changed = effective["record_hold"] != current.get("record_hold")
+        self.cfg["hotkeys"] = {**current, **effective}
+        print(f"[daemon] hotkeys re-registered: {effective}", flush=True)
+        if hold_changed:
+            self._send_widget(self._widget_config())   # its tooltip names the key
+
+    def _rebind_hotkeys(self, old: dict, new: dict) -> None:
+        """Swap listeners for the changed bindings. New listeners are built
+        before the old ones stop, so a failure leaves the old ones running."""
+        new_hold = new_chords = None
+        if new["record_hold"] != old.get("record_hold"):
+            new_hold = self._build_hold(new["record_hold"])
+        if self._chord_bindings(new) != self._chord_bindings(old):
+            new_chords = HotkeySet(self._chord_bindings(new))
+        if new_hold is not None:
+            if self._hold is not None:
+                self._hold.stop()
+            self._hold = new_hold
+            new_hold.start(install_delay_s=REBIND_INSTALL_DELAY_S)
+        if new_chords is not None:
+            if self._chords is not None:
+                self._chords.stop()
+            self._chords = new_chords
+            new_chords.start(install_delay_s=REBIND_INSTALL_DELAY_S)
+
+    def _warn(self, msg: str) -> None:
+        print(f"[daemon] WARNING: {msg}", flush=True)
+        _log.warning(msg)
+
     def _widget_pump(self) -> None:
         """Streams mic level, runs the Undo/Retry timers, does click-to-paste
         for the card, and keeps the widget process alive."""
@@ -687,7 +781,8 @@ class Daemon:
                     mtime = _config_mtime()
                     if mtime != cfg_mtime:
                         cfg_mtime = mtime
-                        self._reload_widget_config()
+                        self._reload_config()
+                    self._apply_pending_hotkeys()
                 watchdog.poll(self._widget.connected)
             except Exception as e:
                 print(f"[daemon] widget pump error: {e}", flush=True)
@@ -963,6 +1058,17 @@ class Daemon:
         return HoldToTalk(hold_key, self._on_hold_press, self.on_record_stop,
                           is_active=lambda: self.recorder.is_recording)
 
+    def _chord_bindings(self, hk: dict) -> dict[str, callable]:
+        chords: dict[str, callable] = {}
+        if hk.get("cycle_mode"):
+            chords[hk["cycle_mode"]] = self.cycle_tone
+        if hk.get("edit_mode"):
+            chords[hk["edit_mode"]] = self.on_edit_mode
+        if hk.get("undo_paste"):
+            chords[hk["undo_paste"]] = self.on_undo
+        chords[_ESCAPE_CHORD] = self._on_escape  # cancel a recording (spec §4, state 7)
+        return chords
+
     def run(self) -> None:
         hold_key = self.cfg["hotkeys"]["record_hold"]
         self._hold = self._build_hold(hold_key)
@@ -973,17 +1079,7 @@ class Daemon:
         # first listener finishes its TIS init before the second begins.
         time.sleep(0.8)
 
-        chords: dict[str, callable] = {}
-        cycle_tone_key = self.cfg["hotkeys"].get("cycle_mode")
-        if cycle_tone_key:
-            chords[cycle_tone_key] = self.cycle_tone
-        edit_key = self.cfg["hotkeys"].get("edit_mode")
-        if edit_key:
-            chords[edit_key] = self.on_edit_mode
-        undo_key = self.cfg["hotkeys"].get("undo_paste")
-        if undo_key:
-            chords[undo_key] = self.on_undo
-        chords[_ESCAPE_CHORD] = self._on_escape  # cancel a recording (spec §4, state 7)
+        chords = self._chord_bindings(self.cfg["hotkeys"])
         if chords:
             self._chords = HotkeySet(chords)
             self._chords.start()

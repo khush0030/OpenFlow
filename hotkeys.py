@@ -59,6 +59,36 @@ def request_accessibility_trust() -> bool:
 
 HoldKey = str  # e.g. "alt_r" or single char
 
+_MODIFIER_PREFIXES = ("cmd", "shift", "alt", "ctrl")
+
+
+def _strip_brackets(k: str) -> str:
+    k = k.strip().lower()
+    return k[1:-1] if k.startswith("<") and k.endswith(">") else k
+
+
+def _is_key_token(k: str) -> bool:
+    return len(k) == 1 or isinstance(getattr(keyboard.Key, k, None), keyboard.Key)
+
+
+def is_valid_hold_key(name: str) -> bool:
+    """Can HoldOrToggle bind this name? HoldOrToggle._parse falls back to the
+    first character, so "hyper_x" would bind "h"; live config apply checks
+    here first and keeps the old key instead."""
+    k = _strip_brackets(name or "")
+    if k.startswith("vk:"):
+        return k[3:].isdigit()
+    return bool(k) and _is_key_token(k)
+
+
+def is_valid_chord(chord: str) -> bool:
+    """Can HotkeySet bind this chord? Known tokens only, ending in a
+    non-modifier key."""
+    parts = [_strip_brackets(p) for p in (chord or "").split("+")]
+    if not parts or not all(parts) or not all(_is_key_token(p) for p in parts):
+        return False
+    return not parts[-1].startswith(_MODIFIER_PREFIXES)
+
 
 class HoldOrToggle:
     """Single-key hold-to-talk **and** double-tap-to-toggle.
@@ -216,7 +246,8 @@ class HoldOrToggle:
             else:
                 print(f"[hotkey] release: hold ended ({duration:.0f}ms)", flush=True)
 
-    def start(self) -> None:
+    def start(self, install_delay_s: float | None = None) -> None:
+        # install_delay_s: API parity with hotkeys_nsevent; pynput starts now.
         ax = accessibility_trusted()
         if ax is False:
             print("[hotkey] WARNING: Accessibility not granted — firing native prompt.", flush=True)
@@ -286,7 +317,7 @@ class HotkeySet:
         normalized = {_normalize_chord(k): v for k, v in bindings.items()}
         self._gh = keyboard.GlobalHotKeys(normalized)
 
-    def start(self) -> None:
+    def start(self, install_delay_s: float | None = None) -> None:
         self._gh.start()
 
     def stop(self) -> None:

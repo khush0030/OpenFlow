@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QComboBox, QVBoxLayout, QWidget
 from ui.widgets import ToggleSwitch
 
 import config as cfg_mod
+import login_item
 from openflow_logger import log_exception
 from ui.settings_tabs._common import SectionTitle, SettingsRow
 from ui.widget_copy import APPEARANCE_LABELS, POSITION_LABELS
@@ -71,9 +72,10 @@ class GeneralTab(QWidget):
             "Routes speech through Saaras translate mode. Disable to honor the selected language (Hinglish, Hindi, etc.).",
         ))
 
-        # Auto-launch placeholder (LaunchAgent management is Phase 10 territory)
+        # Launch at login: the LaunchAgent plist is the truth; auto_launch mirrors it.
         self.autolaunch = ToggleSwitch()
-        self.autolaunch.setChecked(cfg["general"].get("auto_launch", False))
+        cfg["general"]["auto_launch"] = login_item.is_enabled()
+        self.autolaunch.setChecked(cfg["general"]["auto_launch"])
         self.autolaunch.toggled.connect(self._on_autolaunch)
         outer.addWidget(SettingsRow(
             "Launch at login",
@@ -116,7 +118,25 @@ class GeneralTab(QWidget):
     def _on_lang(self, v): self.cfg["general"]["default_language"] = v; self.save_cb()
     def _on_script(self, v): self.cfg["general"]["hindi_script"] = v; self.save_cb()
     def _on_always_en(self, v): self.cfg["general"]["always_english_output"] = bool(v); self.save_cb()
-    def _on_autolaunch(self, v): self.cfg["general"]["auto_launch"] = bool(v); self.save_cb()
+    def _on_autolaunch(self, v):
+        # Writes/removes the plist only; launchd reads it at the next login.
+        # Never raise here: PyQt6 aborts the process on an unhandled slot exception.
+        if getattr(self, "_autolaunch_reverting", False):
+            return
+        try:
+            login_item.enable() if v else login_item.disable()
+        except Exception as e:
+            log_exception("settings", f"could not {'enable' if v else 'disable'} launch at login", e)
+        on = login_item.is_enabled()
+        if on != bool(v):
+            # Flip back through the signal so the switch animates to match.
+            self._autolaunch_reverting = True
+            try:
+                self.autolaunch.setChecked(on)
+            finally:
+                self._autolaunch_reverting = False
+        self.cfg["general"]["auto_launch"] = on
+        self.save_cb()
     @staticmethod
     def _widget_index(combo, key, widget_cfg):
         i = combo.findData(widget_cfg.get(key))

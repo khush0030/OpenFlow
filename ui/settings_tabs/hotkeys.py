@@ -14,7 +14,6 @@ from ui.tokens import Color, Font
 
 _DEFAULTS = {
     "record_hold":   "alt_r",
-    "record_toggle": "<cmd>+<shift>+<space>",
     "edit_mode":     "<cmd>+<shift>+e",
     "cycle_mode":    "f6",
     "undo_paste":    "<cmd>+<shift>+z",
@@ -35,8 +34,7 @@ class HotkeysTab(QWidget):
 
         self.fields: dict[str, QLineEdit] = {}
         bindings = [
-            ("record_hold",   "Hold to talk",     "Single key. Hold to record, release to transcribe."),
-            ("record_toggle", "Tap to toggle",    "Chord that starts/stops a longer dictation."),
+            ("record_hold",   "Hold to talk",     "Single key. Hold to record, release to transcribe. Double-tap for hands-free."),
             ("edit_mode",     "Edit selection",   "Triggers edit mode on the current selection."),
             ("cycle_mode",    "Cycle tone",       "Cycles through tone modes (raw → slack → raw …)."),
             ("undo_paste",    "Undo last paste",  "Restores the clipboard contents from before the last paste."),
