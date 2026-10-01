@@ -13,8 +13,11 @@ BOTTOM_INSET = 10   # widget ↔ bottom of the usable area (above the Dock)
 DRAG_THRESHOLD = 4  # movement before a press becomes a drag
 POSITIONS = ("left", "bottom", "right")
 
-# (width, height) for vertical placement; bottom placement swaps them.
-SIZES: dict[str, tuple[float, float]] = {
+# The widget is drawn at 72% of the original design ("Smaller", user decision
+# 2026-10-01). Everything drawn inside it scales by the same factor.
+WIDGET_SCALE = 0.72
+
+_BASE: dict[str, tuple[float, float]] = {
     "idle": (8, 46),
     "card": (8, 46),
     "cancelled": (8, 46),
@@ -23,6 +26,11 @@ SIZES: dict[str, tuple[float, float]] = {
     "recording": (26, 102),
     "silent": (26, 102),
     "processing": (26, 102),
+}
+# (width, height) for vertical placement; bottom placement swaps them.
+# Whole points, so the window and the shape inside it line up exactly.
+SIZES: dict[str, tuple[float, float]] = {
+    view: (round(w * WIDGET_SCALE), round(h * WIDGET_SCALE)) for view, (w, h) in _BASE.items()
 }
 
 

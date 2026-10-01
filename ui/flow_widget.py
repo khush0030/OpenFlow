@@ -17,8 +17,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt6.QtCore import (QEasingCurve, QObject, QPoint, QPointF, QPropertyAnimation,
-                          QRect, QRectF, Qt, QTimer, QUrl, pyqtSignal)
+from PyQt6.QtCore import (QAbstractAnimation, QEasingCurve, QObject, QParallelAnimationGroup,
+                          QPoint, QPointF, QPropertyAnimation, QRect, QRectF,
+                          QSequentialAnimationGroup, Qt, QTimer, QUrl, QVariantAnimation,
+                          pyqtSignal)
 from PyQt6.QtGui import (QColor, QCursor, QDesktopServices, QFont, QGuiApplication,
                          QPainter, QPainterPath, QPen)
 from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
@@ -32,6 +34,7 @@ from ui.hover_relay import HoverRelay
 from ui.vibrancy import pin_overlay
 from ui.widget_geometry import (DRAG_THRESHOLD, POSITIONS, Rect, clamp_to_screen,
                                 nearest_dock, popup_max_height, popup_rect, widget_rect)
+from ui.widget_geometry import WIDGET_SCALE as S
 from ui.widget_theme import APPEARANCES, FONT_SERIF, FONT_UI, Theme, resolve
 from widget_channel import SOCKET_PATH, WidgetClient
 
@@ -53,6 +56,14 @@ def level_from_rms(rms: float) -> float:
 RECORDING_VIEWS = ("recording", "silent", "processing")
 ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
 FOLLOW_MS = 250  # how often the widget checks which display the cursor is on
+# Motion (user decision 2026-10-01): the widget morphs and its contents grow in
+# together; the hover tooltip follows once the mic is there; pop-ups slide out
+# from the widget and fade away when dismissed.
+MORPH_MS = 220
+POPUP_IN_MS = 200
+POPUP_OUT_MS = 140
+TOOLTIP_DELAY_MS = 150
+SLIDE = 8  # how far a pop-up slides in from the widget, in points
 MIC_SETTINGS_URLS = (
     "x-apple.systempreferences:com.apple.Sound-Settings.extension?input",
     "x-apple.systempreferences:com.apple.preference.sound",
@@ -166,6 +177,8 @@ class Surface(QWidget):
         self.theme = theme
         self.radius = radius  # None = fully rounded pill
         self.target_rect: Rect | None = None
+        self.enter_delay_ms = 0
+        self._motion: QAbstractAnimation | None = None
         add_shadow(self, theme)
 
     def shape_size(self) -> tuple[float, float]:
@@ -173,11 +186,58 @@ class Surface(QWidget):
         hint = self.sizeHint()
         return (hint.width() - 2 * M, hint.height() - 2 * M)
 
-    def show_at(self, rect: Rect) -> None:
+    def show_at(self, rect: Rect, slide: tuple[float, float] = (0, 0)) -> None:
+        """First call: wait enter_delay_ms, then fade in while sliding `slide`
+        points into place. Later calls (re-placement) just move it."""
         self.target_rect = rect
-        self.setGeometry(window_geometry(rect))
+        geo = window_geometry(rect)
+        if self.isVisible():
+            if self._motion is not None:
+                self._motion.stop()
+            self.setWindowOpacity(1.0)
+            self.setGeometry(geo)
+            return
+        start = geo.translated(round(slide[0]), round(slide[1]))
+        self.setGeometry(start)
+        self.setWindowOpacity(0.0)
         self.show()
         QTimer.singleShot(0, lambda: _pin(self))
+        fade = QPropertyAnimation(self, b"windowOpacity", self)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        move = QPropertyAnimation(self, b"pos", self)
+        move.setStartValue(start.topLeft())
+        move.setEndValue(geo.topLeft())
+        enter = QParallelAnimationGroup(self)
+        for anim in (fade, move):
+            anim.setDuration(POPUP_IN_MS)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            enter.addAnimation(anim)
+        seq = QSequentialAnimationGroup(self)
+        if self.enter_delay_ms:
+            seq.addPause(self.enter_delay_ms)
+        seq.addAnimation(enter)
+        self._motion = seq
+        seq.start()
+
+    def dismiss(self) -> None:
+        """Fade out, then close and delete."""
+        if self._motion is not None:
+            self._motion.stop()
+        if not self.isVisible() or self.windowOpacity() == 0.0:
+            self.close()
+            self.deleteLater()
+            return
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        fade = QPropertyAnimation(self, b"windowOpacity", self)
+        fade.setStartValue(self.windowOpacity())
+        fade.setEndValue(0.0)
+        fade.setDuration(POPUP_OUT_MS)
+        fade.setEasingCurve(QEasingCurve.Type.InCubic)
+        fade.finished.connect(self.close)
+        fade.finished.connect(self.deleteLater)
+        self._motion = fade
+        fade.start()
 
     def paintEvent(self, _e) -> None:
         p = QPainter(self)
@@ -199,12 +259,16 @@ class Tooltip(Surface):
     def __init__(self, theme: Theme, title: str, hint: str) -> None:
         super().__init__(theme)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.enter_delay_ms = TOOLTIP_DELAY_MS  # the mic grows in first
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(M + 16, M + 9, M + 16, M + 9)
-        lay.setSpacing(9)
-        lay.addWidget(headline(title, theme), 0, Qt.AlignmentFlag.AlignBaseline)
+        px, py = round(M + 16 * S), round(M + 9 * S)
+        lay.setContentsMargins(px, py, px, py)
+        lay.setSpacing(round(9 * S))
+        title_label = headline(title, theme)
+        title_label.setFont(serif_font(15.5 * S))
+        lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignBaseline)
         self.hint_label = QLabel(hint)
-        self.hint_label.setFont(ui_font(14))
+        self.hint_label.setFont(ui_font(14 * S))
         faded = theme.text[:3] + (140,)
         self.hint_label.setStyleSheet(f"color:{css(faded)};background:transparent;")
         lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignBaseline)
@@ -473,6 +537,15 @@ class DockZone(QWidget):
         p.drawRoundedRect(r, rad, rad)
 
 
+def _contents(view: str) -> str | None:
+    """What a view draws inside its shape; None for the bare idle handle."""
+    if view == "hover":
+        return "mic"
+    if view in RECORDING_VIEWS:
+        return "controls"
+    return None
+
+
 # ── the widget ────────────────────────────────────────────────────────────
 class FlowWidget(QWidget):
     """Idle handle, Dictate pill, or recording pill."""
@@ -491,8 +564,17 @@ class FlowWidget(QWidget):
         self._press: QPointF | None = None
         self._press_origin = QPoint()
         self._anim = QPropertyAnimation(self, b"geometry", self)
-        self._anim.setDuration(220)
+        self._anim.setDuration(MORPH_MS)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # 0 → 1 while a new view's contents (mic, buttons, waveform) fade and
+        # grow in, in step with the morph.
+        self.reveal = 1.0
+        self._reveal = QVariantAnimation(self)
+        self._reveal.setStartValue(0.0)
+        self._reveal.setEndValue(1.0)
+        self._reveal.setDuration(MORPH_MS)
+        self._reveal.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._reveal.valueChanged.connect(self._on_reveal)
         # Runs only while the waveform or shimmer animates (the morph repaints
         # itself), so the always-on process doesn't wake 30×/s when idle.
         self._frames = QTimer(self)
@@ -506,6 +588,10 @@ class FlowWidget(QWidget):
         return self.app.position != "bottom"
 
     def set_view(self, view: str, hot: str | None = None) -> None:
+        if _contents(view) != _contents(self.view) and _contents(view) is not None:
+            self._reveal.stop()
+            self.reveal = 0.0
+            self._reveal.start()
         self.view = view
         self._hot = hot
         self._sync_frames()
@@ -555,6 +641,14 @@ class FlowWidget(QWidget):
             self.show()
             QTimer.singleShot(0, lambda: _pin(self))
 
+    def _on_reveal(self, value) -> None:
+        self.reveal = float(value)
+        self.update()
+
+    def _grow(self) -> float:
+        """Scale for contents that are growing in: 60% → 100%."""
+        return 0.6 + 0.4 * self.reveal
+
     def _on_frame(self) -> None:
         if self.view in RECORDING_VIEWS:
             self.update()
@@ -567,9 +661,10 @@ class FlowWidget(QWidget):
 
     def _button_centers(self, r: QRectF) -> tuple[QPointF, QPointF]:
         c = r.center()
+        inset = min(r.width(), r.height()) / 2  # concentric with the pill's round ends
         if self.vertical:
-            return QPointF(c.x(), r.top() + 13), QPointF(c.x(), r.bottom() - 13)
-        return QPointF(r.left() + 13, c.y()), QPointF(r.right() - 13, c.y())
+            return QPointF(c.x(), r.top() + inset), QPointF(c.x(), r.bottom() - inset)
+        return QPointF(r.left() + inset, c.y()), QPointF(r.right() - inset, c.y())
 
     def hit(self, pos: QPointF) -> str | None:
         r = self._final_shape()
@@ -577,9 +672,9 @@ class FlowWidget(QWidget):
             return "dictate" if r.contains(pos) else None
         if self.view in ("recording", "silent"):
             x, ok = self._button_centers(r)
-            if math.hypot(pos.x() - x.x(), pos.y() - x.y()) <= 11:
+            if math.hypot(pos.x() - x.x(), pos.y() - x.y()) <= 11 * S:
                 return "x"
-            if math.hypot(pos.x() - ok.x(), pos.y() - ok.y()) <= 11:
+            if math.hypot(pos.x() - ok.x(), pos.y() - ok.y()) <= 11 * S:
                 return "ok"
         return None
 
@@ -605,7 +700,7 @@ class FlowWidget(QWidget):
     def _paint_handle(self, p: QPainter, r: QRectF, th: Theme) -> None:
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(qc(th.accent))
-        p.drawRoundedRect(r, 4, 4)
+        p.drawRoundedRect(r, 4 * S, 4 * S)
 
     def _paint_dictate(self, p: QPainter, r: QRectF, th: Theme) -> None:
         hot = self._hot == "dictate"
@@ -613,8 +708,10 @@ class FlowWidget(QWidget):
                    qc(th.accent) if hot else qc(th.hairline))
         icon = QColor(250, 247, 242) if hot else qc(th.text)
         p.save()
+        p.setOpacity(self.reveal)
         p.translate(r.center())
-        p.scale(20 / 24, 20 / 24)       # 24-unit glyph (as in the mockup SVG) → 20 pt
+        k = 20 * S / 24 * self._grow()  # 24-unit glyph (as in the mockup SVG) → 20 pt × scale
+        p.scale(k, k)
         p.translate(-12, -12)
         pen = QPen(icon, 2.2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -630,52 +727,55 @@ class FlowWidget(QWidget):
     def _paint_recording(self, p: QPainter, r: QRectF, th: Theme) -> None:
         self._pill(p, r, qc(th.surface), qc(th.hairline))
         x, ok = self._button_centers(r)
+        p.setOpacity(self.reveal)
+        g = S * self._grow()  # buttons grow in with the morph
         # ✕ cancel
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(qc(th.secondary_bg))
-        p.drawEllipse(x, 10, 10)
-        pen = QPen(qc(th.secondary_text), 1.6)
+        p.drawEllipse(x, 10 * g, 10 * g)
+        pen = QPen(qc(th.secondary_text), 1.6 * g)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
-        p.drawLine(x + QPointF(-3.5, -3.5), x + QPointF(3.5, 3.5))
-        p.drawLine(x + QPointF(-3.5, 3.5), x + QPointF(3.5, -3.5))
+        p.drawLine(x + QPointF(-3.5, -3.5) * g, x + QPointF(3.5, 3.5) * g)
+        p.drawLine(x + QPointF(-3.5, 3.5) * g, x + QPointF(3.5, -3.5) * g)
         # ✓ confirm
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(qc(th.accent))
-        p.drawEllipse(ok, 10, 10)
-        pen = QPen(QColor(250, 247, 242), 1.8)
+        p.drawEllipse(ok, 10 * g, 10 * g)
+        pen = QPen(QColor(250, 247, 242), 1.8 * g)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        tick = QPainterPath(ok + QPointF(-4, 0))
-        tick.lineTo(ok + QPointF(-1, 3))
-        tick.lineTo(ok + QPointF(4, -3))
+        tick = QPainterPath(ok + QPointF(-4, 0) * g)
+        tick.lineTo(ok + QPointF(-1, 3) * g)
+        tick.lineTo(ok + QPointF(4, -3) * g)
         p.drawPath(tick)
-        # waveform: 7 dots, 2.5 thick, 3 apart
+        # waveform: 7 dots, 2.5 thick, 3 apart (× scale)
         t = time.monotonic() - self._t0
         n = len(DOT_SHAPE)
-        span = n * 2.5 + (n - 1) * 3
+        thick, pitch = 2.5 * S, 5.5 * S
+        span = n * thick + (n - 1) * (pitch - thick)
         c = r.center()
         p.setPen(Qt.PenStyle.NoPen)
         for i, shape in enumerate(DOT_SHAPE):
             if self.view == "recording":
-                length = 3 + self._level * 13 * shape * (0.8 + 0.2 * math.sin(t * 16 + i))
+                length = S * (3 + self._level * 13 * shape * (0.8 + 0.2 * math.sin(t * 16 + i)))
                 alpha = 255
             elif self.view == "silent":
-                length, alpha = 3.0, 77
+                length, alpha = 3 * S, 77
             else:  # processing: travelling opacity wave
-                length = 3.0
+                length = 3 * S
                 alpha = int(255 * (0.25 + 0.75 * max(0.0, math.sin(t / 0.14 - i * 0.7))))
             col = qc(th.text)
-            col.setAlpha(alpha)
+            col.setAlpha(round(alpha * self.reveal))
             p.setBrush(col)
-            offset = -span / 2 + i * 5.5
+            offset = -span / 2 + i * pitch
             if self.vertical:
-                dot = QRectF(c.x() - length / 2, c.y() + offset, length, 2.5)
+                dot = QRectF(c.x() - length / 2, c.y() + offset, length, thick)
             else:
-                dot = QRectF(c.x() + offset, c.y() - length / 2, 2.5, length)
-            p.drawRoundedRect(dot, 1.25, 1.25)
+                dot = QRectF(c.x() + offset, c.y() - length / 2, thick, length)
+            p.drawRoundedRect(dot, thick / 2, thick / 2)
 
     # mouse
     def mousePressEvent(self, e) -> None:
@@ -912,8 +1012,7 @@ class FlowApp(QObject):
     # pop-ups
     def _close_popup(self) -> None:
         if self.popup is not None:
-            self.popup.close()
-            self.popup.deleteLater()
+            self.popup.dismiss()
             self.popup = None
             self._popup_key = None
 
@@ -947,7 +1046,9 @@ class FlowApp(QObject):
             self.popup, self._popup_key = popup, key
         # Unchanged pop-ups are only moved, so timers and hover-pause survive.
         rect = popup_rect(anchor, self.popup.shape_size(), self.position)
-        self.popup.show_at(clamp_to_screen(rect, screen, self.position))
+        # slide out from the widget: start a little toward it
+        slide = {"left": (-SLIDE, 0), "bottom": (0, SLIDE)}.get(self.position, (SLIDE, 0))
+        self.popup.show_at(clamp_to_screen(rect, screen, self.position), slide)
 
     # drag to dock
     def begin_drag(self) -> None:

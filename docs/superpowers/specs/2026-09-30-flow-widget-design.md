@@ -84,8 +84,19 @@ Three positions, chosen by dragging or from the right-click menu; stored as
 ## 4. States
 
 Sizes are in points, given for vertical placement; bottom placement swaps width
-and height. All state changes morph over 220 ms, `cubic-bezier(.2,.8,.2,1)`.
+and height. **The widget is drawn at 72% of the sizes below** ("Smaller", user
+decision 2026-10-01; `WIDGET_SCALE` in `ui/widget_geometry.py`): idle 6 × 33,
+hover 26 × 40, recording 19 × 73, and everything inside (icons, buttons,
+waveform, tooltip type) scales with it. Toasts and the card keep full size.
+All state changes morph over 220 ms, `cubic-bezier(.2,.8,.2,1)`.
 Entering a new state always dismisses any leftover tooltip or menu.
+
+**Motion** (user decision 2026-10-01):
+- A view's contents (mic, ✕/✓, waveform) fade in and grow from 60% to full
+  size in step with the 220 ms morph.
+- Hover: the mic comes first; the tooltip follows 150 ms later.
+- Every pop-up fades in over 200 ms while sliding 8 pt out from the widget, and
+  fades out over 140 ms when dismissed.
 
 ### 1 · Idle
 A terracotta handle, **8 × 46**, radius 4, 1 pt border `rgba(255,255,255,.9)`,
@@ -94,7 +105,7 @@ opacity 0.9. Nothing else on screen.
 ### 2 · Hover (pointer over the idle handle)
 Only one control: the **Dictate** pill, **36 × 56**, surface colour, mic icon
 **20 pt**. It turns terracotta with a white icon while pointed at.
-- Tooltip (appears at once on first hover): **"Dictate"** in Fraunces +
+- Tooltip (follows the mic, see Motion): **"Dictate"** in Fraunces +
   **"Hold ⌘ right"** in Geist 14 pt at 55% opacity, sharing a baseline. The key
   text reflects the configured `record_hold` key.
 - Click → start recording (click-to-start; finish with ✓ or cancel with ✕).

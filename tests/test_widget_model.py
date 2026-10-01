@@ -17,11 +17,11 @@ SCREEN = Rect(0, 25, 1440, 800)
 
 
 def test_sizes_swap_for_bottom():
-    assert widget_size("recording", "right") == (26, 102)
-    assert widget_size("recording", "bottom") == (102, 26)
-    assert widget_size("hover", "left") == (36, 56)
-    assert widget_size("idle", "bottom") == (46, 8)
-    assert widget_size("card", "right") == (8, 46)
+    assert widget_size("recording", "right") == (19, 73)
+    assert widget_size("recording", "bottom") == (73, 19)
+    assert widget_size("hover", "left") == (26, 40)
+    assert widget_size("idle", "bottom") == (33, 6)
+    assert widget_size("card", "right") == (6, 33)
 
 
 def test_widget_rect_anchors():
