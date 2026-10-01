@@ -115,22 +115,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(f"sys.executable: {sys.executable}")
     print(f"sys.frozen: {getattr(sys, 'frozen', False)}")
 
-    # Accessibility
-    try:
-        from hotkeys import accessibility_trusted
-        ax = accessibility_trusted()
-        print(f"AXIsProcessTrusted: {ax}")
-    except Exception as e:
-        print(f"AX check failed: {type(e).__name__}: {e}")
-
-    # Microphone — try to open
-    try:
-        import sounddevice as sd
-        with sd.InputStream(samplerate=16000, channels=1, dtype="float32"):
-            pass
-        print("Microphone: ok")
-    except Exception as e:
-        print(f"Microphone: FAILED — {type(e).__name__}: {e}")
+    import doctor
+    # Accessibility; microphone — try to open
+    print(doctor.check_accessibility()["line"])
+    print(doctor.check_microphone()["line"])
 
     # pynput listener — start and watch for 5 seconds
     print("\nListening for any key events for 5s. Press right Option a few times…")
@@ -165,20 +153,10 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         print(f"pynput listener failed: {type(e).__name__}: {e}")
 
     # Config sanity
-    from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH, load_env
-    print(f"\nConfig: {CONFIG_PATH} (exists={CONFIG_PATH.exists()})")
-    print(f"Dict:   {DICT_PATH} (exists={DICT_PATH.exists()})")
-    print(f"Hist:   {HISTORY_PATH} (exists={HISTORY_PATH.exists()})")
-
-    load_env()
-    has_env = bool(os.environ.get("SARVAM_API_KEY"))
-    has_keyring = False
-    try:
-        import keyring
-        has_keyring = bool(keyring.get_password("openflow", "sarvam_api_key"))
-    except Exception:
-        pass
-    print(f"Sarvam key: env={'yes' if has_env else 'no'} keychain={'yes' if has_keyring else 'no'}")
+    print()
+    for c in doctor.check_files():
+        print(c["line"])
+    print(doctor.check_sarvam_key()["line"])
 
     return 0
 
