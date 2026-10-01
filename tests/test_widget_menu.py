@@ -61,7 +61,7 @@ def env(monkeypatch):
     monkeypatch.setattr(dm, "log_exception", lambda *a, **k: calls.append(("logged",)))
     monkeypatch.setattr(dm, "paste", lambda text, target=None: calls.append(("paste", text)) or "pasted")
     monkeypatch.setattr(dm, "capture_front_app", lambda: None)
-    monkeypatch.setattr(dm, "spawn_ui", lambda module: calls.append(("spawn", module)))
+    monkeypatch.setattr(dm, "spawn_ui", lambda module, *args: calls.append(("spawn", module, *args)))
     monkeypatch.setattr(dm.cfg_mod, "save_setting",
                         lambda section, key, value: calls.append(("save", section, key, value)))
     return calls
@@ -114,7 +114,8 @@ def test_open_settings_and_history(env):
     d = make_daemon()
     d._on_widget_menu("open_settings", None)
     d._on_widget_menu("open_history", None)
-    assert ("spawn", "ui.settings") in env and ("spawn", "ui.history") in env
+    # Both open pages of the main window.
+    assert ("spawn", "ui.hub", "settings") in env and ("spawn", "ui.hub", "history") in env
 
 
 def test_paste_last_pastes_the_newest_transcript(env):
@@ -131,7 +132,7 @@ def test_paste_last_with_no_history_does_nothing(env):
 
 def test_menu_handler_never_raises(env, monkeypatch):
     d = make_daemon()
-    monkeypatch.setattr(dm, "spawn_ui", lambda m: 1 / 0)
+    monkeypatch.setattr(dm, "spawn_ui", lambda *a: 1 / 0)
     d._on_widget_menu("open_settings", None)
     assert ("logged",) in env
 

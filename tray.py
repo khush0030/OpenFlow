@@ -92,6 +92,7 @@ class OpenFlowTray(rumps.App):
         self._lang_items: dict[LanguageMode, rumps.MenuItem] = {}
         self._build_menu()
         self.state.subscribe(self._on_state_change)
+        _install_reopen_handler()
 
     # ── menu construction ────────────────────────────────────
     def _build_menu(self) -> None:
@@ -106,6 +107,7 @@ class OpenFlowTray(rumps.App):
             self._lang_items[lang] = mi
 
         self.menu = [
+            rumps.MenuItem("Open OpenFlow", callback=self._open_home),
             ("Tone", list(self._tone_items.values())),
             ("Language", list(self._lang_items.values())),
             None,
@@ -133,14 +135,18 @@ class OpenFlowTray(rumps.App):
             rumps.quit_application()
 
     # ── subprocess-spawned UI surfaces ───────────────────────
+    # Each opens a page of the main window (`openflow hub <page>`).
+    def _open_home(self, _sender) -> None:
+        _spawn_ui_subprocess("ui.hub", "home")
+
     def _open_dictionary(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.dict_editor")
+        _spawn_ui_subprocess("ui.hub", "dictionary")
 
     def _open_history(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.history")
+        _spawn_ui_subprocess("ui.hub", "history")
 
     def _open_settings(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.settings")
+        _spawn_ui_subprocess("ui.hub", "settings")
 
     # ── state subscription ───────────────────────────────────
     def _on_state_change(self, state: DaemonState) -> None:
@@ -184,14 +190,18 @@ _BUNDLE_SUBCOMMAND = {
     "ui.dict_editor": ["dict", "edit"],
     "ui.settings":    ["settings"],
     "ui.history":     ["history-viewer"],
+    "ui.hub":         ["hub"],
 }
+# Modules that, from source, run through cli.py rather than as a script.
+_SOURCE_VIA_CLI = {"ui.hub"}
 
 
-def _spawn_ui_subprocess(module: str) -> None:
+def _spawn_ui_subprocess(module: str, *args: str) -> None:
     """Launch a PyQt6 UI surface as an independent process.
 
     Avoids dual-NSApp issues with rumps + PyQt6 in the same process.
     Inherits env so the child reads the same config + dictionary file.
+    `args` follow the subcommand, e.g. ("ui.hub", "history").
     """
     env = os.environ.copy()
     # Strip LaunchServices per-instance vars — inherited, they make the
@@ -207,18 +217,54 @@ def _spawn_ui_subprocess(module: str) -> None:
             print(f"[tray] no bundle subcommand for {module}", flush=True)
             return
         app_path = str(Path(sys.executable).resolve().parents[2])
-        cmd = ["/usr/bin/open", "-n", "-a", app_path, "--args", *sub]
+        cmd = ["/usr/bin/open", "-n", "-a", app_path, "--args", *sub, *args]
         cwd = None
     else:
         repo_root = Path(__file__).resolve().parent
-        script = repo_root / (module.replace(".", "/") + ".py")
-        cmd = [sys.executable, str(script)]
+        if module in _SOURCE_VIA_CLI:
+            cmd = [sys.executable, str(repo_root / "cli.py"), *_BUNDLE_SUBCOMMAND[module], *args]
+        else:
+            script = repo_root / (module.replace(".", "/") + ".py")
+            cmd = [sys.executable, str(script), *args]
         cwd = str(repo_root)
     try:
         subprocess.Popen(cmd, env=env, cwd=cwd)
     except Exception as e:
         print(f"[tray] spawn {module} failed: {e}", flush=True)
         rumps.alert(title="OpenFlow", message=f"Could not open {module}: {e}", ok="OK")
+
+
+_reopen_installed = False
+
+
+def _on_reopen() -> None:
+    """Finder / Spotlight / Dock opened OpenFlow while it runs: show the hub."""
+    try:
+        _spawn_ui_subprocess("ui.hub", "home")
+    except Exception as e:
+        print(f"[tray] reopen failed: {e}", flush=True)
+
+
+def _install_reopen_handler() -> None:
+    """Teach rumps' NSApplication delegate `applicationShouldHandleReopen:
+    hasVisibleWindows:`. rumps doesn't expose it, so add it to its delegate
+    class (rumps.rumps.NSApp) with a PyObjC category, once per process."""
+    global _reopen_installed
+    if _reopen_installed:
+        return
+    try:
+        import objc  # type: ignore
+        from rumps.rumps import NSApp as _RumpsDelegate
+
+        class NSApp(objc.Category(_RumpsDelegate)):  # noqa: F811  (category name = class name)
+            @objc.typedSelector(b"Z@:@Z")
+            def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _visible):
+                _on_reopen()
+                return False  # handled; nothing for AppKit to do
+
+        _reopen_installed = True
+    except Exception as e:
+        print(f"[tray] reopen handler not installed: {e}", flush=True)
 
 
 # Backwards-compat alias: daemon.py imports TrayApp.

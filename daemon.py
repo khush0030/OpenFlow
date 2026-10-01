@@ -610,9 +610,9 @@ class Daemon:
                 print(f"[daemon] microphone -> {device}", flush=True)
                 self._send_widget(self._widget_config())
             elif action == "open_settings":
-                spawn_ui("ui.settings")
+                spawn_ui("ui.hub", "settings")
             elif action == "open_history":
-                spawn_ui("ui.history")
+                spawn_ui("ui.hub", "history")
             elif action == "paste_last":
                 last = self.history.recent(1)
                 if last and last[0].final.strip():

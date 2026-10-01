@@ -8,6 +8,7 @@ Usage:
   python -m openflow dict remove NAME
   python -m openflow history [--limit 20]
   python -m openflow config path
+  python -m openflow hub [page]      # open the main window (home, history, …)
 """
 from __future__ import annotations
 
@@ -79,6 +80,13 @@ def _cmd_history_viewer(args: argparse.Namespace) -> int:
     """Launch PyQt6 history viewer."""
     from ui.history import main as history_main
     return history_main()
+
+
+def _cmd_hub(args: argparse.Namespace) -> int:
+    """Open the main window on a page (single instance: hands off and exits
+    if one is already open)."""
+    from ui.hub import app as hub_app
+    return hub_app.main(args.page)
 
 
 def _cmd_flow_widget(args: argparse.Namespace) -> int:
@@ -201,6 +209,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("settings", help="open settings window").set_defaults(func=_cmd_settings)
     sub.add_parser("history-viewer", help="open history viewer").set_defaults(func=_cmd_history_viewer)
+    hb = sub.add_parser("hub", help="open the OpenFlow window")
+    hb.add_argument("page", nargs="?", default="home",
+                    help="home, insights, history, dictionary, tones, settings or help")
+    hb.set_defaults(func=_cmd_hub)
     sub.add_parser("flow-widget", help="(internal) launch the on-screen flow widget").set_defaults(func=_cmd_flow_widget)
     sub.add_parser("onboarding", help="run first-time onboarding wizard").set_defaults(func=_cmd_onboarding)
 

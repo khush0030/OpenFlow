@@ -266,14 +266,10 @@ def sock_path():
     shutil.rmtree(d, ignore_errors=True)
 
 
-def _pump(until, rounds=200):
-    import time
-    for _ in range(rounds):
-        _app.processEvents()
-        if until():
-            return True
-        time.sleep(0.005)
-    return False
+def _accept(server, ms=2000):
+    # Not app.processEvents(): that would also fire timers other test modules
+    # left behind. waitForNewConnection emits newConnection synchronously.
+    server.server.waitForNewConnection(ms)
 
 
 def test_handoff_without_server_fails(sock_path):
@@ -286,7 +282,8 @@ def test_single_instance_handoff(sock_path):
     try:
         assert server.listening
         assert hub.send_show(sock_path, "history") is True
-        assert _pump(lambda: got == ["history"])
+        _accept(server)
+        assert got == ["history"]
     finally:
         server.close()
 
@@ -298,7 +295,8 @@ def test_server_replaces_stale_socket(sock_path):
     try:
         assert server.listening
         assert hub.send_show(sock_path, "settings")
-        assert _pump(lambda: got == ["settings"])
+        _accept(server)
+        assert got == ["settings"]
     finally:
         server.close()
 
@@ -312,8 +310,9 @@ def test_server_ignores_garbage(sock_path, logged):
         s.connect(str(sock_path))
         s.sendall(b"not json\n")
         s.close()
-        _pump(lambda: False, rounds=20)
+        _accept(server)
         assert got == []
+        assert logged
     finally:
         server.close()
 
@@ -324,6 +323,7 @@ def test_second_launch_hands_off_and_exits(sock_path, monkeypatch):
     monkeypatch.setattr(hub, "HubWindow", lambda *a, **k: pytest.fail("built a window"))
     try:
         assert hub.main("dictionary", sock_path=sock_path) == 0
-        assert _pump(lambda: got == ["dictionary"])
+        _accept(server)
+        assert got == ["dictionary"]
     finally:
         server.close()

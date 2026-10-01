@@ -28,10 +28,18 @@ hidden += collect_submodules("scipy.io")
 hidden += collect_submodules("AppKit")
 hidden += collect_submodules("ui")
 hidden += ["sarvam", "transcribe", "ai", "permissions", "httpcore", "h11", "anyio", "certifi"]
+# The hub imports its pages lazily (importlib), which PyInstaller's import
+# scan can't follow, so list them (and the Qt modules it needs) explicitly.
+hidden += ["ui.hub", "ui.hub.app", "ui.hub.page", "ui.hub.style", "ui.hub.context",
+           "ui.hub.pages",
+           *(f"ui.hub.pages.{p}" for p in
+             ("home", "insights", "history", "dictionary", "tones", "settings", "help")),
+           "PyQt6.QtSvg", "PyQt6.QtNetwork"]
 
 datas = []
 datas += collect_data_files("certifi")
-# Ship our own assets (fonts/logo/tray/sounds). Empty subdirs are bundled so
+# Ship our own assets (fonts incl. JetBrains Mono, logo incl. the hub's Dock
+# icon assets/logo/icon.png, tray, sounds). Empty subdirs are bundled so
 # runtime loaders find the expected layout even before designed assets land.
 datas += [("assets", "assets")]
 

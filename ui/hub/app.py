@@ -442,22 +442,18 @@ class HubServer:
         self.server.newConnection.connect(self._accept)
 
     def _accept(self) -> None:
+        # A request is one short line sent right after connecting, so read it
+        # synchronously (bounded wait) instead of wiring per-socket signals.
         while self.server.hasPendingConnections():
             conn: QLocalSocket = self.server.nextPendingConnection()
             buf = bytearray()
-
-            def _read(c=conn, b=buf):
-                if c.bytesAvailable():
-                    b.extend(bytes(c.readAll()))
-                if b"\n" in b or c.state() != QLocalSocket.LocalSocketState.ConnectedState:
-                    self._handle(bytes(b))
-                    b.clear()
-
-            conn.readyRead.connect(_read)
-            conn.disconnected.connect(_read)
-            conn.disconnected.connect(conn.deleteLater)
-            if conn.bytesAvailable():
-                _read()
+            while b"\n" not in buf:
+                if not conn.bytesAvailable() and not conn.waitForReadyRead(500):
+                    break
+                buf.extend(bytes(conn.readAll()))
+            conn.disconnectFromServer()
+            conn.deleteLater()
+            self._handle(bytes(buf))
 
     def _handle(self, data: bytes) -> None:
         for line in data.splitlines():
