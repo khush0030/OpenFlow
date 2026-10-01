@@ -599,8 +599,7 @@ class Daemon:
                     tone = ToneMode(value)
                 except ValueError:
                     return
-                self.set_tone(tone)
-                self._send_widget(self._widget_config())
+                self.choose_tone(tone)
             elif action == "set_mic":
                 device = value or "default"
                 cfg_mod.save_setting("audio", "device", device)
@@ -696,11 +695,32 @@ class Daemon:
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:
             self.set_tone(_coerce_tone(ch.tone))
+            self._send_widget(self._widget_config())   # the menu's tone tick
         if ch.language is not None:
             self.set_language(_coerce_lang(ch.language))
         if ch.hotkeys is not None:
             self._pending_hotkeys = ch.hotkeys
             self._apply_pending_hotkeys()
+
+    def choose_tone(self, tone: ToneMode) -> None:
+        """A tone picked from a menu (menu bar or widget) becomes the default."""
+        self.set_tone(tone)
+        self._persist_general("default_tone", tone.value)
+        self._send_widget(self._widget_config())
+
+    def choose_language(self, lang: LanguageMode) -> None:
+        self.set_language(lang)
+        self._persist_general("default_language", lang.value)
+
+    def _persist_general(self, key: str, value: str) -> None:
+        try:
+            cfg_mod.save_setting("general", key, value)
+        except Exception as e:   # the choice still applies for this session
+            log_exception("daemon.config", f"could not save general.{key}={value!r}", e)
+            return
+        # Mirror after the write: the config poll then finds the file and
+        # self.cfg agreeing and doesn't re-apply the choice.
+        self.cfg.setdefault("general", {})[key] = value
 
     def _apply_pending_hotkeys(self) -> None:
         """Re-register changed hotkeys. Waits while a recording is live: the

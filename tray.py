@@ -20,8 +20,6 @@ from typing import Callable
 
 import rumps
 
-import config as cfg_mod
-from openflow_logger import log_exception
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from ui.icons import tray_icon_is_template, tray_icon_resolved_path
 
@@ -120,28 +118,13 @@ class OpenFlowTray(rumps.App):
 
     def _make_tone_cb(self, tone: ToneMode):
         def _cb(_sender):
-            self.daemon.set_tone(tone)
-            self._persist_default("default_tone", tone.value)
+            self.daemon.choose_tone(tone)   # applies and saves as the default
         return _cb
 
     def _make_lang_cb(self, lang: LanguageMode):
         def _cb(_sender):
-            self.daemon.set_language(lang)
-            self._persist_default("default_language", lang.value)
+            self.daemon.choose_language(lang)
         return _cb
-
-    def _persist_default(self, key: str, value: str) -> None:
-        """A menu choice becomes the default, so it survives a restart."""
-        try:
-            cfg_mod.save_setting("general", key, value)
-        except Exception as e:  # never raise out of a menu callback
-            log_exception("tray", f"could not save general.{key}={value!r}", e)
-            return
-        # Mirror after the write: the daemon's config poll then sees the
-        # file and its own config agree and doesn't re-apply the choice.
-        cfg = getattr(self.daemon, "cfg", None)
-        if isinstance(cfg, dict):
-            cfg.setdefault("general", {})[key] = value
 
     def _quit(self, _sender) -> None:
         try:

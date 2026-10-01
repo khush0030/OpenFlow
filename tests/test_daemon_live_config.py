@@ -244,3 +244,56 @@ def test_widget_changes_still_pushed(env):
     d._reload_config()
     assert d.cfg["widget"]["appearance"] == "ink"
     assert d._widget.sent[-1]["appearance"] == "ink"
+
+
+# -- Menu choices persist through one place (tray + widget menu) ---------------
+
+def on_disk_general():
+    import tomllib
+    return tomllib.loads(cfg_mod.CONFIG_PATH.read_text()).get("general", {})
+
+
+def test_choose_tone_applies_saves_and_tells_the_widget(env):
+    d = make_daemon()
+    d.choose_tone(ToneMode.EMAIL)
+    assert d.state.tone == ToneMode.EMAIL
+    assert on_disk_general()["default_tone"] == "email"
+    assert d.cfg["general"]["default_tone"] == "email"
+    assert d._widget.sent[-1]["tone"] == "email"
+    d._widget.sent.clear()
+    d._reload_config()                      # our own write is not "external"
+    assert d._widget.sent == [] and d.state.tone == ToneMode.EMAIL
+
+
+def test_choose_language_applies_and_saves(env):
+    d = make_daemon()
+    d.choose_language(LanguageMode.HINGLISH)
+    assert d.state.language == LanguageMode.HINGLISH
+    assert on_disk_general()["default_language"] == "hinglish"
+    assert d.cfg["general"]["default_language"] == "hinglish"
+
+
+def test_choose_survives_a_failed_save(env, monkeypatch):
+    def boom(*a):
+        raise OSError("read-only")
+    monkeypatch.setattr(dm.cfg_mod, "save_setting", boom)
+    logged = []
+    monkeypatch.setattr(dm, "log_exception", lambda *a: logged.append(a))
+    d = make_daemon()
+    d.choose_tone(ToneMode.CASUAL)
+    assert d.state.tone == ToneMode.CASUAL and logged
+    assert d.cfg["general"]["default_tone"] == "verbatim"   # not mirrored
+
+
+def test_widget_menu_tone_persists(env):
+    d = make_daemon()
+    d._on_widget_menu("set_tone", "slack")
+    assert d.state.tone == ToneMode.SLACK
+    assert on_disk_general()["default_tone"] == "slack"
+
+
+def test_tone_from_config_updates_the_widget_tick(env):
+    d = make_daemon()
+    write("general", default_tone="bullets")
+    d._reload_config()
+    assert d._widget.sent[-1]["tone"] == "bullets"
