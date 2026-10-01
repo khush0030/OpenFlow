@@ -102,12 +102,17 @@ _CUES = [re.compile(p, _FLAGS) for p in (
     rf"(?P<n>{_alt(HI_CARDINALS)}){_END}(?:\s+(?:toh|to|तो){_END}|{_PUNCT})",
 )]
 
+# A pronoun opening the item marks a cue as well as a comma does
+# ("number one I'm a good boy").
+_ITEM_PRONOUN = (r"(?:i|i'm|i've|i'll|we|we're|we've|we'll|you|you're|they|they're|"
+                 r"he|he's|she|she's|it|it's|let's|there's|there|this|that's)")
+
 # "…and I think number one, he's…": "number N" / "point N" may open a list
 # mid-sentence, but only with a marker after it (never "number one
 # priority"), and like every cue it only counts inside a 1, 2, 3… run.
 _MID_CUE = re.compile(
     rf"(?<![\wऀ-ॿ])(?:number|point)\s+(?:number\s+)?(?P<n>{_CARD}){_END}"
-    rf"(?:{_IS}|\s*[,:\-–—])(?:\s*that{_END})?", _FLAGS)
+    rf"(?:(?:{_IS}|\s*[,:\-–—])(?:\s*that{_END})?|(?=\s+{_ITEM_PRONOUN}{_END}))", _FLAGS)
 
 _BOUNDARY = re.compile(r"[.!?;:,।\n—–]|\s(?=(?:and|aur|then)\s)", _FLAGS)
 

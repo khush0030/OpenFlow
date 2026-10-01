@@ -46,7 +46,20 @@ def test_number_one_can_start_mid_sentence():
         "3. He is just. So pathetic that I can't tell you.")
 
 
+NO_COMMA = ("Hello, my name is Khush and um I'm telling you that number one I'm a "
+            "good boy, number two I'm the best one.")
+
+
+def test_number_cue_followed_by_a_pronoun():
+    # No comma after "number one": the pronoun opening the item is the marker.
+    assert fmt(NO_COMMA) == (
+        "Hello, my name is Khush and um I'm telling you that:\n"
+        "1. I'm a good boy.\n"
+        "2. I'm the best one.")
+
+
 @pytest.mark.parametrize("text", [
+    "I'm number one I think, and that's that.",
     "She was number one, he came second in the race last year.",
     "My number one priority is sleep. Number two pencils are cheap.",
     "Call me at point one, then we'll see how it goes.",
@@ -88,7 +101,7 @@ def test_numbered(text, expected):
     assert fmt(text) == expected
 
 
-@pytest.mark.parametrize("text", [ASHTON, MID_SENTENCE] + [t for t, _ in NUMBERED])
+@pytest.mark.parametrize("text", [ASHTON, MID_SENTENCE, NO_COMMA] + [t for t, _ in NUMBERED])
 def test_numbered_keeps_every_word_but_the_cues(text):
     found = lists.find(text)
     assert same_words(text, lists.render(found), found.removable)
