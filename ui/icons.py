@@ -4,9 +4,10 @@ Hierarchy:
 - Prefer bundled PNG/SVG from assets/tray and assets/logo.
 - Fall back to PIL-drawn placeholder so the tray icon is never empty.
 
-Light/dark menu bar handled via `darkdetect`. The tray template-image path
-auto-tints regardless, so the dark variant is only needed when the icon
-contains color we don't want inverted (e.g. terracotta recording dot).
+Menu bar mark "A · Mark" (app-hub spec §7), rendered by
+scripts/make_tray_icons.py. Idle and processing are template images that
+macOS tints for light/dark menu bars; recording has a terracotta dot, so it
+is drawn in colour with a `-dark` variant (white ring) picked via `darkdetect`.
 """
 from __future__ import annotations
 
@@ -30,22 +31,37 @@ def _is_dark_menu_bar() -> bool:
         return False
 
 
+# States whose icon carries colour and so can't be a template image.
+_COLOURED: frozenset[str] = frozenset({"recording"})
+
+
 def tray_icon_path(status: Status) -> Path | None:
     """Return path to bundled tray icon for status, or None if missing.
 
-    Variants tried in order:
-      tray-{status}-dark.png  (dark menu bar only)
-      tray-{status}.png
+    Variants tried in order (@2x first: rumps draws every status image at
+    20 × 20 pt and NSImage doesn't load @2x siblings, so the 40 px file is
+    the one that stays sharp on Retina; macOS downsamples it cleanly at 1x):
+      tray-{status}-dark@2x.png, tray-{status}-dark.png  (dark menu bar only)
+      tray-{status}@2x.png, tray-{status}.png
     """
-    dark = _is_dark_menu_bar()
-    candidates = []
-    if dark:
-        candidates.append(_TRAY / f"tray-{status}-dark.png")
-    candidates.append(_TRAY / f"tray-{status}.png")
-    for c in candidates:
-        if c.exists():
-            return c
+    names = [f"tray-{status}"]
+    if _is_dark_menu_bar():
+        names.insert(0, f"tray-{status}-dark")
+    for name in names:
+        for suffix in ("@2x", ""):
+            c = _TRAY / f"{name}{suffix}.png"
+            if c.exists():
+                return c
     return None
+
+
+def tray_icon_is_template(status: Status) -> bool:
+    """Whether rumps should show status's icon as a template image.
+
+    Bundled monochrome icons are templates (macOS tints them for the menu
+    bar); the coloured recording icon and the PIL fallback are not.
+    """
+    return status not in _COLOURED and tray_icon_path(status) is not None
 
 
 # ── PIL FALLBACK ICONS ───────────────────────────────────────

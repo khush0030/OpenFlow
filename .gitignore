@@ -51,3 +51,4 @@ test.wav
 .superpowers/
 .playwright-mcp/
 !assets/sounds/*.wav
+!assets/tray/*.png

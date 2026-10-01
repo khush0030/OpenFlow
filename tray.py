@@ -21,7 +21,7 @@ from typing import Callable
 import rumps
 
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
-from ui.icons import tray_icon_resolved_path
+from ui.icons import tray_icon_is_template, tray_icon_resolved_path
 
 
 # Backwards-compat shim — daemon.py still imports Status from this module.
@@ -83,7 +83,7 @@ class OpenFlowTray(rumps.App):
         super().__init__(
             "OpenFlow",
             icon=str(tray_icon_resolved_path("idle")),
-            template=False,  # our PIL fallback has color; bundled PNGs will use template
+            template=tray_icon_is_template("idle"),
             quit_button=None,
         )
         self.daemon = daemon
@@ -149,6 +149,7 @@ class OpenFlowTray(rumps.App):
     def _refresh(self, state: DaemonState) -> None:
         status = _STATUS_FROM_RECORDING.get(state.recording, "idle")
         try:
+            self.template = tray_icon_is_template(status)  # recording's dot is coloured
             self.icon = str(tray_icon_resolved_path(status))
         except Exception as e:
             print(f"[tray] icon swap failed: {e}", flush=True)
@@ -162,6 +163,7 @@ class OpenFlowTray(rumps.App):
     def set_status(self, status: Status) -> None:
         """Compat shim. Prefer mutating daemon.state.recording + notify()."""
         try:
+            self.template = tray_icon_is_template(status.value)
             self.icon = str(tray_icon_resolved_path(status.value))
         except Exception:
             pass
