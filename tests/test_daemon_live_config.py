@@ -22,7 +22,7 @@ from state import DaemonState, LanguageMode, ToneMode
 class FakeHold:
     instances: list["FakeHold"] = []
 
-    def __init__(self, key, on_press, on_release, is_active=None):
+    def __init__(self, key, on_press, on_release, is_active=None, on_cancel=None):
         self.key = key
         self.started = None
         self.stopped = False

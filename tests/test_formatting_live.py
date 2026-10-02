@@ -7,8 +7,8 @@ after changing formatting.py, lists.py or the format prompts:
 
 Needs the cleanup provider's key (SARVAM_API_KEY, or the groq / anthropic
 key named in [cleanup]). Uses the same path as the daemon: Verbatim runs
-formatting.format_local() and, only when it asks, ai.format_only() checked
-by same_words(); the cleanup tones get formatting.notes(). Models are not
+formatting.format_local() and, only when it asks, ai.paragraph_starts()
+(breaks inserted by Python) or ai.format_only() checked by same_words(); the cleanup tones get formatting.notes(). Models are not
 deterministic, so cleanup cases check shape and key words, not exact text.
 """
 from __future__ import annotations
@@ -57,6 +57,10 @@ def verbatim(ai, text, email=False):
     local = formatting.format_local(text, email=email)
     if not local.model_tasks:
         return local.text
+    if local.model_tasks == ["paragraphs"]:
+        numbered, count = formatting.numbered_sentences(local.text)
+        starts = formatting.parse_paragraph_starts(ai.paragraph_starts(numbered), count)
+        return formatting.break_paragraphs(local.text, starts)
     out = ai.format_only(local.text, local.model_tasks)
     if formatting.same_words(local.text, out, formatting.removable_spans(local.text)):
         return out.strip()

@@ -95,7 +95,7 @@ Everything needed to stop opening Wispr.
   - per-stage timing in the log and history table
 - Self-correction ("…no wait, make it 3pm") in cleanup tones
 - Snippets: spoken trigger → expanded text
-- Smoke test writes into the real `~/.openflow/openflow.log` — isolate it
+- ✅ Tests never write into the real `~/.openflow/openflow.log` (conftest isolates logging)
 - Dev loop: run from source; signed build (~15 min) only per milestone
 - ✅ "Can't hear you" detection (mic muted / wrong device): the widget shows it
   when the level stays under `silence_threshold`, with a Mic settings button
@@ -104,7 +104,8 @@ Everything needed to stop opening Wispr.
 
 - Streaming STT → text is basically ready at key-up
 - Auto-learn dictionary: detect edits right after paste, offer to add the term
-- Command mode: "reply saying yes but push to Friday" using selection / screen context
+- ✅ Command mode: "reply saying yes but push to Friday" using selection / screen context
+  (edit hotkey with nothing selected; spec 2026-10-02-command-mode)
 - Provider abstraction + automatic failover between cloud providers (replaces
   the earlier "local model fallback" idea — laptop compute is reserved for dev work)
 - Privacy: everything stays in `~/.openflow`, opt-in retention limits

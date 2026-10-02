@@ -94,12 +94,14 @@ from paste import MAX_FIELD_CHARS, ax_field_text, ax_same_element
 from snippets import Snippets
 import formatting
 import screen_context
+import command_mode
 from prompts import app_kind as prompts_app_kind
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
-from flow_state import CARD, FlowController, FlowHooks
+from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
+from flow_state import PROCESSING as FLOW_PROCESSING
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
@@ -230,6 +232,8 @@ class RunContext:
     stream: object = None          # the take's StreamingSession, if streamed
     # Names on screen at key-down (screen_context.py); in memory only.
     screen_terms: tuple[str, ...] = ()
+    # Command mode (edit hotkey, nothing selected): its command_mode.Pending.
+    command: object = None
 
 
 class _WidgetWatchdog:
@@ -374,6 +378,7 @@ class Daemon:
         self._hold: HoldToTalk | None = None
         self._chords: HotkeySet | None = None
         self._edit_pending = False  # for edit-mode
+        self._command = None        # armed command_mode.Pending (edit hotkey, no selection)
         self._tray: TrayApp | None = None
         self._stop_evt = threading.Event()
         self._cancel_pending = False
@@ -535,6 +540,8 @@ class Daemon:
         if not local.model_tasks:
             return local.text
         src = local.text
+        if local.model_tasks == ["paragraphs"]:
+            return self._paragraphs_verbatim(src)
         try:
             out = self.ai.format_only(src, local.model_tasks)
         except Exception as e:
@@ -545,6 +552,22 @@ class Daemon:
             return out.strip()
         print("[daemon] formatting changed words — pasting unformatted", flush=True)
         return src
+
+    def _paragraphs_verbatim(self, src: str) -> str:
+        """Paragraph breaks in a long verbatim dictation: the model names the
+        sentences that start a paragraph, Python inserts the breaks
+        (formatting.break_paragraphs), so the words can't change."""
+        numbered, count = formatting.numbered_sentences(src)
+        if count < 2:
+            return src
+        try:
+            reply = self.ai.paragraph_starts(numbered)
+        except Exception as e:
+            log_exception("daemon.pipeline", "formatting call failed — pasting unformatted", e)
+            return src
+        starts = formatting.parse_paragraph_starts(reply, count)
+        print(f"[daemon] formatted (paragraphs at {starts or 'none'})", flush=True)
+        return formatting.break_paragraphs(src, starts)
 
     def _post_process(self, raw: str, tone: ToneMode | None = None,
                       language: LanguageMode | None = None, target=None,
@@ -651,10 +674,18 @@ class Daemon:
 
     def on_record_start(self, hands_free: bool = False) -> None:
         if self.state.paused:
+            print("[daemon] paused — key press ignored", flush=True)
             return
         if self.recorder.is_recording:
             return
         print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
+        t0 = time.monotonic()
+        # Feedback first: the widget (and cue) answer the key now, not after
+        # the AX read and the mic open below (~0.3 s cold), which used to
+        # leave a press looking ignored.
+        self.state.recording = RecordingState.RECORDING
+        self.state.notify()
+        self._flow.recording_started(hands_free=hands_free)
         remembered = capture_paste_target()
         if remembered is not None:
             self._paste_target = remembered
@@ -663,13 +694,38 @@ class Daemon:
                 f"ax={'yes' if remembered.ax_element is not None else 'no'}",
                 flush=True,
             )
+        t_target = time.monotonic()
         self._open_stream()
         self._start_screen_capture(remembered)
-        self.recorder.start()
+        try:
+            self.recorder.start()
+        except Exception as e:
+            # No input would open (device busy / gone). Say so on screen
+            # instead of leaving the widget recording nothing.
+            log_exception("daemon.audio", "microphone failed to start", e)
+            self._drop_stream()
+            self._screen = None
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            self._flow.no_audio(None, None)
+            return
+        t_mic = time.monotonic()
         self._warm_up()
-        self.state.recording = RecordingState.RECORDING
+        print(f"[daemon] mic open {1000 * (t_mic - t0):.0f}ms after key-down "
+              f"(paste target {1000 * (t_target - t0):.0f}ms)", flush=True)
+
+    def _on_hold_cancel(self) -> None:
+        """The hold key was tapped (first half of a double-tap) or used as a
+        modifier (⌥+key): that press was no dictation. Drop the take quietly:
+        no transcription, no "too short", no paste."""
+        if not self.recorder.is_recording:
+            return
+        self.recorder.stop()
+        self._drop_stream()
+        self._screen = None
+        self.state.recording = RecordingState.IDLE
         self.state.notify()
-        self._flow.recording_started(hands_free=hands_free)
+        self._flow.idle_if_recording()
 
     def _open_stream(self) -> None:
         """Key-down: stream this take to Sarvam while the user talks
@@ -767,7 +823,7 @@ class Daemon:
             ),
             silence_threshold=float(self.cfg["audio"].get("silence_threshold", 0.01)),
         )
-        self._widget = WidgetServer(on_message=self._flow.handle_action,
+        self._widget = WidgetServer(on_message=self._on_widget_action,
                                     on_connect=self._on_widget_connect)
 
     def _start_widget_channel(self) -> None:
@@ -846,6 +902,14 @@ class Daemon:
         except Exception as e:
             log_exception("daemon.widget", f"widget menu {action!r} failed", e)
 
+    def _on_widget_action(self, msg: dict) -> None:
+        """A click on the widget. Logged (the action only, never text) so a
+        paste after a cancel can be traced to Undo or to a missed cancel."""
+        action = msg.get("action") if isinstance(msg, dict) else None
+        if action in ("start", "confirm", "cancel", "undo", "retry", "copy", "dismiss"):
+            print(f"[daemon] widget {action} (state={self._flow.state})", flush=True)
+        self._flow.handle_action(msg)
+
     def _on_widget_connect(self) -> None:
         print("[daemon] flow widget connected", flush=True)
         self._send_widget(self._widget_config())
@@ -861,7 +925,10 @@ class Daemon:
             self._cancel_pending = False
 
     def _on_escape(self) -> None:
-        if self.recorder.is_recording:
+        # Recording: stop and discard. Processing: discard the result (the
+        # flow ignores Esc in every other state).
+        if self.recorder.is_recording or self._flow.state == FLOW_PROCESSING:
+            print(f"[daemon] Esc — cancel (state={self._flow.state})", flush=True)
             self._flow.handle_action({"action": "cancel"})
 
     def _start_worker(self, audio, ctx: RunContext, run: int) -> None:
@@ -1043,7 +1110,10 @@ class Daemon:
                     self._flow.tick()
                     # Only for a card the user can see: never paste a
                     # transcript they can't see into whatever gets focus.
-                    if self._flow.state == CARD and self._widget.connected \
+                    # Only the no-text-box card pastes itself on focus;
+                    # a card after a failed paste offers Copy instead.
+                    if self._flow.state == CARD and not self._flow.reason \
+                            and self._widget.connected \
                             and focused_editable() is True:
                         text = self._flow.text
                         print("[daemon] text box focused — pasting card text", flush=True)
@@ -1064,6 +1134,13 @@ class Daemon:
             self._stop_evt.wait(0.05)
 
     def on_record_stop(self) -> None:
+        # Under the flow lock, like every widget action: a key-up and a ✕ /
+        # Esc arriving together can't interleave, so the cancel either stops
+        # the recording itself or finds the run PROCESSING and discards it.
+        with self._flow.lock:
+            self._record_stop()
+
+    def _record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
         keyup_at = time.monotonic()
@@ -1083,6 +1160,7 @@ class Daemon:
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
                          selection=getattr(self, "_edit_selection", "") if edit_mode else "",
+                         command=getattr(self, "_command", None) if edit_mode else None,
                          keyup_at=keyup_at, record_s=record_s, stream=stream,
                          screen_terms=self._screen_terms())
         if self._cancel_pending:
@@ -1123,7 +1201,7 @@ class Daemon:
         # flashes back to idle in between.
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
-        run = self._flow.processing()
+        run = self._flow.processing(audio, ctx)
         self._start_worker(audio, ctx, run)
 
     def on_undo(self) -> None:
@@ -1193,30 +1271,66 @@ class Daemon:
         print(f"[daemon] dictionary reloaded ({len(self.dictionary.terms)} words)", flush=True)
 
     def on_edit_mode(self) -> None:
-        # Capture currently selected text (Cmd+C), then start recording.
+        # Text selected: rewrite it by voice. Nothing selected: command
+        # mode, write new text at the cursor (command_mode.py).
         try:
-            import pyperclip
-            import subprocess
-            prev = pyperclip.paste()
-            pyperclip.copy("")  # marker so we can detect copy success
-            time.sleep(0.05)
-            subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to keystroke "c" using command down'],
-                check=False,
-            )
-            time.sleep(0.15)
-            sel = pyperclip.paste()
-            pyperclip.copy(prev)
+            target = capture_paste_target()
+            sel = self._copy_selection(target)
             if not sel:
-                print("[daemon] edit mode: no selection", flush=True)
+                self._arm_command(target)
                 return
             self._edit_selection = sel
+            self._command = None
             self._edit_pending = True
             print(f"[daemon] edit mode armed; selection ({len(sel)} chars). Hold record key and speak instruction.", flush=True)
             self._show_edit_overlay(sel)
         except Exception as e:
             log_exception("daemon.edit_mode", "edit-mode trigger failed", e)
+
+    def _copy_selection(self, target) -> str:
+        """The selected text, via Cmd+C. "" when nothing is selected. A
+        caret with an empty selection skips the copy: VS Code and JetBrains
+        copy the whole line on Cmd+C, which would read as a selection."""
+        pid = getattr(target, "pid", 0) or 0
+        field = ax_field_text(pid, max_chars=MAX_FIELD_CHARS) if pid > 0 else None
+        if field is not None and field.sel_len == 0:
+            return ""
+        import pyperclip
+        import subprocess
+        prev = pyperclip.paste()
+        pyperclip.copy("")  # marker so we can detect copy success
+        time.sleep(0.05)
+        subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to keystroke "c" using command down'],
+            check=False,
+        )
+        time.sleep(0.15)
+        sel = pyperclip.paste()
+        pyperclip.copy(prev)
+        return sel
+
+    def _arm_command(self, target) -> None:
+        if target is None:
+            print("[daemon] edit mode: nothing selected and no app to write into", flush=True)
+            return
+        ctx_cfg = self.cfg.get("context") or {}
+        pending = command_mode.Pending(
+            target, include_screen=bool(ctx_cfg.get("command_screen", True)))
+        pending.on_ready = lambda c: self._on_command_context(pending, c)
+        self._edit_selection = ""
+        self._command = pending
+        self._edit_pending = True
+        print(f"[daemon] command mode armed (nothing selected) in {target.name or '?'}. "
+              "Hold record key and say what to write.", flush=True)
+        self._show_edit_overlay()
+        pending.start()
+
+    def _on_command_context(self, pending, c) -> None:
+        # Sizes only: the context itself is never logged.
+        print(f"[daemon] command context: {c.describe()}", flush=True)
+        if self._edit_pending and self._command is pending:
+            self._show_edit_overlay()   # swap "Reading…" for what was found
 
     # -- Edit overlay link (~/.openflow/edit-overlay.sock) ----------------
     # Same channel as the flow widget: the overlay process lives exactly as
@@ -1234,13 +1348,20 @@ class Daemon:
             log_exception("daemon.edit_overlay", "edit overlay socket unavailable", e)
             self._edit_overlay = None
 
-    def _show_edit_overlay(self, selection: str) -> None:
+    def _edit_overlay_msg(self, selection: str | None = None) -> dict:
+        cmd = getattr(self, "_command", None)
+        if cmd is not None:
+            return command_mode.overlay_message(cmd)
+        return {"type": "show",
+                "selection": self._edit_selection if selection is None else selection}
+
+    def _show_edit_overlay(self, selection: str | None = None) -> None:
         server = getattr(self, "_edit_overlay", None)
         if server is None:
             return
         # Already up: swap the text in place. Otherwise spawn it; it gets
         # the selection when it connects.
-        if not server.send({"type": "show", "selection": selection}):
+        if not server.send(self._edit_overlay_msg(selection)):
             _spawn_edit_overlay()
 
     def _close_edit_overlay(self) -> None:
@@ -1250,7 +1371,7 @@ class Daemon:
 
     def _on_edit_overlay_connect(self) -> None:
         if self._edit_pending:
-            self._edit_overlay.send({"type": "show", "selection": self._edit_selection})
+            self._edit_overlay.send(self._edit_overlay_msg())
         else:
             self._edit_overlay.send({"type": "close"})  # the edit ended before it came up
 
@@ -1267,6 +1388,15 @@ class Daemon:
     def _stale(self, run: int) -> None:
         print(f"[daemon] pipeline run {run} no longer owns the widget — result not shown",
               flush=True)
+
+    def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
+        """True (and logs) if the user cancelled this run: its text must
+        not be pasted, copied or saved."""
+        if not self._flow.is_cancelled(run):
+            return False
+        self._abort_stream(ctx)
+        print(f"[daemon] pipeline run {run} cancelled {where} — result discarded", flush=True)
+        return True
 
     def _pipeline_worker(self, audio, ctx: RunContext | None, run: int) -> None:
         ctx = ctx or RunContext()
@@ -1287,6 +1417,8 @@ class Daemon:
             timings["record"] = ctx.record_s
         start = ctx.keyup_at if ctx.keyup_at is not None else time.monotonic()
         try:
+            if self._discarded(run, ctx, "before transcription"):
+                return  # e.g. cancelled while queued behind another dictation
             t0 = time.monotonic()
             tone = self._tone_for(target)
             if tone != self.state.tone:
@@ -1319,10 +1451,23 @@ class Daemon:
             if not raw.strip():
                 self._flow.done(run=run) or self._stale(run)
                 return
+            if self._discarded(run, ctx, "after transcription"):
+                return
 
             if ctx.edit_mode:
                 instruction = raw.strip()
-                final = self.ai.edit_selection(ctx.selection, instruction)
+                try:
+                    if ctx.command is not None:
+                        cc = ctx.command.result()
+                        print(f"[daemon] command in {cc.app or '?'}: {cc.describe()}", flush=True)
+                        final = command_mode.write(self.ai, cc, instruction)
+                    else:
+                        final = self.ai.edit_selection(ctx.selection, instruction)
+                except Exception as e:
+                    # The field is untouched; keep the take for Retry.
+                    log_exception("daemon.pipeline", "edit/command LLM call failed — offering Retry", e)
+                    self._flow.failed(audio, ctx, run=run, reason=WRITE_FAILED) or self._stale(run)
+                    return
             else:
                 final = self._post_process(raw, tone=tone, target=target,
                                            screen_terms=ctx.screen_terms)
@@ -1333,9 +1478,15 @@ class Daemon:
             if not final:
                 self._flow.done(run=run) or self._stale(run)
                 return
+            # Last chance: a cancel from here on is too late (commit marks
+            # the run as pasting under the flow lock).
+            if not self._flow.commit(run):
+                self._discarded(run, ctx, "before paste")
+                return
 
             self.state.last_pasted = final
-            if not ctx.edit_mode and focused_editable(target) is False:
+            if (not ctx.edit_mode or ctx.command is not None) \
+                    and focused_editable(target) is False:
                 set_clipboard(final)   # even if the card can't be shown
                 print("[daemon] no text box focused — showing card", flush=True)
                 self._flow.show_card(final, run=run) or self._stale(run)
@@ -1346,18 +1497,22 @@ class Daemon:
                 print(f"[daemon] paste {paste_status}", flush=True)
                 if paste_status == "pasted":
                     self._watch_paste(final, target)
-                if paste_status in ("clipboard", "failed"):
-                    # Accessibility missing or paste failed: never lose the
-                    # text (spec §8).
-                    self._flow.show_card(final, run=run) or self._stale(run)
-                else:
                     sounds.play("paste")
                     self._flow.done(run=run) or self._stale(run)
+                else:
+                    # It could not have landed: never lose the text — it's
+                    # on the clipboard and in the card (spec §8).
+                    self._flow.show_card(final, run=run, reason=NOT_PASTED) \
+                        or self._stale(run)
             t3 = time.monotonic()
             timings["paste"] = t3 - t2
             timings["total"] = t3 - start
+            # Log only (not a history column): key-up handling between the
+            # recorder stopping and this worker starting on the transcript.
+            handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
+                       if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
-                f"{k}={v:.2f}s" for k, v in timings.items()), flush=True)
+                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff, flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
             if hist_cfg["enabled"]:
                 self.history.add(
@@ -1511,7 +1666,8 @@ class Daemon:
         # is_active: the widget (✓ / ✕) or Esc can stop a double-tap toggle
         # session; the key must then treat its next press as a fresh hold.
         return HoldToTalk(hold_key, self._on_hold_press, self.on_record_stop,
-                          is_active=lambda: self.recorder.is_recording)
+                          is_active=lambda: self.recorder.is_recording,
+                          on_cancel=self._on_hold_cancel)
 
     def _chord_bindings(self, hk: dict) -> dict[str, callable]:
         chords: dict[str, callable] = {}

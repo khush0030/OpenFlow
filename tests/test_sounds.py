@@ -20,6 +20,7 @@ import sounds
     ("silent", "processing", "stop"),
     ("recording", "cancelled", "cancel"),
     ("silent", "cancelled", "cancel"),
+    ("processing", "cancelled", "cancel"),  # ✕ / Esc while transcribing
     ("processing", "error", "error"),
     ("cancelled", "processing", None),   # Undo re-runs kept audio: no stop tick
     ("error", "processing", None),       # Retry

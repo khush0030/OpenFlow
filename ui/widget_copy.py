@@ -8,9 +8,13 @@ MIC_SETTINGS = "Mic settings"
 CANCELLED = "Transcript cancelled"
 UNDO = "Undo"
 ERROR = "Couldn't transcribe"
+WRITE_ERROR = "Couldn't write that"   # edit / command: the LLM call failed
 RETRY = "Retry"
 CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"
+# Card after a paste that couldn't land (state 6, reason "not_pasted").
+CARD_NOT_PASTED_HEADING = "Couldn't paste"
+CARD_NOT_PASTED_HINT = "On your clipboard · ⌘V to paste"
 COPY = "Copy"
 MENU_APPEARANCE = "Appearance"
 MENU_HIDE = "Hide for 1 hour"

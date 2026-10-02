@@ -22,6 +22,11 @@ CARD = "card"
 CANCELLED = "cancelled"
 ERROR = "error"
 NO_AUDIO = "no_audio"   # ERROR reason: the mic gave nothing at all
+# CARD reason: the paste could not have landed (no Accessibility, the app
+# wasn't in front, Cmd+V couldn't be sent). The card offers Copy and never
+# pastes itself into a focused text box. "" = no text box focused.
+NOT_PASTED = "not_pasted"
+WRITE_FAILED = "write_failed"  # ERROR reason: the edit/command LLM call failed
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
@@ -84,6 +89,20 @@ class FlowController:
         # Id of the pipeline run that owns PROCESSING. Results passed with
         # run= only land if that run still owns the widget.
         self.run = 0
+        # The take being processed, kept so a cancel mid-processing can offer
+        # Undo like a cancel mid-recording.
+        self._inflight: Optional[tuple[Any, Any]] = None
+        # Runs the user cancelled (✕ / Esc while processing): their result
+        # must never be pasted, copied or saved (see commit()).
+        self._cancelled_runs: set[int] = set()
+        # The run that passed commit(): it is pasting, too late to cancel.
+        self._committed_run = 0
+
+    @property
+    def lock(self) -> threading.RLock:
+        """Held by every widget action. The daemon's key-up stop takes it too,
+        so a stop and a ✕ / Esc cancel never interleave."""
+        return self._lock
 
     # -- outgoing ---------------------------------------------------------
     def message(self) -> dict:
@@ -99,6 +118,8 @@ class FlowController:
     def _set(self, state: str, text: str = "", reason: str = "") -> None:
         if state not in (RECORDING, SILENT):
             self.hands_free = False
+        if state != PROCESSING:
+            self._inflight = None
         self.reason = reason
         self.state = state
         self.text = text
@@ -131,12 +152,45 @@ class FlowController:
                 if self.state == SILENT:
                     self._set(RECORDING)
 
-    def processing(self) -> int:
-        """Enter PROCESSING for a new pipeline run; returns its run id."""
+    def processing(self, audio: Any = None, target: Any = None) -> int:
+        """Enter PROCESSING for a new pipeline run; returns its run id.
+        `audio`/`target`: the take, kept for Undo if the run is cancelled."""
         with self._lock:
             self.run += 1
+            self._inflight = (audio, target) if audio is not None else None
             self._set(PROCESSING)
             return self.run
+
+    def cancel_processing(self) -> bool:
+        """✕ / Esc while the take is being transcribed or cleaned up: the
+        run's result is discarded (commit() refuses it) and the widget shows
+        Cancelled, with Undo if the take is known. False when there is no
+        run to cancel, or it is already pasting."""
+        with self._lock:
+            if self.state != PROCESSING or self.run == self._committed_run:
+                return False
+            self._cancelled_runs.add(self.run)
+            kept, self._inflight = self._inflight, None
+            self._retained = (None if kept is None else
+                              _Retained(kept[0], kept[1], self._clock() + UNDO_WINDOW_S))
+            self._set(CANCELLED)
+            return True
+
+    def is_cancelled(self, run: Optional[int]) -> bool:
+        with self._lock:
+            return run is not None and run in self._cancelled_runs
+
+    def commit(self, run: Optional[int]) -> bool:
+        """The worker is about to paste / copy / save run's result. False if
+        the user cancelled the run; otherwise the run is marked as pasting so
+        a cancel from now on is too late (and is ignored, not shown).
+        Checked and marked under the lock, so a cancel can't slip between."""
+        with self._lock:
+            if self.is_cancelled(run):
+                return False
+            if run is not None and run == self.run:
+                self._committed_run = run
+            return True
 
     def _owns(self, run: Optional[int]) -> bool:
         """run=None: unconditional (today's behaviour). Otherwise only the
@@ -161,12 +215,12 @@ class FlowController:
             self.done()
             return True
 
-    def show_card(self, text: str, run: Optional[int] = None) -> bool:
+    def show_card(self, text: str, run: Optional[int] = None, reason: str = "") -> bool:
         with self._lock:
             if not self._owns(run):
                 return False
             self._card_expires_at = self._clock() + CARD_WINDOW_S
-            self._set(CARD, text)
+            self._set(CARD, text, reason=reason)
             return True
 
     def cancelled(self, audio: Any, target: Any) -> None:
@@ -174,12 +228,13 @@ class FlowController:
             self._retained = _Retained(audio, target, self._clock() + UNDO_WINDOW_S)
             self._set(CANCELLED)
 
-    def failed(self, audio: Any, target: Any, run: Optional[int] = None) -> bool:
+    def failed(self, audio: Any, target: Any, run: Optional[int] = None,
+               reason: str = "") -> bool:
         with self._lock:
             if not self._owns(run):
                 return False
             self._retained = _Retained(audio, target, self._clock() + RETRY_WINDOW_S)
-            self._set(ERROR)
+            self._set(ERROR, reason=reason)
             return True
 
     def no_audio(self, audio: Any, target: Any) -> None:
@@ -230,13 +285,15 @@ class FlowController:
                 self._hooks.finish_recording()
             elif action == "cancel" and self.state in (RECORDING, SILENT):
                 self._hooks.cancel_recording()
+            elif action == "cancel" and self.state == PROCESSING:
+                self.cancel_processing()
             elif (action == "undo" and self.state == CANCELLED) or \
                     (action == "retry" and self.state == ERROR):
                 kept = self._take_retained()
                 if kept is None:
                     self.done()
                 else:
-                    run = self.processing()
+                    run = self.processing(kept.audio, kept.target)
                     try:
                         self._hooks.rerun(kept.audio, kept.target, run)
                     except Exception as e:

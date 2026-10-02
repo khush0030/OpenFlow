@@ -135,6 +135,20 @@ def test_recording_buttons_hit_test(fa):
     assert fa.client.sent[-1] == {"action": "confirm"}
 
 
+def test_processing_x_cancels_and_tick_is_inert(fa):
+    # The processing pill still draws ✕ and ✓; ✕ used to be a dead button,
+    # so the transcript pasted after the user had clicked cancel.
+    fa._on_message({"type": "state", "state": "processing", "text": ""})
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (22, 88)
+    assert fa.widget.hit(QPointF(fw.M + 11, fw.M + 11)) == "x"
+    assert fa.widget.hit(QPointF(fw.M + 11, fw.M + 88 - 11)) is None
+    before = list(fa.client.sent)
+    fa.widget.click(QPointF(fw.M + 11, fw.M + 88 - 11))
+    assert fa.client.sent == before
+    fa.widget.click(QPointF(fw.M + 11, fw.M + 11))
+    assert fa.client.sent[-1] == {"action": "cancel"}
+
+
 def test_silent_shows_cant_hear_toast(fa):
     fa._on_message({"type": "state", "state": "silent", "text": ""})
     assert isinstance(fa.popup, fw.Toast)
@@ -147,6 +161,18 @@ def test_card_shows_text_and_copy(fa):
     assert "hello &lt;world&gt;" in fa.popup.body_label.text()
     fa.popup.copy_button.click()
     assert fa.client.sent[-1] == {"action": "copy"}
+
+
+def test_not_pasted_card_says_so(fa):
+    from ui import widget_copy as copy
+    from PyQt6.QtWidgets import QLabel
+    fa._on_message({"type": "state", "state": "card", "text": "hi", "reason": "not_pasted"})
+    labels = [l.text() for l in fa.popup.findChildren(QLabel)]
+    assert copy.CARD_NOT_PASTED_HEADING in labels and copy.CARD_NOT_PASTED_HINT in labels
+    assert copy.CARD_HEADING not in labels and copy.CARD_HINT not in labels
+    fa._on_message({"type": "state", "state": "card", "text": "hi"})
+    labels = [l.text() for l in fa.popup.findChildren(QLabel)]
+    assert copy.CARD_HEADING in labels and copy.CARD_HINT in labels
 
 
 def test_menu_choices_apply_and_persist(fa):
@@ -788,3 +814,12 @@ def test_no_audio_error_shows_cant_hear_with_mic_settings(fa):
     # A transcription failure right after swaps the toast back to Retry.
     fa._on_message({"type": "state", "state": "error", "text": ""})
     assert fa.popup.button.text() == "Retry"
+
+
+def test_write_failed_error_says_so_and_offers_retry(fa):
+    # Edit / command mode: heard the instruction, the LLM call failed.
+    fa._on_message({"type": "state", "state": "error", "text": "", "reason": "write_failed"})
+    assert isinstance(fa.popup, fw.Toast)
+    assert fa.popup.button.text() == "Retry"
+    labels = [w.text() for w in fa.popup.findChildren(fw.QLabel)]
+    assert "Couldn't write that" in labels

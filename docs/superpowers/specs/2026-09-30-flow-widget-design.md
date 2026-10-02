@@ -260,7 +260,17 @@ watcher polls focus at 4 Hz while the card is open and uses the same classifier.
   respawns it if no connection for 5 s.
 - Accessibility missing → paste is clipboard-only (current behaviour) and the
   card (state 6) is shown so the text is never lost.
-- Mic settings / Undo / Retry actions arriving in the wrong state are ignored.
+- Paste could not land (2026-10-02) → the card is shown with reason
+  `not_pasted` (heading "Couldn't paste", hint "On your clipboard · ⌘V to
+  paste", Copy, **no click-to-paste**) only on positive evidence: no
+  Accessibility, the target app couldn't be brought to (or lost) the front,
+  or ⌘V couldn't be sent. After ⌘V the daemon looks at the focused field
+  over AX for ≤ 0.3 s: text seen before the caret → pasted (verified);
+  field unreadable, showing its placeholder (`AXPlaceholderValue`, e.g. VS
+  Code's Claude Code input) or unchanged → pasted (unverified, logged), no
+  card. ⌘V waits up to 1 s for a held hotkey (⌥) to come up and is posted
+  from an event source that suppresses the user's keys, so it can't arrive
+  as ⌘⌥V.
 
 ## 9. Testing
 

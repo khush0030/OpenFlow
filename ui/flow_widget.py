@@ -503,7 +503,7 @@ class Card(Surface):
     BODY_W = W - 32  # inside the 16 pt side margins
 
     def __init__(self, theme: Theme, text: str, on_copy, on_dismiss,
-                 max_height: float | None = None) -> None:
+                 max_height: float | None = None, not_pasted: bool = False) -> None:
         super().__init__(theme, radius=18)
         self.setFixedWidth(self.W + 2 * M)
         muted = f"color:{css(theme.muted)};background:transparent;"
@@ -514,7 +514,7 @@ class Card(Surface):
         head = QHBoxLayout()
         head.setSpacing(9)
         head.addWidget(MarkIcon(theme))
-        heading = QLabel(copy.CARD_HEADING)
+        heading = QLabel(copy.CARD_NOT_PASTED_HEADING if not_pasted else copy.CARD_HEADING)
         heading.setFont(ui_font(12, 500))
         heading.setStyleSheet(muted)
         head.addWidget(heading, 1)
@@ -556,7 +556,7 @@ class Card(Surface):
         foot = QHBoxLayout()
         foot.setSpacing(7)
         foot.addWidget(PulseDot(theme))
-        hint = QLabel(copy.CARD_HINT)
+        hint = QLabel(copy.CARD_NOT_PASTED_HINT if not_pasted else copy.CARD_HINT)
         hint.setFont(ui_font(12))
         hint.setStyleSheet(muted)
         foot.addWidget(hint, 1)
@@ -773,6 +773,13 @@ class FlowWidget(QWidget):
                 return "x"
             if math.hypot(pos.x() - ok.x(), pos.y() - ok.y()) <= 11 * S:
                 return "ok"
+        if self.view == "processing":
+            # The pill still shows ✕ while the take is transcribed: it must
+            # cancel (the daemon then discards the result), not be a dead
+            # button that lets the text paste anyway.
+            x, _ok = self._button_centers(r)
+            if math.hypot(pos.x() - x.x(), pos.y() - x.y()) <= 11 * S:
+                return "x"
         return None
 
     # painting
@@ -1183,11 +1190,14 @@ class FlowApp(QObject):
         if v == "error" and self.reason == "no_audio":
             # The take was silent end to end: nothing to retry; check the mic.
             return Toast(th, copy.CANT_HEAR, copy.MIC_SETTINGS, open_mic_settings)
+        if v == "error" and self.reason == "write_failed":
+            # Edit / command: heard you, the model call failed; text untouched.
+            return Toast(th, copy.WRITE_ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "error":
             return Toast(th, copy.ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "card":
             return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
-                        max_height=max_height)
+                        max_height=max_height, not_pasted=self.reason == "not_pasted")
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:

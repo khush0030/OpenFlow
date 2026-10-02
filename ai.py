@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from llm import ChatProvider, SarvamChat
-from prompts import (FORMAT_ONLY, FORMAT_TASKS, PROMPTS, SELF_CORRECTION,
+from prompts import (FORMAT_ONLY, FORMAT_TASKS, PARAGRAPH_STARTS, PROMPTS, SELF_CORRECTION,
                      SELF_CORRECTION_TONES, SNIPPET_MARK, SNIPPET_NOTE, context_note)
 
 
@@ -89,6 +89,14 @@ class AIProcessor:
         system = FORMAT_ONLY.rstrip() + "".join("\n\n" + e for e in extras)
         return self._call(system, text, self.provider)
 
+    def paragraph_starts(self, numbered: str) -> str:
+        """Verbatim paragraphs: `numbered` is formatting.numbered_sentences()
+        text; the reply names the sentences that start a paragraph
+        (formatting.parse_paragraph_starts reads it)."""
+        if not numbered.strip():
+            return ""
+        return self._call(PARAGRAPH_STARTS, numbered, self.provider)
+
     def transliterate_to_roman(self, hindi_text: str) -> str:
         if not hindi_text.strip():
             return hindi_text
@@ -104,3 +112,8 @@ class AIProcessor:
             selection=selection, instruction=instruction
         )
         return self._call("You are an inline text editor.", prompt, self.provider)
+
+    def command(self, system: str, user: str) -> str:
+        """Command mode (command_mode.build_prompt): write new text from a
+        spoken instruction plus the context around the cursor."""
+        return self._call(system, user, self.provider)

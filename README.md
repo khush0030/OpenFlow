@@ -169,7 +169,7 @@ Override in `~/.openflow/config.toml`.
 |---|---|
 | **Hold to talk** *or* double-tap to toggle | `Right Cmd` (`cmd_r`) |
 | Cycle tone mode | `F6` |
-| Edit mode (rewrite selection) | `Cmd+Shift+E` |
+| Edit mode (rewrite selection) / command mode (nothing selected) | `Cmd+Shift+E` |
 | Undo last paste *(stub)* | `Cmd+Shift+Z` |
 
 **Two ways to dictate with the same key:**
@@ -195,6 +195,16 @@ With `general.always_english_output = true` (default), every mode except `hi`,
 2. Press `Cmd+Shift+E` — the selection is captured.
 3. Hold the record key and speak an instruction ("make this more concise", "translate to Hindi").
 4. Release. The selection is replaced with the rewritten text.
+
+### Command mode
+
+Press `Cmd+Shift+E` with **nothing selected** (cursor in a reply box), hold the
+record key and say what to write: "reply saying yes but push to Friday". The
+text around the cursor and the nearby on-screen text (the message you're
+replying to, capped) go to the cleanup LLM, and the reply is typed at the
+cursor. If the model call fails, the widget offers Retry and the field is left
+untouched. Set `[context] command_screen = false` to send only the text box's
+own text. Spec: `docs/superpowers/specs/2026-10-02-command-mode.md`.
 
 ### Custom dictionary
 
