@@ -30,6 +30,12 @@ class Entry:
     t_cleanup: float | None = None
     t_paste: float | None = None
     t_total: float | None = None
+    # Provider failover: which STT step produced the transcript ('stream',
+    # 'upload', 'groq') and which LLM cleaned it ('sarvam', 'groq',
+    # 'anthropic'; 'none' = no provider answered, pasted uncleaned;
+    # 'skipped' = no LLM call). None for rows saved before.
+    stt_path: str | None = None
+    cleanup_provider: str | None = None
 
 
 SCHEMA = """
@@ -58,6 +64,9 @@ TIMING_STAGES = ("record", "encode", "stt", "cleanup", "paste", "total")
 _TIMING_COLS = tuple(f"t_{s}" for s in TIMING_STAGES)
 
 _COLS = "id, ts, raw, final, tone, lang, duration, app, " + ", ".join(_TIMING_COLS)
+# Provider failover columns (added by migration below).
+_FAILOVER_COLS = ("stt_path", "cleanup_provider")
+_COLS += ", " + ", ".join(_FAILOVER_COLS)
 
 
 def _like(text: str) -> str:
@@ -92,6 +101,10 @@ class History:
             for col in _TIMING_COLS:
                 if col not in cols:
                     c.execute(f"ALTER TABLE dictations ADD COLUMN {col} REAL")
+            # Provider failover: stt_path, cleanup_provider (NULL for older rows).
+            for col in _FAILOVER_COLS:
+                if col not in cols:
+                    c.execute(f"ALTER TABLE dictations ADD COLUMN {col} TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -105,21 +118,25 @@ class History:
     def add(self, raw: str, final: str, tone: str, lang: str, duration: float,
             app: str | None = None, cap: int | None = None,
             ts: float | None = None,
-            timings: dict[str, float] | None = None) -> None:
+            timings: dict[str, float] | None = None,
+            stt_path: str | None = None,
+            cleanup_provider: str | None = None) -> None:
         """Insert a dictation. With a positive `cap` ([history] size_cap),
         the oldest rows are then pruned so at most `cap` remain. `timings`
-        maps TIMING_STAGES names to seconds; missing stages are stored NULL."""
+        maps TIMING_STAGES names to seconds; missing stages are stored NULL.
+        stt_path / cleanup_provider: see Entry."""
         t = timings or {}
         stage_vals = tuple(
             None if t.get(s) is None else float(t[s]) for s in TIMING_STAGES
         )
+        cols = _TIMING_COLS + _FAILOVER_COLS
         with self._conn() as c:
             c.execute(
                 "INSERT INTO dictations(ts, raw, final, tone, lang, duration, app, "
-                + ", ".join(_TIMING_COLS) + ") "
-                "VALUES(" + ",".join("?" * (7 + len(_TIMING_COLS))) + ")",
+                + ", ".join(cols) + ") "
+                "VALUES(" + ",".join("?" * (7 + len(cols))) + ")",
                 (time.time() if ts is None else ts, raw, final, tone, lang, duration, app,
-                 *stage_vals),
+                 *stage_vals, stt_path, cleanup_provider),
             )
             if cap and cap > 0:
                 c.execute(

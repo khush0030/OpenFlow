@@ -87,6 +87,8 @@ from paste import (paste, get_active_app, capture_front_app, capture_paste_targe
                    focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
+import groq_stt
+import llm
 from sarvam import STT_URL, warm
 from dictionary import Dictionary
 from autolearn import AutoLearner, Correction, PasteWatch
@@ -352,6 +354,8 @@ class Daemon:
             model=sarvam_cfg.get("stt_model", "saaras:v4"),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
             streaming=sarvam_cfg.get("streaming", "auto"),
+            # Provider failover: Groq Whisper after Sarvam, read per take.
+            fallback=lambda: groq_stt.from_config(self.cfg),
         )
         self._stream_enabled = True   # see _open_stream
         self._stream = None
@@ -362,7 +366,7 @@ class Daemon:
             model=sarvam_cfg.get("chat_model", "sarvam-105b"),
             max_tokens=int(sarvam_cfg.get("max_tokens", 1024)),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
-        ), provider=make_cleanup_provider(self.cfg))
+        ), provider=llm.with_failover(make_cleanup_provider(self.cfg), self.cfg))
         print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
@@ -662,7 +666,12 @@ class Daemon:
                 **extra,
             ))
         except Exception as e:
-            log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
+            # Provider failover: no provider answered in its budget. Paste
+            # the transcript as spoken, with the layout Python can do alone.
+            print(f"[daemon] cleanup unavailable ({str(e)[:160]}) — "
+                  "pasted the transcript uncleaned", flush=True)
+            if structure:
+                corrected = formatting.format_local(corrected, email=email).text
             return done(corrected)
 
     # -- Hotkey callbacks ------------------------------------------------
@@ -1019,9 +1028,12 @@ class Daemon:
             print(f"[daemon] streaming STT -> {streaming}", flush=True)
         if ch.cleanup is not None:
             self.cfg["cleanup"] = ch.cleanup
-            self.ai.provider = make_cleanup_provider(self.cfg)
+            self.ai.provider = llm.with_failover(make_cleanup_provider(self.cfg), self.cfg)
             print(f"[daemon] cleanup LLM -> {self.ai.provider.name} "
                   f"({self.ai.provider.model})", flush=True)
+        # [failover]: read per take (groq_stt.from_config) and per failure (llm).
+        if isinstance(fresh.get("failover"), dict):
+            self.cfg["failover"] = fresh["failover"]
 
     def choose_tone(self, tone: ToneMode) -> None:
         """A tone picked from a menu (menu bar or widget) becomes the default."""
@@ -1441,9 +1453,11 @@ class Daemon:
             if encode_s is not None:
                 timings["encode"] = encode_s
             timings["stt"] = stt_t.get("stt", (t1 - t0) - (encode_s or 0.0))
+            stt_path = getattr(self.transcriber, "last_path", None)
             print(
                 f"[daemon] sarvam-stt {t1-t0:.2f}s "
-                f"via={getattr(self.transcriber, 'last_source', 'batch')} mode={opts.mode} "
+                f"via={stt_path or getattr(self.transcriber, 'last_source', 'batch')} "
+                f"mode={opts.mode} "
                 f"lang={opts.language_code!r} "
                 f"trimmed={getattr(self.transcriber, 'last_trimmed_s', 0.0):.2f}s: {raw!r}",
                 flush=True,
@@ -1454,6 +1468,7 @@ class Daemon:
             if self._discarded(run, ctx, "after transcription"):
                 return
 
+            llm.trace_start()    # which LLM answered (history cleanup_provider)
             if ctx.edit_mode:
                 instruction = raw.strip()
                 try:
@@ -1474,6 +1489,7 @@ class Daemon:
 
             t2 = time.monotonic()
             timings["cleanup"] = t2 - t1
+            cleanup_provider = llm.trace_result()
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
                 self._flow.done(run=run) or self._stale(run)
@@ -1512,7 +1528,8 @@ class Daemon:
             handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
                        if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
-                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff, flush=True)
+                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff
+                + f" stt_path={stt_path} cleanup={cleanup_provider}", flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
             if hist_cfg["enabled"]:
                 self.history.add(
@@ -1524,6 +1541,8 @@ class Daemon:
                     app=getattr(target, "name", None) or None,
                     cap=int(hist_cfg["size_cap"]),
                     timings=timings,
+                    stt_path=stt_path,
+                    cleanup_provider=cleanup_provider,
                 )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
