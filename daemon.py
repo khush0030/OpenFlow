@@ -1374,8 +1374,12 @@ class Daemon:
             t3 = time.monotonic()
             timings["paste"] = t3 - t2
             timings["total"] = t3 - start
+            # Log only (not a history column): key-up handling between the
+            # recorder stopping and this worker starting on the transcript.
+            handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
+                       if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
-                f"{k}={v:.2f}s" for k, v in timings.items()), flush=True)
+                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff, flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
             if hist_cfg["enabled"]:
                 self.history.add(
