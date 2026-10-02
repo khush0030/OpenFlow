@@ -126,7 +126,7 @@ def test_escape_hangs_up_which_the_daemon_sees(link):
 
 def test_timeout_hangs_up(link):
     lk, srv, quits, gone = link
-    lk._timeout.setInterval(50)
+    lk.timeout_s = 0.05
     srv.send({"type": "show", "selection": "x"})
     assert wait_for(lambda: quits == [1])
     assert wait_for(lambda: gone == [1])
@@ -174,6 +174,64 @@ def test_edit_show_keeps_the_edit_look(link):
     assert lk.overlay.mode == "edit"
     assert lk.overlay._caption.text() == eo.EDIT_CAPTION
     assert lk.overlay._note.isHidden()
+
+
+# -- One step: listening from the hotkey on (Phase 5) ---------------------------
+
+def test_listening_show_says_it_is_listening_and_how_to_finish(link):
+    lk, srv, _quits, _gone = link
+    srv.send({"type": "show", "selection": "Selected text", "phase": "listening",
+              "hotkey": "⌘⇧E"})
+    assert wait_for(lambda: lk.overlay is not None)
+    ov = lk.overlay
+    assert ov.phase == "listening" and ov._caption.text() == eo.EDIT_LISTENING
+    assert not ov._hint.isHidden()
+    assert "⌘⇧E" in ov._hint.text() and "Esc" in ov._hint.text()
+    assert ov.selection_text() == "Selected text"
+
+
+def test_command_listening_then_working_in_the_same_window(link):
+    lk, srv, _quits, _gone = link
+    # Listening before the selection is known: no card, no note yet.
+    srv.send({"type": "show", "mode": "pending", "selection": "",
+              "phase": "listening", "hotkey": "⌘⇧E"})
+    assert wait_for(lambda: lk.overlay is not None)
+    ov = lk.overlay
+    assert ov._caption.text() == eo.PENDING_LISTENING
+    assert ov._sel.isHidden() and ov._note.isHidden() and not ov._hint.isHidden()
+    srv.send({"type": "show", "mode": "command", "selection": "",
+              "note": "Reading the text around your cursor…",
+              "phase": "listening", "hotkey": "⌘⇧E"})
+    assert wait_for(lambda: ov._caption.text() == eo.COMMAND_LISTENING)
+    assert ov._sel.isHidden()
+    srv.send({"type": "show", "mode": "command", "selection": "the thread",
+              "note": "Writing in Slack with the text around your cursor.",
+              "phase": "working", "hotkey": "⌘⇧E"})
+    assert wait_for(lambda: ov._caption.text() == eo.COMMAND_WORKING)
+    assert lk.overlay is ov and ov._hint.isHidden()
+    assert ov.selection_text() == "the thread"
+
+
+def test_old_show_without_a_phase_keeps_the_armed_caption(link):
+    lk, srv, _quits, _gone = link
+    srv.send({"type": "show", "selection": "x"})
+    assert wait_for(lambda: lk.overlay is not None)
+    assert lk.overlay.phase == "armed" and lk.overlay._hint.isHidden()
+
+
+def test_a_listening_take_is_not_cut_off_by_the_armed_timeout(link):
+    lk, srv, quits, _gone = link
+    lk.timeout_s = 0.05
+    srv.send({"type": "show", "selection": "x", "phase": "listening"})
+    assert wait_for(lambda: lk.overlay is not None)
+    assert not wait_for(lambda: quits == [1], timeout=0.3)
+    assert lk._timeout.isActive()
+    assert lk._timeout.interval() == eo.LIVE_TIMEOUT_SECONDS * 1000
+
+
+def test_hint_without_a_hotkey():
+    assert eo.hint_for("listening", "") == "Pause when you're done · Esc cancels"
+    assert eo.hint_for("armed", "⌘⇧E") == ""
 
 
 def test_open_fails_cleanly_without_a_daemon():
