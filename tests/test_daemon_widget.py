@@ -17,7 +17,7 @@ import pytest
 
 import daemon as dm
 import flow_state
-from flow_state import CANCELLED, CARD, ERROR, IDLE, PROCESSING, RECORDING
+from flow_state import CANCELLED, CARD, DONE, ERROR, IDLE, PROCESSING, RECORDING
 from state import DaemonState, LanguageMode, ToneMode
 from transcribe import TranscribeOptions
 
@@ -178,7 +178,7 @@ def test_stale_paste_result_does_not_idle_live_recording(env):
 def test_fresh_results_still_drive_the_widget(env, monkeypatch):
     d = make_daemon()
     work(d, d._flow.processing())
-    assert d._flow.state == IDLE
+    assert d._flow.state == DONE  # widget 2.0: a paste shows DONE (idle at rest)
 
     monkeypatch.setattr(dm, "focused_editable", lambda target=None: False)
     work(d, d._flow.processing())
@@ -203,7 +203,7 @@ def test_older_pipeline_result_keeps_newer_undo_window(env, monkeypatch):
         work(d, run1)                        # dictation 1 finishes
         assert d._flow.state == CANCELLED
         d._flow.handle_action({"action": "undo"})
-        assert d._flow.state == (IDLE if editable is None else CARD)  # undo ran dictation 2
+        assert d._flow.state == (DONE if editable is None else CARD)  # undo ran dictation 2
 
 
 # -- Review fix 2: Undo/Retry while another pipeline is busy ---------------
@@ -221,7 +221,7 @@ def test_undo_while_busy_too_long_offers_retry_and_keeps_audio(env):
     d._busy.release()
     d._flow.handle_action({"action": "retry"})
     assert ("paste", "hello world") in env["calls"]
-    assert d._flow.state == IDLE
+    assert d._flow.state == DONE
 
 
 # -- Review fix 3: Retry keeps edit mode and the original selection -------
@@ -306,11 +306,13 @@ def test_paste_that_could_not_land_shows_the_not_pasted_card(env, monkeypatch, s
     assert "paste" not in played                             # no success cue
 
 
-def test_confirmed_paste_plays_cue_and_goes_idle(env, monkeypatch):
+def test_confirmed_paste_plays_cue_and_goes_done_then_idle(env, monkeypatch):
     played = []
     monkeypatch.setattr(dm.sounds, "play", played.append)
     d = make_daemon()
     work(d, d._flow.processing())
+    assert d._flow.state == DONE and played == ["paste"]   # idle at rest, actions on hover
+    d._flow.dismiss()
     assert d._flow.state == IDLE and played == ["paste"]
 
 
@@ -426,7 +428,8 @@ def test_external_settings_change_is_pushed(env):
     assert d.cfg["widget"]["appearance"] == "ink"
     assert d._widget.sent[-1] == {"type": "config", "position": "right",
                                   "appearance": "ink", "hold_key": "cmd_r",
-                                  "tone": d.state.tone.value, "mic": "default"}
+                                  "tone": d.state.tone.value,
+                                  "language": d.state.language.value, "mic": "default"}
 
 
 @pytest.mark.parametrize("error", [ValueError("bad"), OSError("disk full")])
@@ -562,7 +565,7 @@ def test_second_dictation_waits_for_the_first_and_then_pastes(env):
     t.join(2)
     assert not t.is_alive()
     assert ("paste", "hello world") in env["calls"]
-    assert d._flow.state == IDLE
+    assert d._flow.state == DONE
 
 
 def test_busy_wait_is_generous():

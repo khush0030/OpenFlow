@@ -131,7 +131,7 @@ def test_retry_success_fills_the_same_row_and_drops_audio(nd, env):
     nd.transcriber.down = False
     nd._flow.handle_action({"action": "retry"})
     assert ("paste", "hello world") in env["calls"]
-    assert nd._flow.state == IDLE
+    assert nd._flow.state == "done"          # pasted (widget 2.0 done state)
     [row] = nd.history.recent()              # no second row
     assert row.final == "hello world" and row.status == STATUS_RETRIED
     assert row.audio_path is None and saved_files(nd) == []

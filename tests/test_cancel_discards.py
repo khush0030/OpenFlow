@@ -222,7 +222,7 @@ def test_cancel_once_pasting_is_too_late_and_shows_nothing_false(env, monkeypatc
     d._pipeline_worker(AUDIO, dm.RunContext(), run)
     assert ("paste", "hello world") in env["calls"]
     assert len(d.history.rows) == 1
-    assert d._flow.state == IDLE
+    assert d._flow.state == "done"   # pasted (widget 2.0 done state)
 
 
 # -- cue, Undo, and runs a cancel must not touch -----------------------------

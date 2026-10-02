@@ -35,6 +35,15 @@ OFFLINE = "offline"
 # CARD reason: the text of an earlier take that lost the widget to a newer
 # one, shown once the widget is free. Copy only; never pastes itself.
 QUEUED = "queued"
+# Widget 2.0 (spec 2026-10-02-widget-2.md §3): a dictation just pasted. At
+# rest the widget looks idle; hovering it offers Copy, Undo and a rewrite in
+# another tone for DONE_WINDOW_S (held while hovered).
+DONE = "done"
+# CARD reason: a rewrite couldn't replace the pasted text (undo wasn't safe),
+# so the new text is on the clipboard instead. Copy only.
+NOT_REPLACED = "not_replaced"
+# DONE note: undo-last-paste refused (app not in front, text changed since).
+CANT_UNDO = "cant_undo"
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
@@ -47,6 +56,15 @@ CARD_WINDOW_S = 60.0
 # (oldest first), at most QUEUE_MAX of them, each for QUEUE_WINDOW_S.
 QUEUE_MAX = 3
 QUEUE_WINDOW_S = 120.0
+DONE_WINDOW_S = 6.0
+DONE_GRACE_S = 1.5    # after the pointer leaves the widget / its pop-up
+DONE_HOLD_MAX_S = 60.0  # backstop if the widget never reports the hover ending
+# Live text while speaking (§1): at most one `live` message per LIVE_MIN_GAP_S
+# (≤ 8/s), carrying at most LIVE_MAX_CHARS of the take's tail.
+LIVE_MIN_GAP_S = 0.125
+LIVE_MAX_CHARS = 240
+DONE_ACTIONS = ("hover", "copy_last", "undo_paste", "redo")
+TONES = ("raw", "verbatim", "casual", "professional", "bullets", "email", "slack")
 
 _SETTINGS = {
     "set_position": ("position", ("left", "bottom", "right")),
@@ -54,7 +72,8 @@ _SETTINGS = {
 }
 # Right-click menu items that don't depend on the flow state; the daemon
 # handles them (user-approved menu, 2026-10-01).
-MENU_ACTIONS = ("set_tone", "set_mic", "open_settings", "open_history", "paste_last")
+MENU_ACTIONS = ("set_tone", "set_mic", "open_settings", "open_history", "paste_last",
+                "set_language")
 
 
 @dataclass
@@ -67,6 +86,64 @@ class FlowHooks:
     copy_text: Callable[[str], None]
     save_setting: Callable[[str, str], None]
     menu_action: Callable[[str, Any], None] = lambda action, value: None
+    # Done state (§3). undo_paste must not block (the daemon runs it on a
+    # thread and reports back with undo_finished); redo(take, tone, run)
+    # likewise returns at once and lands with pasted() / show_card().
+    undo_paste: Callable[[], None] = lambda: None
+    redo: Callable[[Any, str, int], None] = lambda take, tone, run: None
+
+
+def tail_text(text: str, limit: int = LIVE_MAX_CHARS) -> str:
+    """The last `limit` characters of text, cut at a word boundary."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    space = cut.find(" ")
+    return cut[space + 1:] if 0 <= space < limit // 3 else cut
+
+
+class LiveText:
+    """Throttle for the live transcript (§1). offer() is called from the
+    stream's receive thread and only stores (no I/O); due() is polled by the
+    widget pump and returns the newest text at most once per min_gap, for
+    the current take only."""
+
+    def __init__(self, min_gap: float = LIVE_MIN_GAP_S,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._gap = min_gap
+        self._clock = clock
+        self._lock = threading.Lock()
+        self.gen = 0
+        self._pending: Optional[str] = None
+        self._sent = ""
+        self._last_at = -1e9
+
+    def new_take(self) -> int:
+        """A new take begins: forget the last one. Returns its generation."""
+        with self._lock:
+            self.gen += 1
+            self._pending = None
+            self._sent = ""
+            self._last_at = -1e9
+            return self.gen
+
+    def offer(self, gen: int, text: str) -> None:
+        with self._lock:
+            if gen != self.gen:
+                return  # a late partial from an older stream
+            text = tail_text(text)
+            if text and text != self._sent:
+                self._pending = text
+
+    def due(self, now: Optional[float] = None) -> Optional[str]:
+        now = self._clock() if now is None else now
+        with self._lock:
+            if self._pending is None or now - self._last_at < self._gap:
+                return None
+            text, self._pending = self._pending, None
+            self._sent, self._last_at = text, now
+            return text
 
 
 @dataclass
@@ -123,6 +200,11 @@ class FlowController:
         self._committed_run = 0
         # Results of runs that lost the widget, shown by tick() when idle.
         self._queue: list[_Queued] = []
+        # DONE: what was pasted (text, the daemon's opaque take, its tone).
+        self._pasted: Optional[tuple[str, Any, str]] = None
+        self._done_until = 0.0
+        self._done_hovered_since: Optional[float] = None
+        self.note = ""
 
     @property
     def lock(self) -> threading.RLock:
@@ -139,6 +221,10 @@ class FlowController:
                 msg["hands_free"] = True  # only ever sent while recording / silent
             if self.reason:
                 msg["reason"] = self.reason
+            if self.state == DONE and self._pasted is not None:
+                msg["tone"] = self._pasted[2]
+                if self.note:
+                    msg["note"] = self.note
             return msg
 
     def _set(self, state: str, text: str = "", reason: str = "") -> None:
@@ -146,6 +232,9 @@ class FlowController:
             self.hands_free = False
         if state != PROCESSING:
             self._inflight = None
+        if state != DONE:
+            self.note = ""
+            self._done_hovered_since = None
         self.reason = reason
         self.state = state
         self.text = text
@@ -231,6 +320,39 @@ class FlowController:
             self._set(IDLE)
             return True
 
+    def pasted(self, text: str, take: Any = None, tone: str = "",
+               run: Optional[int] = None, note: str = "") -> bool:
+        """The run's text pasted: show DONE (idle at rest, actions on hover)
+        for DONE_WINDOW_S. False (and nothing changes) if the run no longer
+        owns the widget: its text is already where it belongs."""
+        with self._lock:
+            if not self._owns(run):
+                return False
+            self._retained = None
+            self._pasted = (text, take, tone)
+            self._done_until = self._clock() + DONE_WINDOW_S
+            self.note = note
+            self._set(DONE)
+            return True
+
+    def owns(self, run: Optional[int]) -> bool:
+        """True while `run` still owns the widget (it is showing its PROCESSING)."""
+        with self._lock:
+            return self._owns(run)
+
+    def undo_finished(self, status: str) -> None:
+        """The undo_paste hook's result: "undone" ends DONE; anything else
+        keeps it, saying undo isn't possible here."""
+        with self._lock:
+            if self.state != DONE:
+                return
+            if status == "undone":
+                self.done()
+            else:
+                self.note = CANT_UNDO
+                self._done_until = max(self._done_until, self._clock() + DONE_GRACE_S)
+                self._emit(self.message())
+
     def idle_if_recording(self) -> bool:
         """A stop that captured nothing: back to IDLE, but only if the widget
         still shows the recording. Checked under the lock so a concurrent
@@ -290,7 +412,7 @@ class FlowController:
 
     def dismiss(self) -> None:
         with self._lock:
-            if self.state in (CARD, CANCELLED, ERROR):
+            if self.state in (CARD, CANCELLED, ERROR, DONE):
                 self.done()
 
     def tick(self) -> None:
@@ -300,6 +422,13 @@ class FlowController:
             if self.state in (CANCELLED, ERROR):
                 r = self._retained
                 if r is None or self._clock() > r.expires_at:
+                    self.done()
+            elif self.state == DONE:
+                now = self._clock()
+                held = self._done_hovered_since
+                if held is not None and now - held < DONE_HOLD_MAX_S:
+                    pass
+                elif now > self._done_until:
                     self.done()
             elif self.state == CARD and self._clock() > self._card_expires_at:
                 self.done()
@@ -335,7 +464,7 @@ class FlowController:
             return
         with self._lock:
             if action == "start":
-                if self.state in (CARD, CANCELLED, ERROR):
+                if self.state in (CARD, CANCELLED, ERROR, DONE):
                     self.done()
                 if self.state == IDLE:
                     self._hooks.start_recording()
@@ -365,7 +494,32 @@ class FlowController:
                 self.done()
             elif action == "dismiss":
                 self.dismiss()
+            elif action in DONE_ACTIONS and self.state == DONE and self._pasted is not None:
+                self._done_action(action, value)
             elif action in _SETTINGS:
                 key, allowed = _SETTINGS[action]
                 if value in allowed:
                     self._hooks.save_setting(key, value)
+
+    def _done_action(self, action: Any, value: Any) -> None:
+        """Copy / Undo / rewrite in another tone, and the hover that holds
+        the done window open (spec 2026-10-02-widget-2.md §3). Lock held."""
+        text, take, tone = self._pasted
+        now = self._clock()
+        if action == "hover":
+            if value == "on":
+                self._done_hovered_since = self._done_hovered_since or now
+            else:
+                self._done_hovered_since = None
+                self._done_until = max(self._done_until, now + DONE_GRACE_S)
+        elif action == "copy_last":
+            self._hooks.copy_text(text)
+        elif action == "undo_paste":
+            self._hooks.undo_paste()
+        elif action == "redo" and value in TONES and take is not None:
+            run = self.processing()
+            try:
+                self._hooks.redo(take, value, run)
+            except Exception as e:
+                log_exception("flow_state", "redo hook failed — keeping the pasted text", e)
+                self.pasted(text, take, tone)

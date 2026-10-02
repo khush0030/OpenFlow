@@ -106,6 +106,9 @@ from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
 from flow_state import OFFLINE as FLOW_OFFLINE, SAVED as FLOW_SAVED
 from flow_state import PROCESSING as FLOW_PROCESSING
+# Widget 2.0 (spec 2026-10-02-widget-2.md): live text, tone chip, done actions.
+from flow_state import NOT_REPLACED, RECORDING as FLOW_RECORDING, SILENT as FLOW_SILENT
+from flow_state import LiveText
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
@@ -245,6 +248,16 @@ class RunContext:
     # lands, and its history row once a failure was recorded there.
     audio_path: str | None = None
     history_id: int | None = None
+
+
+@dataclass
+class PastedTake:
+    """A dictation that just pasted, kept in memory for the widget's done
+    actions (rewrite in another tone). Never written anywhere."""
+    raw: str
+    tone: ToneMode
+    language: LanguageMode
+    target: object = None
 
 
 class _WidgetWatchdog:
@@ -413,12 +426,22 @@ class Daemon:
         self.state.tone = _TONE_CYCLE[(i + 1) % len(_TONE_CYCLE)]
         self.state.notify()
         print(f"[daemon] tone -> {self.state.tone.value}", flush=True)
+        self._flash_widget_modes()
 
     def cycle_lang(self) -> None:
         i = _LANG_CYCLE.index(self.state.language) if self.state.language in _LANG_CYCLE else 0
         self.state.language = _LANG_CYCLE[(i + 1) % len(_LANG_CYCLE)]
         self.state.notify()
         print(f"[daemon] lang -> {self.state.language.value}", flush=True)
+        self._flash_widget_modes()
+
+    def _flash_widget_modes(self) -> None:
+        """F6 (cycle): the widget's tone chip shows what changed. Never raises."""
+        try:
+            self._send_widget(self._widget_config())
+            self._send_widget({"type": "flash"})
+        except Exception as e:
+            log_exception("daemon.widget", "tone chip flash failed", e)
 
     def set_tone(self, tone: ToneMode) -> None:
         if self.state.tone == tone:
@@ -815,11 +838,14 @@ class Daemon:
         [sarvam] streaming; the take falls back to batch on any problem.
         Only a daemon built by __init__ streams; test daemons never do."""
         self._drop_stream()
+        live = getattr(self, "_live_text", None)
+        gen = live.new_take() if live is not None else 0
         if not getattr(self, "_stream_enabled", False):
             return
         try:
             opts = self._stt_opts(self._tone_for(self._paste_target))
-            stream = self.transcriber.begin_stream(opts)
+            on_partial = None if live is None else (lambda text, g=gen: live.offer(g, text))
+            stream = self.transcriber.begin_stream(opts, on_partial=on_partial)
         except Exception as e:
             print(f"[daemon] streaming skipped: {e}", flush=True)
             return
@@ -902,11 +928,14 @@ class Daemon:
                 copy_text=set_clipboard,
                 save_setting=self._save_widget_setting,
                 menu_action=self._on_widget_menu,
+                undo_paste=self._undo_paste_for_widget,
+                redo=self._redo,
             ),
             silence_threshold=float(self.cfg["audio"].get("silence_threshold", 0.01)),
         )
         self._widget = WidgetServer(on_message=self._on_widget_action,
                                     on_connect=self._on_widget_connect)
+        self._live_text = LiveText()   # partials -> widget, ≤ 8/s (pump sends)
 
     def _start_widget_channel(self) -> None:
         try:
@@ -951,6 +980,7 @@ class Daemon:
                 "appearance": w.get("appearance", "paper"),
                 "hold_key": self.cfg["hotkeys"].get("record_hold", ""),
                 "tone": self.state.tone.value,
+                "language": self.state.language.value,
                 "mic": (self.cfg.get("audio") or {}).get("device") or "default"}
 
     def _on_widget_menu(self, action: str, value) -> None:
@@ -963,6 +993,13 @@ class Daemon:
                 except ValueError:
                     return
                 self.choose_tone(tone)
+            elif action == "set_language":
+                try:
+                    lang = LanguageMode(value)
+                except ValueError:
+                    return
+                self.choose_language(lang)
+                self._send_widget(self._widget_config())
             elif action == "set_mic":
                 device = value or "default"
                 cfg_mod.save_setting("audio", "device", device)
@@ -989,7 +1026,8 @@ class Daemon:
         """A click on the widget. Logged (the action only, never text) so a
         paste after a cancel can be traced to Undo or to a missed cancel."""
         action = msg.get("action") if isinstance(msg, dict) else None
-        if action in ("start", "confirm", "cancel", "undo", "retry", "copy", "dismiss"):
+        if action in ("start", "confirm", "cancel", "undo", "retry", "copy", "dismiss",
+                      "copy_last", "undo_paste", "redo"):
             print(f"[daemon] widget {action} (state={self._flow.state})", flush=True)
         self._flow.handle_action(msg)
 
@@ -1199,6 +1237,9 @@ class Daemon:
                     rms = self.recorder.current_rms
                     self._send_widget({"type": "level", "rms": rms})
                     self._flow.level(rms)
+                live = self._live_text.due(now)
+                if live is not None and self._flow.state in (FLOW_RECORDING, FLOW_SILENT):
+                    self._send_widget({"type": "live", "text": live})
                 if now - last_tick >= 0.25:
                     last_tick = now
                     self._flow.tick()
@@ -1311,6 +1352,80 @@ class Daemon:
             log_exception("daemon.undo", "undo last paste failed", e)
             return
         print(f"[daemon] undo last paste -> {status}", flush=True)
+
+    # -- Widget 2.0: done actions (spec 2026-10-02-widget-2.md §3) ---------
+
+    def _undo_paste_for_widget(self) -> None:
+        """Undo on the done pop-up: the undo-last-paste chord's path, then
+        tell the widget whether it worked. Off the socket thread."""
+        def run() -> None:
+            status = "failed"
+            try:
+                status = undo_last_paste()
+            except Exception as e:
+                log_exception("daemon.undo", "undo last paste (widget) failed", e)
+            print(f"[daemon] widget undo last paste -> {status}", flush=True)
+            self._flow.undo_finished(status)
+        threading.Thread(target=run, name="undo-paste", daemon=True).start()
+
+    # A rewrite waits this long for a dictation in progress before giving up.
+    _REDO_WAIT_S = 30.0
+    _REDO_PASTE_GAP_S = 0.08   # let the app apply ⌘Z before ⌘V
+
+    def _redo(self, take: PastedTake, tone: str, run: int) -> None:
+        threading.Thread(target=self._redo_worker, args=(take, tone, run),
+                         name="redo", daemon=True).start()
+
+    def _redo_worker(self, take: PastedTake, tone_value: str, run: int) -> None:
+        """Rewrite the pasted dictation in another tone: cleanup on its raw
+        transcript, then replace it (undo-last-paste + paste). If undo isn't
+        safe, never paste blind: the text goes on the clipboard and a card.
+        Logs never carry the text."""
+        try:
+            tone = ToneMode(tone_value)
+        except ValueError:
+            self._flow.done(run=run)
+            return
+        if not self._busy.acquire(timeout=self._REDO_WAIT_S):
+            print("[daemon] rewrite: a dictation is still processing — skipped", flush=True)
+            self._flow.done(run=run)
+            return
+        try:
+            t0 = time.monotonic()
+            final = self._post_process(take.raw, tone=tone, language=take.language,
+                                        target=take.target, skip_trivial=False)
+            print(f"[daemon] rewrite as {tone.value}: cleanup {time.monotonic() - t0:.2f}s",
+                  flush=True)
+            if not final or self._flow.is_cancelled(run):
+                self._flow.done(run=run)
+                return
+            if not self._flow.owns(run):
+                # A newer dictation took the widget: never paste over it.
+                set_clipboard(final)
+                self._flow.show_card(final, run=run)   # queued, Copy only
+                return
+            if not self._flow.commit(run):
+                return
+            undo = undo_last_paste()
+            if undo != "undone":
+                set_clipboard(final)
+                print(f"[daemon] rewrite: undo {undo} — new text on the clipboard", flush=True)
+                self._flow.show_card(final, run=run, reason=NOT_REPLACED) or self._stale(run)
+                return
+            time.sleep(self._REDO_PASTE_GAP_S)
+            status = paste(final, target=take.target)
+            print(f"[daemon] rewrite as {tone.value}: paste {status}", flush=True)
+            self.state.last_pasted = final
+            if status == "pasted":
+                new = replace(take, tone=tone)
+                self._flow.pasted(final, new, tone.value, run=run) or self._stale(run)
+            else:
+                self._flow.show_card(final, run=run, reason=NOT_PASTED) or self._stale(run)
+        except Exception as e:
+            log_exception("daemon.redo", "rewrite failed", e)
+            self._flow.done(run=run)
+        finally:
+            self._busy.release()
 
     # -- Auto-learn: corrections right after a paste (autolearn.py) --------
 
@@ -1688,7 +1803,12 @@ class Daemon:
                 if paste_status == "pasted":
                     self._watch_paste(final, target)
                     sounds.play("paste")
-                    self._flow.done(run=run) or self._stale(run)
+                    if ctx.edit_mode:
+                        self._flow.done(run=run) or self._stale(run)
+                    else:
+                        # Widget 2.0: Copy / Undo / rewrite on hover for a few seconds.
+                        take = PastedTake(raw, tone, self.state.language, target)
+                        self._flow.pasted(final, take, tone.value, run=run) or self._stale(run)
                 else:
                     # It could not have landed: never lose the text — it's
                     # on the clipboard and in the card (spec §8).
@@ -1813,10 +1933,12 @@ class Daemon:
 
     def _ctl_set_tone(self, value: str) -> dict:
         self.set_tone(self._parse_tone(value))   # same path as the tray menu
+        self._send_widget(self._widget_config())  # the widget's tone chip
         return {"tone": self.state.tone.value}
 
     def _ctl_set_language(self, value: str) -> dict:
         self.set_language(self._parse_language(value))
+        self._send_widget(self._widget_config())  # the widget's tone chip
         return {"language": self.state.language.value}
 
     def _ctl_paste_text(self, text: str) -> dict:

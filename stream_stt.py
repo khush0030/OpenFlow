@@ -113,6 +113,7 @@ class StreamingSession:
         self._q: queue.Queue = queue.Queue()
         self._ws = None
         self._finals: dict[int, str] = {}
+        self._partials: dict[int, str] = {}   # open utterances (live text only)
         self._language: str | None = None
         self._language_prob: float | None = None
         self._request_id: str | None = None
@@ -241,6 +242,22 @@ class StreamingSession:
             self._fail(self._closed_error(e, "send failed"))
             self._close_quietly(ws)
 
+    def live_text(self) -> str:
+        """The take so far, for a live preview: finals in utterance order
+        with the open utterances' partials (revised as they go) in place."""
+        parts = {**self._partials, **self._finals}
+        return " ".join(t for _, t in sorted(parts.items()) if t).strip()
+
+    def _live(self) -> None:
+        """Hand the take so far to on_partial (widget 2.0 live text). Runs
+        on the receive thread; a failing callback never breaks the stream."""
+        if self.on_partial is None:
+            return
+        try:
+            self.on_partial(self.live_text())
+        except Exception:
+            pass
+
     @staticmethod
     def _closed_error(e: Exception, what: str) -> StreamError:
         rcvd = getattr(e, "rcvd", None)
@@ -258,23 +275,26 @@ class StreamingSession:
                     continue
                 event = msg.get("event")
                 if event == "transcript.partial":
-                    if self.on_partial is not None:
-                        try:
-                            self.on_partial(str(msg.get("text") or ""))
-                        except Exception:
-                            pass
+                    try:
+                        idx = int(msg.get("utterance_idx") or 0)
+                    except (TypeError, ValueError):
+                        idx = len(self._finals)
+                    self._partials[idx] = str(msg.get("text") or "").strip()
+                    self._live()
                 elif event == "transcript.final":
                     try:
                         idx = int(msg.get("utterance_idx") or 0)
                     except (TypeError, ValueError):
                         idx = len(self._finals)
                     self._finals[idx] = str(msg.get("text") or "").strip()
+                    self._partials.pop(idx, None)
                     if msg.get("language"):
                         self._language = msg.get("language")
                         try:
                             self._language_prob = float(msg.get("language_confidence"))
                         except (TypeError, ValueError):
                             self._language_prob = None
+                    self._live()
                 elif event == "session.begin":
                     self._request_id = msg.get("request_id")
                 elif event == "session.end":

@@ -144,7 +144,8 @@ def test_partials_go_to_the_callback_and_request_balanced():
     s = session(ws, connect=connector(ws, calls), on_partial=seen.append)
     s.feed(LOUD)
     s.finish()
-    assert seen == ["Hel"]
+    # The callback gets the take so far: the partial, then its final.
+    assert seen == ["Hel", "hello world"]
     assert "stream_type=balanced" in calls[0][0]
 
 
@@ -364,3 +365,35 @@ def test_no_key_means_no_stream(monkeypatch):
 ])
 def test_streaming_policy(value, policy):
     assert tr.streaming_policy(value) == policy
+
+
+# -- Widget 2.0: live text (spec 2026-10-02-widget-2.md §1) --------------------
+
+def test_live_text_joins_finals_and_the_open_partial():
+    seen = []
+    got_all = threading.Event()
+
+    def on_partial(text):
+        seen.append(text)
+        if len(seen) == 5:
+            got_all.set()
+    ws = FakeWS(script=[
+        {"event": "transcript.partial", "utterance_idx": 0, "text": "Hate team"},
+        {"event": "transcript.partial", "utterance_idx": 0, "text": "Hey team,"},
+        {"event": "transcript.final", "utterance_idx": 0, "text": "Hey team,"},
+        {"event": "transcript.partial", "utterance_idx": 1, "text": "quick"},
+        {"event": "transcript.partial", "utterance_idx": 1, "text": "quick update"},
+    ])
+    s = session(ws, on_partial=on_partial)
+    s.feed(LOUD)
+    assert got_all.wait(2.0)
+    assert seen == ["Hate team", "Hey team,", "Hey team,", "Hey team, quick",
+                    "Hey team, quick update"]
+    s.abort()
+
+
+def test_live_text_without_a_consumer_costs_nothing():
+    s = ss.StreamingSession(api_key="k")
+    s._partials[0] = "hi"
+    s._live()                      # no on_partial: no-op, no error
+    assert s.live_text() == "hi"
