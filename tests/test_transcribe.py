@@ -108,16 +108,18 @@ def test_parallelism_is_capped(monkeypatch):
     assert live["peak"] <= tr.MAX_PARALLEL_CHUNKS
 
 
-def test_single_chunk_runs_on_the_calling_thread(monkeypatch):
+def test_single_chunk_skips_the_chunk_pool(monkeypatch):
+    """One request, sent from the failover chain's worker (so a deadline can
+    abandon it), not from the parallel chunk pool."""
     seen = []
 
     def fake(wav, **kw):
-        seen.append(threading.current_thread())
+        seen.append(threading.current_thread().name)
         return STTResult(transcript="one")
     monkeypatch.setattr(tr, "speech_to_text", fake)
     monkeypatch.setattr(tr, "resolve_api_key", lambda env: "k")
     assert tr.Transcriber().transcribe(np.full(SR, 0.1, dtype=np.float32)) == "one"
-    assert seen == [threading.current_thread()]
+    assert seen == ["failover-upload"]
 
 
 # -- silence trimming ----------------------------------------------------------
