@@ -1,163 +1,206 @@
 # OpenFlow Roadmap
 
-Goal: replace Wispr Flow for daily use with a local-first app that is faster,
-better at Indian English / Hinglish, and does things Wispr doesn't. The last
-phase adds a live sales-call copilot.
+Goal: the best dictation app for people who think in Indian English and
+Hinglish: faster than typing, trustworthy enough that you never check its
+work, and personal enough that it writes like you. Later: a live sales-call
+copilot built on the same engine.
 
-Status legend: ✅ done · 🟡 in progress · ⬜ not started
+Status legend: ✅ done · 🟡 in progress · ⬜ not started · Last reviewed 2026-10-02
 
-## Stack principle: thin local client, cloud brains
+## Principles (apply to every phase)
 
-The laptop (M1, 16 GB, shared with dev work) only runs the lightweight shell:
-hotkeys, mic capture, the widget, paste, local SQLite history. All model
-inference — speech-to-text and LLM — runs in the cloud. No local models.
+1. **Thin client, cloud brains.** The laptop runs the shell (hotkeys, mic,
+   widget, paste, local history). Speech-to-text and LLMs run in the cloud.
+   No local models; laptop compute is for dev work.
+2. **Never lose a word.** A failure may cost a retry, never the text.
+3. **Default to right, don't add modes.** Formatting, context and tone happen
+   automatically; settings exist for overrides, not for daily use.
+4. **Data honesty.** Every number in the app comes from local data and
+   states its assumptions.
+5. **Verified on screen.** A change counts as done when it has been seen
+   working in the real app, not only when tests pass.
+6. **One visual language.** Paper / Ink, Fraunces + Geist + JetBrains Mono,
+   one accent (widget red `#E5402F`) across widget, hub and menu bar.
 
-| Layer | Runs on | Now | Options / later |
-|---|---|---|---|
-| Shell (hotkeys, mic, paste, widget) | Laptop | Python + PyQt6 + PyObjC | Native Swift (lighter, Phase 4) |
-| Speech-to-text | Cloud | Sarvam Saaras v4 (batch) | Sarvam streaming; Deepgram / Groq Whisper as fallback |
-| Cleanup / edit LLM | Cloud | Sarvam `sarvam-105b` (slow, reasoning) | Faster model: Groq, Gemini Flash, Claude Haiku |
-| History, dictionary, config | Laptop | SQLite / JSON / TOML in `~/.openflow` | same |
-| Call Copilot | Cloud (models) + laptop (audio capture, panel) | — | streaming STT + fast LLM, no backend server needed |
+## Where we are (October 2026)
 
-Providers sit behind one interface so any of them can be swapped via config.
+Daily driver on macOS. A typical 10 s dictation lands about **0.6 s after
+key-up** (streaming STT). The app has replaced Wispr Flow for its main user.
 
----
-
-## Phase 0 — Ship what's on `main` ✅
-
-The installed app (built Jul 25) still ran the old Whisper + Anthropic
-pipeline; Anthropic credits ran out on Aug 27, so it stopped working. The
-Sarvam pipeline was committed but never deployed.
-
-- ✅ Migrate `~/.openflow/config.toml` (drop `[whisper]`/`[claude]`, add `[sarvam]`)
-- ✅ Remove stale Anthropic / Whisper copy (onboarding, dictionary editor, install script)
-- ✅ pytest in the venv; suite green
-- ✅ Reproducible signing: `scripts/setup_codesign.sh` + `scripts/build_app.sh --deploy`
-- ✅ Build, sign, deploy, relaunch the Sarvam build (fixed: hardened-runtime entitlements, nested framework signatures)
-- ✅ Re-grant Accessibility + Microphone; app now fires the native prompt itself and never claims "pasted" without permission
-- ✅ End-to-end (user-confirmed): ~5s clip → ~1.3s STT → pasted into VS Code text box
-- ✅ Paste order fixed: clipboard + Cmd+V first (Electron apps fake-accept AX inserts)
-- ✅ Flow bar no longer respawns every few minutes (App Nap disabled, 10s heartbeat tolerance)
-- ✅ README rewritten for Sarvam
-
-## Phase 1 — Widget & Hub UI (our own design, better than Wispr) 🟡
-
-Flow widget spec: [docs/superpowers/specs/2026-09-30-flow-widget-design.md](docs/superpowers/specs/2026-09-30-flow-widget-design.md) · mockup: [docs/design/flow-widget-mockup.html](docs/design/flow-widget-mockup.html)
-
-Wispr's surface is a small bottom-centre pill plus a hub window. Ours should
-match it for polish and add more to both.
-
-### 1a. Design (before code)
-- Moodboard + teardown of Wispr's pill, macOS Dynamic Island, Raycast, Superwhisper
-- 🟡 Full state set: idle · hover · listening (hold) · listening (hands-free) ·
-  processing · done · error (no mic / no key / offline) · edit/command mode
-  (all but the separate error kinds; edit mode is still its own overlay)
-- ✅ Motion spec: morph between states, waveform driven by real RMS, processing shimmer
-- 🟡 Light / dark / vibrancy, notch-aware placement, follows the active screen
-  (no notch awareness yet)
-- Design tokens in one place (reuse `ui/tokens.py`, brand book)
-
-### 1b. Flow widget
-- Live partial transcript while speaking (real partials need Phase 3 streaming; design the slot now)
-- Inline mode chip: tone + language, click to switch
-- Hover on "done" → copy · redo in another tone · undo
-- ✅ Never steals focus (non-activating panel)
-
-### 1c. Hub app
-- ✅ Home: words dictated, WPM, time saved, streak (time saved is on Insights)
-- ✅ History: search, re-run with another tone, copy raw vs final
-- ✅ Dictionary (auto-learned suggestions arrive in Phase 3)
-- 🟡 Snippets, per-app styles, settings, permissions health check
-  (Settings and the Help page's permissions check are done)
-
-### 1d. Tech decision
-The UI used to be PyQt subprocesses coordinated through `/tmp/*.json` polled
-at 20 Hz with a `pgrep` watchdog — the most fragile part of the app. The flow
-widget and edit overlay now hold a socket to the daemon (a dropped connection
-means the peer is gone) and the hub talks to it over `control.sock`.
-- ✅ Replace file polling with a Unix-socket event channel (daemon ↔ UI)
-- Build the widget as a native SwiftUI `NSPanel`; Python core stays for now
-- Decide: keep PyQt for the hub or move it to SwiftUI too
-
-## Phase 2 — Daily-driver parity (speed, hands-free, undo, …) 🟡
-
-Everything needed to stop opening Wispr.
-
-- ✅ Hands-free: double-tap the hold key (replaces the never-registered `record_toggle`)
-- Undo last paste (currently a stub)
-- ✅ Start/stop sounds
-- Per-app tone (`CONTEXT_HINTS` defined, `context_app` ignored)
-- Latency pass, target **< 1s from key-up to text for a 10s clip**
-  - trim leading/trailing silence (use `silence_threshold`)
-  - send >28s chunks in parallel, not sequentially
-  - non-reasoning / fast model for cleanup (sarvam-105b is ~2s for "ok")
-  - per-stage timing in the log and history table
-- Self-correction ("…no wait, make it 3pm") in cleanup tones
-- Snippets: spoken trigger → expanded text
-- ✅ Tests never write into the real `~/.openflow/openflow.log` (conftest isolates logging)
-- Dev loop: run from source; signed build (~15 min) only per milestone
-- ✅ "Can't hear you" detection (mic muted / wrong device): the widget shows it
-  when the level stays under `silence_threshold`, with a Mic settings button
-
-## Phase 3 — Beyond Wispr
-
-- Streaming STT → text is basically ready at key-up
-- Auto-learn dictionary: detect edits right after paste, offer to add the term
-- ✅ Command mode: "reply saying yes but push to Friday" using selection / screen context
-  (edit hotkey with nothing selected; spec 2026-10-02-command-mode)
-- Provider abstraction + automatic failover between cloud providers (replaces
-  the earlier "local model fallback" idea — laptop compute is reserved for dev work)
-- Privacy: everything stays in `~/.openflow`, opt-in retention limits
-
-## Phase 4 — Consolidate
-
-- Native Swift shell (hotkeys, audio, paste, windows); Python only where needed, or fully native
-- Signed + notarized DMG, auto-update
-- Smaller footprint than the current ~18 MB PyInstaller bundle + multiple processes
+| Layer | Now |
+|---|---|
+| Shell | Python + PyQt6 + PyObjC, signed `.app`, LaunchAgent at login |
+| Speech-to-text | Sarvam Saaras v4, realtime streaming from key-down, upload fallback |
+| Cleanup / edit / command LLM | Provider interface: Sarvam `sarvam-105b`, Groq, Claude Haiku (`[cleanup] provider`) |
+| Data | `~/.openflow`: SQLite history, JSON dictionary + snippets, TOML config |
 
 ---
 
-## Phase 5 — Call Copilot (live sales-call analyzer) — much later
+## Shipped
 
-**What it does:** during a live prospect call (Zoom / Meet / Teams / any app),
-OpenFlow listens to both sides and shows short suggestion cards — reply ideas,
-objection handling, questions to ask. After the call it writes the summary,
-next steps and a follow-up email.
+<details>
+<summary><b>Phase 0: ship the Sarvam pipeline</b> ✅</summary>
 
-### How it would work
-1. **Capture two channels.** Mic = you, system/app audio = prospect. macOS
-   Core Audio process taps (14.2+) or ScreenCaptureKit audio capture — no
-   virtual driver needed. Two channels means speaker labels for free.
-2. **Streaming transcription** of both channels (Phase 3 streaming reused;
-   verify Sarvam streaming support, otherwise Deepgram/AssemblyAI or local).
-3. **Turn detection.** When the prospect finishes speaking, classify it:
-   question · objection · buying signal · competitor mention · small talk.
-4. **Suggestion engine.** Fast LLM with rolling transcript + a context pack
-   (product one-pager, pricing, objection playbook, case studies, prospect
-   notes) → 1–3 short cards. Budget: cards within ~2s of the prospect finishing.
-5. **Live checklist.** Fills in qualification fields (BANT / MEDDIC) as they
-   come up; shows what's still missing.
-6. **Post-call.** Summary, action items, follow-up email draft (reuses the
-   email tone), export / push to CRM.
+Migrated off Whisper + Anthropic to Sarvam, reproducible signing
+(`scripts/setup_codesign.sh`, `scripts/build_app.sh --deploy`), permission
+prompts, paste order fixed for Electron apps, App Nap disabled.
+</details>
 
-### UI
-- Side panel that extends from the flow widget; glanceable cards, one-key dismiss
-- Talk-time ratio and "you've been talking for 90s" nudge
-- **Must be excluded from screen share** (`NSWindow.sharingType = .none`)
+<details>
+<summary><b>Phase 1: widget and hub</b> ✅ (widget polish continues in Phase 5)</summary>
 
-### Staging
-- 5a — Post-call only: record both sides → transcript → summary + follow-up
-- 5b — Live transcript + suggestion cards
-- 5c — Playbook / context pack retrieval, CRM integration, per-prospect memory
+- Flow widget: docked bar, hover mic, recording / processing / done states,
+  RMS waveform, red tooltip and toasts, "can't hear you", fallback card,
+  never steals focus. Spec: `docs/superpowers/specs/2026-09-30-flow-widget-design.md`.
+- Socket IPC replaces `/tmp` polling (widget, edit overlay, `control.sock` for the hub).
+- The OpenFlow window (hub): Home, Insights (Your usage + **Your voice**),
+  History, Dictionary, Tone & language, Settings, Help. One design system
+  (`ui/hub/style.py`), responsive down to the minimum window size.
+  Spec: `docs/superpowers/specs/2026-10-01-app-hub-design.md`.
+- First-run window (permissions, key, try it).
+</details>
 
-### Constraints & open questions
-- **Consent:** call recording/transcription needs consent in many places
-  (two-party-consent US states, EU, India DPDP). Add a consent reminder,
-  local-only storage by default, and retention controls.
-- Which call apps matter most, and are calls mostly in English or Hinglish?
-- Which CRM (if any) to push notes into?
-- Model choice for cards (latency vs quality); cost per call hour.
+<details>
+<summary><b>Phase 2: daily-driver parity</b> ✅</summary>
 
-### Depends on
-Phase 1d socket IPC + native panel, Phase 3 streaming STT.
+Hands-free (double-tap), undo last paste, start/stop/cancel sounds, per-app
+tone and app context, self-correction ("no wait, make it 3pm"), snippets,
+auto-formatting (spoken lists, line breaks, email layout, paragraphs),
+"can't hear you", latency pass (silence trim, parallel chunks, pre-connect,
+skip cleanup for ≤3 words, per-stage timings), test logs isolated.
+</details>
+
+<details>
+<summary><b>Phase 3: beyond Wispr</b> ✅ (failover and retention move to Phase 4)</summary>
+
+- Streaming STT from key-down. Spec: `docs/superpowers/specs/2026-10-01-streaming-stt.md`.
+- Names on screen sent as keyterms; known names never respelled.
+- Auto-learn dictionary from corrections right after a paste.
+- Command mode: edit hotkey with nothing selected writes at the cursor from
+  context. Spec: `docs/superpowers/specs/2026-10-02-command-mode.md`.
+- Reliability round (2026-10-02): paste waits for held modifiers and refuses
+  a background app; key timing from the event itself; cancel discards at any
+  stage; single daemon instance; the app always runs from the bundle.
+</details>
+
+---
+
+## Next
+
+The order is deliberate: trust first (people stop using a dictation app the
+first time it eats a paragraph), then feel, then intelligence, then other people.
+
+### Phase 4: Never lose a word (trust) ⬜ — next up
+
+Goal: zero lost dictations and graceful behaviour when the network or a
+provider misbehaves.
+
+- **Provider failover.** STT: stream → upload → a second cloud STT
+  (Deepgram or Groq Whisper) behind the same interface. Cleanup: per-provider
+  timeout budget, then the next provider, then paste the transcript
+  uncleaned rather than nothing. Show which path a take used in History.
+- **Offline and slow network.** Keep the audio of every take until it has
+  pasted. When transcription fails, the widget shows "Saved · Retry", and
+  History gets "Transcribe again" for failed takes.
+- **Queued cards.** A failure card for a take that lost the widget to a newer
+  take waits its turn instead of disappearing.
+- **First words.** Optional pre-roll: a short in-memory mic buffer so the
+  first word is never clipped. Off by default because the mic indicator
+  stays on.
+- **Undo after cancel.** Ignore an Undo clicked within ~400 ms of a cancel,
+  or move it away from the ✕.
+- **Reliability you can see.** Insights › Reliability: success rate, latency
+  p50 / p90, failures by cause. Local only, from history and log.
+- **Data controls.** Retention limits (keep N days), export, delete
+  everything; covers history and the voice profile.
+- **Release check.** A written on-screen checklist run before each deploy
+  (dictate into VS Code chat, Chrome, Slack; hands-free; cancel; command mode).
+
+Done when: two weeks of daily use with no lost dictation, and a forced
+Sarvam outage still produces text.
+
+### Phase 5: Widget 2.0 (feel) ⬜
+
+Goal: the widget feels alive and every useful action is one hover away.
+
+- **Live text while speaking**, from the streaming partials already received.
+- **Tone / language chip** on the widget: click to switch, shows what F6 did.
+- **Hover actions on "done"**: copy, redo in another tone, undo.
+- **Command mode in one step**: the edit hotkey starts listening immediately.
+- Notch-aware placement; follows the active screen.
+- **Dark (Ink) hub** following the widget's Paper / Ink / Auto setting; the
+  tokens are already in place.
+- Decide on a native SwiftUI `NSPanel` widget (measure memory, start time and
+  animation smoothness) vs. staying on PyQt.
+
+Done when: dictating, correcting and changing tone never need the hub open.
+
+### Phase 6: Sounds like you (intelligence) ⬜
+
+Goal: output you would have typed yourself, and quality you can measure.
+
+- **Quality eval set.** About 100 of the user's real dictations (with consent)
+  with expected outputs; score STT word errors and cleanup faithfulness per
+  provider and prompt. Every prompt or model change runs against it.
+- **Personal style.** Feed the voice profile (Insights › Your voice) and
+  accepted edits into cleanup: vocabulary, punctuation habits, sign-offs.
+- **Voice commands** inside dictation: "scratch that", "make that a list",
+  "new paragraph", "all caps".
+- **Smarter context.** Per-app styles learned from what you correct; reply
+  context for Mail, Slack and WhatsApp; snippets with variables (date, name).
+- **Hinglish quality.** Targeted evals for code-switching, Roman Hindi and
+  Indian names; tune keyterms and dictionary hints.
+- **Filler coaching (optional).** A weekly note from Your voice: pace,
+  fillers, overused phrases.
+
+Done when: the eval set shows cleanup changes no meaning in ≥ 99% of
+verbatim takes, and the share of dictations kept without edits goes up.
+
+### Phase 7: Ready for other people (ship) ⬜
+
+Goal: someone else can install OpenFlow in two minutes and keep it updated.
+
+- Developer ID signing, notarization, DMG (`scripts/build_dmg.sh` exists),
+  Sparkle auto-update, a Releases page.
+- A first run that works for a stranger: key setup, provider choice,
+  permission recovery, a sample dictation.
+- Licence decision and `LICENSE` file; contribution guide; issue templates.
+- Diagnostics: "Copy diagnostics" in Help (never includes dictated text).
+- Footprint: fewer processes, a smaller bundle; evaluate a native Swift
+  shell (hotkeys, audio, paste, windows) with Python only for the pipeline.
+- Landing page and a short demo video.
+
+Done when: three outside users install from the DMG and dictate daily for a
+week without help.
+
+### Phase 8: Call Copilot ⬜ (later)
+
+During a live call (Zoom / Meet / Teams), listen to both sides and show short
+suggestion cards: reply ideas, objection handling, questions to ask. After
+the call, write the summary, next steps and a follow-up email.
+
+- **How:** two channels (mic = you; Core Audio process tap or
+  ScreenCaptureKit = prospect) → streaming STT for both → turn detection and
+  classification (question / objection / buying signal / competitor) → fast
+  LLM with a context pack (one-pager, pricing, playbook, prospect notes) → 1–3
+  cards within ~2 s.
+- **UI:** side panel from the flow widget, one-key dismiss, talk-time nudge,
+  excluded from screen share (`NSWindow.sharingType = .none`).
+- **Staging:** 8a post-call summary only → 8b live transcript + cards →
+  8c playbook retrieval, CRM push, per-prospect memory.
+- **Constraints:** consent (two-party US states, EU, India DPDP): a reminder,
+  local storage by default, retention controls. Open questions: which call
+  apps, English vs Hinglish calls, which CRM, cost per call hour.
+- **Depends on:** Phase 4 failover, Phase 5 panel work, streaming STT.
+
+---
+
+## Working agreement
+
+- Each item that changes behaviour or UI gets a spec in
+  `docs/superpowers/specs/` before code; small fixes go straight to a branch
+  with tests.
+- Every change: a failing test first where possible, full suite green,
+  `scripts/build_app.sh --deploy`, then an on-screen check by the user.
+- Larger rounds run as parallel agents in separate worktrees, merged on an
+  `integrate/*` branch, then a PR into `main`.

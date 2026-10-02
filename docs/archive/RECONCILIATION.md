@@ -1,18 +1,18 @@
 # OpenFlow — Plan Reconciliation & Build Order (macOS only)
 
-> **Handoff document #3 for Claude Code.** Read this AFTER `PROJECT_PLAN.md` and `DESIGN_INTEGRATION.md`. This document is the **tiebreaker** when those two disagree. Where this document contradicts either, this document wins.
+> **Handoff document #3 for Claude Code.** Read this AFTER `docs/archive/PROJECT_PLAN.md` and `docs/archive/DESIGN_INTEGRATION.md`. This document is the **tiebreaker** when those two disagree. Where this document contradicts either, this document wins.
 
 ---
 
 ## 0. Why this document exists
 
-`PROJECT_PLAN.md` was written first, treating the UI as a small concern bolted on at Phase 3. `DESIGN_INTEGRATION.md` was added later and introduced a deeper design system.
+`docs/archive/PROJECT_PLAN.md` was written first, treating the UI as a small concern bolted on at Phase 3. `docs/archive/DESIGN_INTEGRATION.md` was added later and introduced a deeper design system.
 
 Two things have since changed:
 1. The two prior plans contradicted each other in places. This document resolves those conflicts.
 2. **OpenFlow v1.0 is now macOS-only.** Linux and Windows support are deferred. Any cross-platform abstraction in the prior plans should be removed, not preserved as dead code.
 
-**Rule for Claude Code:** if `PROJECT_PLAN.md` and `DESIGN_INTEGRATION.md` say different things, look here. If this document doesn't address the disagreement, ask the maintainer before guessing.
+**Rule for Claude Code:** if `docs/archive/PROJECT_PLAN.md` and `docs/archive/DESIGN_INTEGRATION.md` say different things, look here. If this document doesn't address the disagreement, ask the maintainer before guessing.
 
 ---
 
@@ -35,7 +35,7 @@ If a Linux or Windows fork happens in the future, it forks the macOS code and ad
 
 ## 2. What is NOT changing (preserve existing progress)
 
-If any of the following have already been built per `PROJECT_PLAN.md`, **leave them alone**. The design integration does not require reworking them.
+If any of the following have already been built per `docs/archive/PROJECT_PLAN.md`, **leave them alone**. The design integration does not require reworking them.
 
 - ✅ **Audio capture** (`openflow/audio.py`) — sounddevice + numpy at 16 kHz mono. No change.
 - ✅ **Transcription** (`openflow/transcribe.py`) — faster-whisper wrapper. No change.
@@ -48,7 +48,7 @@ If any of the following have already been built per `PROJECT_PLAN.md`, **leave t
 - ✅ **Prompts library** (`openflow/prompts.py`) — system prompts. No change.
 - ✅ **History storage** (`openflow/history.py`) — sqlite. Schema unchanged; size cap updated to 500 (see §3 Conflict 5).
 
-**The design integration only touches the UI layer.** Everything in the non-UI core stays exactly as `PROJECT_PLAN.md` specifies, with non-macOS code paths removed.
+**The design integration only touches the UI layer.** Everything in the non-UI core stays exactly as `docs/archive/PROJECT_PLAN.md` specifies, with non-macOS code paths removed.
 
 ### Cleanup pass before continuing
 
@@ -73,8 +73,8 @@ Each match should be either deleted (if Linux/Windows specific) or simplified (i
 
 | Source | Says |
 |---|---|
-| `PROJECT_PLAN.md` §4 | Use `pystray` |
-| `DESIGN_INTEGRATION.md` §4 | Use `rumps` on macOS, `pystray` fallback elsewhere |
+| `docs/archive/PROJECT_PLAN.md` §4 | Use `pystray` |
+| `docs/archive/DESIGN_INTEGRATION.md` §4 | Use `rumps` on macOS, `pystray` fallback elsewhere |
 
 **Resolution: rumps only.**
 
@@ -88,12 +88,12 @@ If a `pystray`-based tray was already built, delete that file and rebuild with r
 
 | Source | Says |
 |---|---|
-| `PROJECT_PLAN.md` §6 | Tray = Phase 3, Settings = Phase 7, Onboarding = Phase 8 |
-| `DESIGN_INTEGRATION.md` §3 | Design System Foundation (Phase A) ships before any UI |
+| `docs/archive/PROJECT_PLAN.md` §6 | Tray = Phase 3, Settings = Phase 7, Onboarding = Phase 8 |
+| `docs/archive/DESIGN_INTEGRATION.md` §3 | Design System Foundation (Phase A) ships before any UI |
 
 **Resolution: Both are correct but describe different things.**
 
-`PROJECT_PLAN.md` phases describe **feature delivery**. `DESIGN_INTEGRATION.md` Phase A describes **infrastructure** that the UI phases consume.
+`docs/archive/PROJECT_PLAN.md` phases describe **feature delivery**. `docs/archive/DESIGN_INTEGRATION.md` Phase A describes **infrastructure** that the UI phases consume.
 
 The merged order is in §4 below. Phase A slots in **between PROJECT_PLAN Phase 2 and Phase 3** — i.e. after Claude cleanup works in the daemon but before the first UI surface is built.
 
@@ -101,8 +101,8 @@ The merged order is in §4 below. Phase A slots in **between PROJECT_PLAN Phase 
 
 | Source | Says |
 |---|---|
-| `PROJECT_PLAN.md` §4 | "PyQt6 OR Flask + browser" — leaves it open |
-| `DESIGN_INTEGRATION.md` §3 | Locks in PyQt6 + bundled QSS stylesheet |
+| `docs/archive/PROJECT_PLAN.md` §4 | "PyQt6 OR Flask + browser" — leaves it open |
+| `docs/archive/DESIGN_INTEGRATION.md` §3 | Locks in PyQt6 + bundled QSS stylesheet |
 
 **Resolution: PyQt6.**
 
@@ -152,24 +152,24 @@ fi
 
 | Source | Says |
 |---|---|
-| `PROJECT_PLAN.md` §2 Tier 2 | "Last 50 transcriptions, searchable" |
-| `DESIGN_INTEGRATION.md` §9, §7 Advanced tab | "Last 500 dictations… default 500" |
+| `docs/archive/PROJECT_PLAN.md` §2 Tier 2 | "Last 50 transcriptions, searchable" |
+| `docs/archive/DESIGN_INTEGRATION.md` §9, §7 Advanced tab | "Last 500 dictations… default 500" |
 
 **Resolution: 500 is the new default.** The Settings → Advanced tab exposes this as a number input, min 50, max 5000.
 
 ### Conflict 6 — Cross-platform scope
 
-`PROJECT_PLAN.md` said "macOS first, Linux second, Windows third."
-`DESIGN_INTEGRATION.md` is Mac-heavy.
+`docs/archive/PROJECT_PLAN.md` said "macOS first, Linux second, Windows third."
+`docs/archive/DESIGN_INTEGRATION.md` is Mac-heavy.
 
-**Resolution: macOS only.** Supersedes both. Update `PROJECT_PLAN.md`'s §1 non-negotiables to read "macOS 13+ (Ventura) — single supported platform for v1.0."
+**Resolution: macOS only.** Supersedes both. Update `docs/archive/PROJECT_PLAN.md`'s §1 non-negotiables to read "macOS 13+ (Ventura) — single supported platform for v1.0."
 
 ### Conflict 7 — Dark mode
 
 | Source | Says |
 |---|---|
-| `PROJECT_PLAN.md` | Silent |
-| `DESIGN_INTEGRATION.md` §12.1 | "Light mode only for v1" |
+| `docs/archive/PROJECT_PLAN.md` | Silent |
+| `docs/archive/DESIGN_INTEGRATION.md` §12.1 | "Light mode only for v1" |
 
 **Resolution: No dark mode in v1.** The app stays in paper-light regardless of system appearance. Two automatic exceptions:
 - Tray icon: template image, macOS auto-tints for menu bar
@@ -179,14 +179,14 @@ fi
 
 | Source | Says |
 |---|---|
-| `PROJECT_PLAN.md` §2 Tier 1 | "Visual + audio feedback on record start/stop" |
-| `DESIGN_INTEGRATION.md` §12.2 | Soft tick sounds at 60ms / 80ms, toggleable |
+| `docs/archive/PROJECT_PLAN.md` §2 Tier 1 | "Visual + audio feedback on record start/stop" |
+| `docs/archive/DESIGN_INTEGRATION.md` §12.2 | Soft tick sounds at 60ms / 80ms, toggleable |
 
 **Resolution: They agree.** Use the DESIGN_INTEGRATION values. Add `assets/sounds/start.wav` and `end.wav`. Play via `NSSound` (pyobjc), not a third-party library.
 
 ### Conflict 9 — File structure
 
-`DESIGN_INTEGRATION.md`'s structure is a strict superset of `PROJECT_PLAN.md`'s. Use the design integration version, simplified for macOS only:
+`docs/archive/DESIGN_INTEGRATION.md`'s structure is a strict superset of `docs/archive/PROJECT_PLAN.md`'s. Use the design integration version, simplified for macOS only:
 
 ```
 openflow/
@@ -256,12 +256,12 @@ This replaces the phase list in both prior documents.
 - [ ] Run the cleanup pass from §2 if any non-macOS code exists
 
 ### Phase 1 — Core dictation loop (no UI)
-*From PROJECT_PLAN.md §6 Phase 1. Unchanged.*
+*From docs/archive/PROJECT_PLAN.md §6 Phase 1. Unchanged.*
 - [ ] `audio.py`, `transcribe.py`, `paste.py`, `hotkeys.py`, `daemon.py`
 - **Checkpoint:** holding F5 dictates raw text
 
 ### Phase 2 — Claude cleanup + tone modes (still no UI)
-*From PROJECT_PLAN.md §6 Phase 2. Unchanged.*
+*From docs/archive/PROJECT_PLAN.md §6 Phase 2. Unchanged.*
 - [ ] `prompts.py`, `ai.py`
 - [ ] Hardcoded tone in daemon for now
 - **Checkpoint:** dictations come out cleaned up
@@ -279,36 +279,36 @@ This replaces the phase list in both prior documents.
 - **Checkpoint:** smoke test renders a styled toast with brand fonts
 
 ### Phase 3 — Tray UI
-*PROJECT_PLAN.md §6 Phase 3, with DESIGN_INTEGRATION.md §4 specifications.*
+*docs/archive/PROJECT_PLAN.md §6 Phase 3, with docs/archive/DESIGN_INTEGRATION.md §4 specifications.*
 - [ ] `tray.py` — rumps-based, subscribed to `state.py`
 - [ ] Icon hot-swap on status change
 - **Checkpoint:** tray menu drives the daemon, icon reflects state
 
 ### Phase 4 — Hindi/Hinglish support
-*PROJECT_PLAN.md §6 Phase 4. Unchanged. Modes switched via tray.*
+*docs/archive/PROJECT_PLAN.md §6 Phase 4. Unchanged. Modes switched via tray.*
 - [ ] Six language modes wired
 - [ ] Mode matrix tested with sample audio
 
 ### Phase 5 — Custom dictionary
-*Python module from PROJECT_PLAN.md §6 Phase 5; GUI from DESIGN_INTEGRATION.md §8.*
+*Python module from docs/archive/PROJECT_PLAN.md §6 Phase 5; GUI from docs/archive/DESIGN_INTEGRATION.md §8.*
 - [ ] `dictionary.py`
 - [ ] CLI (`openflow dict add/list/remove`)
 - [ ] `ui/dict_editor.py`
 
 ### Phase 6 — Edit mode
-*PROJECT_PLAN.md §6 Phase 6; UI from DESIGN_INTEGRATION.md §10.*
+*docs/archive/PROJECT_PLAN.md §6 Phase 6; UI from docs/archive/DESIGN_INTEGRATION.md §10.*
 - [ ] `ui/edit_overlay.py`
 - [ ] Daemon flow: hotkey → auto-copy → record → rewrite → paste
 - [ ] Edge cases (empty clipboard, Esc cancel)
 
 ### Phase 7 — Settings GUI
-*PROJECT_PLAN.md §6 Phase 7; UI from DESIGN_INTEGRATION.md §7.*
+*docs/archive/PROJECT_PLAN.md §6 Phase 7; UI from docs/archive/DESIGN_INTEGRATION.md §7.*
 - [ ] `ui/settings.py` shell
 - [ ] All five tabs in `ui/settings_tabs/`
 - [ ] Apply-immediately, no Save button
 
 ### Phase 8 — History viewer
-*Implicit in PROJECT_PLAN Tier 2; UI from DESIGN_INTEGRATION.md §9.*
+*Implicit in PROJECT_PLAN Tier 2; UI from docs/archive/DESIGN_INTEGRATION.md §9.*
 - [ ] `ui/history.py`
 - [ ] FTS5 search if available
 - [ ] Re-paste action
@@ -321,14 +321,14 @@ This replaces the phase list in both prior documents.
 - [ ] Notch clamping on M1/M2/M3 MacBooks
 
 ### Phase 10 — Onboarding wizard
-*PROJECT_PLAN.md Tier 5; UI from DESIGN_INTEGRATION.md §6.*
+*docs/archive/PROJECT_PLAN.md Tier 5; UI from docs/archive/DESIGN_INTEGRATION.md §6.*
 - [ ] `ui/onboarding.py`
 - [ ] First-run detection
 - [ ] Permissions check (Accessibility + Microphone)
 - [ ] Keychain write for API key
 
 ### Phase 11 — Packaging & ship
-*PROJECT_PLAN.md §6 Phase 8.*
+*docs/archive/PROJECT_PLAN.md §6 Phase 8.*
 - [ ] PyInstaller `.app` bundle
 - [ ] `.icns` icon at all retina sizes
 - [ ] `LaunchAgent` plist generation (with consent prompt)
@@ -339,7 +339,7 @@ This replaces the phase list in both prior documents.
 
 ## 5. The "don't break it" rule
 
-Treat every existing file as **load-bearing until proven otherwise**. Before refactoring anything built per `PROJECT_PLAN.md`:
+Treat every existing file as **load-bearing until proven otherwise**. Before refactoring anything built per `docs/archive/PROJECT_PLAN.md`:
 
 1. **Run the existing tests.** If they pass, the file is correct as-is.
 2. **Check the public interface.** If outward-facing function signatures haven't changed in this document, the implementation hasn't either.
@@ -463,7 +463,7 @@ This document's job is done when:
 
 - [ ] Every conflict in §3 has a resolution
 - [ ] The merged build order in §4 has been followed end to end
-- [ ] No file built per `PROJECT_PLAN.md` had to be discarded (except sanctioned rewrites in §5)
+- [ ] No file built per `docs/archive/PROJECT_PLAN.md` had to be discarded (except sanctioned rewrites in §5)
 - [ ] No non-macOS code remains in the repo
 - [ ] The `DaemonState` object is the only path UI components use to read daemon state
 - [ ] The tray module uses rumps with no platform shim
@@ -471,8 +471,8 @@ This document's job is done when:
 ---
 
 **The order to read all three documents:**
-1. `PROJECT_PLAN.md` — what to build
-2. `DESIGN_INTEGRATION.md` — how it should look
+1. `docs/archive/PROJECT_PLAN.md` — what to build
+2. `docs/archive/DESIGN_INTEGRATION.md` — how it should look
 3. **This document** — how to merge them without breaking anything, and that the target is macOS only
 
 If you've read all three and a question remains, ask before coding.

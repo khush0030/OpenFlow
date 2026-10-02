@@ -1,8 +1,8 @@
 # OpenFlow — Design Integration Plan
 
-> **Handoff document #2 for Claude Code.** This complements `PROJECT_PLAN.md`. That document covers *what* to build; this one covers *how it should look and feel* when built. Read both before writing any UI code.
+> **Handoff document #2 for Claude Code.** This complements `docs/archive/PROJECT_PLAN.md`. That document covers *what* to build; this one covers *how it should look and feel* when built. Read both before writing any UI code.
 >
-> **Scope: macOS only.** OpenFlow v1.0 targets macOS 13 (Ventura) and later. Apple Silicon and Intel both supported. Linux and Windows are explicitly out of scope; do not build cross-platform abstractions. See `RECONCILIATION.md` for the full scope decision.
+> **Scope: macOS only.** OpenFlow v1.0 targets macOS 13 (Ventura) and later. Apple Silicon and Intel both supported. Linux and Windows are explicitly out of scope; do not build cross-platform abstractions. See `docs/archive/RECONCILIATION.md` for the full scope decision.
 
 ---
 
@@ -33,7 +33,7 @@ The plan:
 
 ## 2. Tech stack additions
 
-These get added to the existing `PROJECT_PLAN.md` dependency list:
+These get added to the existing `docs/archive/PROJECT_PLAN.md` dependency list:
 
 ```bash
 pip install rumps              # native macOS tray (NSStatusItem + NSMenu)
@@ -815,4 +815,4 @@ The design integration is complete when:
 
 ---
 
-**Hand this document to Claude Code alongside `PROJECT_PLAN.md`, `RECONCILIATION.md`, and `OpenFlow_Brand_Book.html`. The first two define the contract, the third reconciles them and locks scope to macOS, and the brand book is the visual reference. Together they're sufficient to build the entire app.**
+**Hand this document to Claude Code alongside `docs/archive/PROJECT_PLAN.md`, `docs/archive/RECONCILIATION.md`, and `OpenFlow_Brand_Book.html`. The first two define the contract, the third reconciles them and locks scope to macOS, and the brand book is the visual reference. Together they're sufficient to build the entire app.**
