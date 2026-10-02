@@ -157,6 +157,56 @@ def check_sarvam_key(key: str, model: str) -> None:
             raise
 
 
+def fallback_key_found(name: str, cfg: dict) -> bool:
+    """A key for backup provider `name` ("groq" / "anthropic") under its
+    OpenFlow name (env, Keychain, .env), as the daemon looks it up."""
+    try:
+        from llm import FAST_PROVIDERS
+        from sarvam import find_api_key
+        spec = FAST_PROVIDERS[name]
+        c = {**cfg_mod.DEFAULTS["cleanup"], **(cfg.get("cleanup") or {})}
+        return bool(find_api_key(c.get(f"{name}_api_key_env") or spec["env"],
+                                 spec["keyring_user"]))
+    except Exception:
+        return False
+
+
+def _failover_on(cfg: dict, key: str) -> bool:
+    f = {**cfg_mod.DEFAULTS["failover"], **(cfg.get("failover") or {})}
+    return str(f.get(key, "auto")).strip().lower() not in ("off", "false", "no", "0")
+
+
+def fallback_stt_text(cfg: dict) -> tuple[str, bool]:
+    """(status line, active) for Groq Whisper as the backup speech-to-text."""
+    if not _failover_on(cfg, "stt"):
+        return "Off ([failover] stt in config.toml).", False
+    if fallback_key_found("groq", cfg):
+        return "Groq Whisper is ready: key found.", True
+    return ("Not set up: add a Groq key (Keychain account groq_api_key, or "
+            "OPENFLOW_GROQ_API_KEY) and Groq Whisper takes over when Sarvam can't."), False
+
+
+def fallback_cleanup_text(cfg: dict, *, sarvam_key: bool) -> str:
+    """Which providers cleanup falls back to, in order, given the keys."""
+    from llm import FALLBACK_ORDER, make_cleanup_provider
+    have = {n: fallback_key_found(n, cfg) for n in ("groq", "anthropic")}
+    have["sarvam"] = sarvam_key
+    try:
+        primary = make_cleanup_provider(
+            cfg, find_key=lambda env, user: next(
+                ("k" for n, ok in have.items() if ok and user == f"{n}_api_key"), None)).name
+    except Exception:
+        primary = "sarvam"
+    names = {"sarvam": "Sarvam", "groq": "Groq", "anthropic": "Claude Haiku"}
+    if not _failover_on(cfg, "cleanup"):
+        return f"Off ([failover] cleanup): {names.get(primary, primary)} only."
+    rest = [names[n] for n in FALLBACK_ORDER if n != primary and have.get(n)]
+    lead = f"{names.get(primary, primary)} first"
+    if not rest:
+        return f"{lead}; no backup key set, so a failed cleanup pastes the text as spoken."
+    return f"{lead}, then {', then '.join(rest)}."
+
+
 def run_open(args: list[str]) -> None:
     subprocess.run(args, check=False)
 
@@ -422,6 +472,7 @@ class SettingsPage(Page):
         self.history_size.blockSignals(False)
         self._show_shortcuts()
         self._key_placeholder(force=True)
+        self._show_fallbacks()
 
     # ── general ──────────────────────────────────────────────────────────
     def _build_general(self, lay: QVBoxLayout) -> None:
@@ -701,6 +752,30 @@ class SettingsPage(Page):
             C.Row("Cleanup model", "Punctuates, applies your tone, and rewrites in edit mode.",
                   self.chat_model),
         ]))
+
+        # Provider failover (spec 2026-10-02-provider-failover): status only.
+        stt_row = C.Row("Backup speech-to-text",
+                        "Used when Sarvam is down or slow, so a take still becomes text.")
+        cleanup_row = C.Row("Backup cleanup",
+                            "Tried in turn when cleanup is slow or down; if none "
+                            "answers, the text is pasted as you said it.")
+        self.fallback_stt_status = S.muted("")
+        self.fallback_cleanup_status = S.muted("")
+        for row, label in ((stt_row, self.fallback_stt_status),
+                           (cleanup_row, self.fallback_cleanup_status)):
+            label.setWordWrap(True)
+            label.setMinimumWidth(1)
+            row.text_col.addWidget(label)
+        self._show_fallbacks()
+        lay.addWidget(C.Group("Backup providers", [stt_row, cleanup_row]))
+
+    def _show_fallbacks(self) -> None:
+        """Honest status: which backup providers have a key right now."""
+        text, ok = fallback_stt_text(self._cfg)
+        self.fallback_stt_status.setText(text)
+        self.fallback_stt_status.setStyleSheet(f"color:{S.SAGE_TEXT if ok else S.MUTED};")
+        self.fallback_cleanup_status.setText(
+            fallback_cleanup_text(self._cfg, sarvam_key=key_source(self._key_env()) is not None))
 
     def _key_env(self) -> str:
         return str(self._get("sarvam", "api_key_env", "SARVAM_API_KEY") or "SARVAM_API_KEY")

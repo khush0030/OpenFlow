@@ -86,6 +86,19 @@ DEFAULTS: dict[str, Any] = {
         # punctuates; "ok" doesn't need a rewrite). Bullets always go. 0 = off.
         "skip_max_words": 3,
     },
+    "failover": {
+        # Provider failover (spec 2026-10-02-provider-failover). stt: "auto"
+        # sends a take to Groq Whisper when Sarvam's stream and upload both
+        # fail or run past their time budgets, if a Groq key is set
+        # ([cleanup] groq_api_key_env / Keychain groq_api_key); "off": Sarvam only.
+        "stt": "auto",
+        "groq_stt_model": "whisper-large-v3-turbo",
+        "groq_translate_model": "whisper-large-v3",
+        # cleanup: "auto" tries the next provider with a key when the chosen
+        # one is slow or down, then pastes the transcript uncleaned;
+        # "off": only the chosen provider.
+        "cleanup": "auto",
+    },
     "dictionary": {
         "fuzzy_threshold": 85,
         "inject_into_cleanup": True,
