@@ -78,14 +78,38 @@ def test_bundle_spawn_opens_a_new_instance_with_the_page(popen, monkeypatch):
     assert "LaunchInstanceID" not in popen[0]["env"]
 
 
-def test_source_spawn_runs_the_cli(popen, monkeypatch):
+def test_source_spawn_uses_the_installed_app_for_its_dock_icon(popen, monkeypatch, tmp_path):
+    # From source the hub would show in the Dock as "Python" with Python's
+    # icon; the installed bundle gives it OpenFlow's name and icon.
+    app = tmp_path / "OpenFlow.app"
+    app.mkdir()
     monkeypatch.delattr(tray.sys, "frozen", raising=False)
+    monkeypatch.setattr(tray, "INSTALLED_APP", app)
+    monkeypatch.delenv("OPENFLOW_HUB_FROM_SOURCE", raising=False)
+    tray._spawn_ui_subprocess("ui.hub", "history")
+    assert popen[0]["cmd"] == ["/usr/bin/open", "-n", "-a", str(app), "--args", "hub", "history"]
+    assert "__CFBundleIdentifier" not in popen[0]["env"]
+
+
+def test_source_spawn_runs_the_cli(popen, monkeypatch, tmp_path):
+    monkeypatch.delattr(tray.sys, "frozen", raising=False)
+    monkeypatch.setattr(tray, "INSTALLED_APP", tmp_path / "missing.app")
     tray._spawn_ui_subprocess("ui.hub", "settings")
     cmd = popen[0]["cmd"]
     assert cmd[0] == sys.executable
     assert Path(cmd[1]).name == "cli.py"
     assert cmd[2:] == ["hub", "settings"]
     assert "__CFBundleIdentifier" not in popen[0]["env"]
+
+
+def test_source_spawn_can_be_forced_for_development(popen, monkeypatch, tmp_path):
+    app = tmp_path / "OpenFlow.app"
+    app.mkdir()
+    monkeypatch.delattr(tray.sys, "frozen", raising=False)
+    monkeypatch.setattr(tray, "INSTALLED_APP", app)
+    monkeypatch.setenv("OPENFLOW_HUB_FROM_SOURCE", "1")
+    tray._spawn_ui_subprocess("ui.hub", "home")
+    assert popen[0]["cmd"][0] == sys.executable
 
 
 def test_source_spawn_of_a_plain_module_is_unchanged(popen, monkeypatch):

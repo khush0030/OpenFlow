@@ -191,6 +191,11 @@ _BUNDLE_SUBCOMMAND = {
 }
 # Modules that, from source, run through cli.py rather than as a script.
 _SOURCE_VIA_CLI = {"ui.hub"}
+# From source (the LaunchAgent runs openflow.py) a hub started with
+# sys.executable shows in the Dock as "Python" with Python's icon. When the
+# app is installed, open the hub through it instead so the Dock shows
+# OpenFlow. OPENFLOW_HUB_FROM_SOURCE=1 keeps the source hub for development.
+INSTALLED_APP = Path("/Applications/OpenFlow.app")
 
 
 def _spawn_ui_subprocess(module: str, *args: str) -> None:
@@ -206,14 +211,19 @@ def _spawn_ui_subprocess(module: str, *args: str) -> None:
     for _k in ("__CFBundleIdentifier", "LaunchInstanceID",
                "XPC_SERVICE_NAME", "XPC_FLAGS"):
         env.pop(_k, None)
-    if getattr(sys, "frozen", False):
+    frozen = getattr(sys, "frozen", False)
+    use_installed = (not frozen and module in _BUNDLE_SUBCOMMAND
+                     and not os.environ.get("OPENFLOW_HUB_FROM_SOURCE")
+                     and INSTALLED_APP.is_dir())
+    if frozen or use_installed:
         # PyInstaller bundle: route through LaunchServices — a directly
         # exec'd child of this daemon never gets its windows onscreen.
         sub = _BUNDLE_SUBCOMMAND.get(module)
         if not sub:
             print(f"[tray] no bundle subcommand for {module}", flush=True)
             return
-        app_path = str(Path(sys.executable).resolve().parents[2])
+        app_path = (str(Path(sys.executable).resolve().parents[2]) if frozen
+                    else str(INSTALLED_APP))
         cmd = ["/usr/bin/open", "-n", "-a", app_path, "--args", *sub, *args]
         cwd = None
     else:
