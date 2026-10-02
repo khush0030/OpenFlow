@@ -59,7 +59,7 @@ def cue_for_transition(prev: str, new: str, hands_free: bool = False) -> Cue | N
         return "handsfree_start" if hands_free else "start"
     if new == "processing" and prev in _RECORDING:
         return "handsfree_stop" if hands_free else "stop"
-    if new == "cancelled" and prev in _RECORDING:
+    if new == "cancelled" and (prev in _RECORDING or prev == "processing"):
         return "cancel"
     if new == "error" and prev != "error":
         return "error"
