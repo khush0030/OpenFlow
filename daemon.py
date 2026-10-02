@@ -332,6 +332,11 @@ def _maybe_run_onboarding_blocking() -> None:
         time.sleep(_FIRST_RUN_POLL_S)
 
 
+# The overlay process takes a moment to start and connect: no second spawn
+# for it in the meantime (it gets the latest view when it connects).
+OVERLAY_SPAWN_WAIT_S = 3.0
+
+
 def _spawn_edit_overlay() -> subprocess.Popen | None:
     """Spawn the PyQt6 edit-mode overlay (subprocess, never blocks). It
     connects back over EDIT_OVERLAY_SOCKET_PATH for the selection."""
@@ -399,6 +404,7 @@ class Daemon:
         self._chords: HotkeySet | None = None
         self._edit_pending = False  # for edit-mode
         self._command = None        # armed command_mode.Pending (edit hotkey, no selection)
+        self._edit_take = None      # command_mode.Take: the edit hotkey's listening take
         self._tray: TrayApp | None = None
         self._stop_evt = threading.Event()
         self._cancel_pending = False
@@ -720,6 +726,10 @@ class Daemon:
     # -- Hotkey callbacks ------------------------------------------------
 
     def _on_hold_press(self) -> None:
+        take = getattr(self, "_edit_take", None)
+        if take is not None and self.recorder.is_recording:
+            self._edit_take_key_press(take)   # the edit hotkey's take is listening
+            return
         # Only the hold key starts hands-free sessions; a widget click after
         # a session ✓ ended must not inherit the key's stale toggle mode.
         self.on_record_start(hands_free=bool(getattr(self._hold, "hands_free", False)),
@@ -766,6 +776,7 @@ class Daemon:
             return
         t_mic = time.monotonic()
         remembered = capture_paste_target()
+        self._keydown_target = remembered   # this take's own read (on_edit_mode)
         if remembered is not None:
             self._paste_target = remembered
             print(
@@ -791,6 +802,10 @@ class Daemon:
         """The hold key was tapped (first half of a double-tap) or used as a
         modifier (⌥+key): that press was no dictation. Drop the take quietly:
         no transcription, no "too short", no paste."""
+        take = getattr(self, "_edit_take", None)
+        if take is not None and self.recorder.is_recording:
+            self._edit_take_key_tap(take)
+            return
         if not self.recorder.is_recording:
             return
         # A tap may be the first half of a double-tap: keep the mic running
@@ -1237,6 +1252,9 @@ class Daemon:
     def _record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
+        # The edit hotkey's take (if this is one) stops listening here,
+        # whatever ended it; its end-pointer sees that and quits.
+        take, self._edit_take = getattr(self, "_edit_take", None), None
         keyup_at = time.monotonic()
         audio = self.recorder.stop()
         record_s = time.monotonic() - keyup_at
@@ -1250,6 +1268,8 @@ class Daemon:
             if self._flow.idle_if_recording():
                 self.state.recording = RecordingState.IDLE
                 self.state.notify()
+                if take is not None:
+                    self._disarm_edit()
             return
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
@@ -1274,6 +1294,8 @@ class Daemon:
         print(f"[daemon] captured {dur:.2f}s; transcribing...", flush=True)
         if dur < 0.25:
             print("[daemon] too short, ignoring.", flush=True)
+            if take is not None:
+                self._disarm_edit()   # a one-step take is over; don't leave it armed
             self._abort_stream(ctx)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
@@ -1285,12 +1307,17 @@ class Daemon:
             # trip (or comes back as a made-up phrase). Say so instead.
             print(f"[daemon] can't hear you: loudest {loudest_rms(audio, sr):.5f} < "
                   f"{no_input} — mic muted or wrong input? Not transcribing.", flush=True)
+            if take is not None:
+                self._disarm_edit()
             self._abort_stream(ctx)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             self._flow.no_audio(audio, ctx)
             return
         self._edit_pending = False
+        if take is not None:
+            take.phase = "working"            # the overlay: listening -> working
+            self._update_edit_overlay(take)
         # Mark processing before the worker starts so the widget never
         # flashes back to idle in between.
         self.state.recording = RecordingState.PROCESSING
@@ -1367,19 +1394,127 @@ class Daemon:
     def on_edit_mode(self) -> None:
         # Text selected: rewrite it by voice. Nothing selected: command
         # mode, write new text at the cursor (command_mode.py).
+        # One step: the hotkey starts listening at once (mic first, through
+        # the record key's fast path); the take ends on the hotkey again,
+        # the record key or a pause, and Esc cancels it.
         try:
-            target = capture_paste_target()
+            take = getattr(self, "_edit_take", None)
+            if take is not None and self.recorder.is_recording:
+                self._end_edit_take(take, "edit hotkey")
+                return
+            if self.recorder.is_recording:
+                print("[daemon] edit hotkey ignored: a dictation is recording", flush=True)
+                return
+            take = self._start_edit_take()
+            if take is None:
+                return
+            target = getattr(self, "_keydown_target", None)
             sel = self._copy_selection(target)
             if not sel:
+                if target is None:
+                    self._drop_edit_take(take, "nothing selected and no app to write into")
+                    return
                 self._arm_command(target)
-                return
-            self._edit_selection = sel
-            self._command = None
-            self._edit_pending = True
-            print(f"[daemon] edit mode armed; selection ({len(sel)} chars). Hold record key and speak instruction.", flush=True)
-            self._show_edit_overlay(sel)
+            else:
+                self._edit_selection = sel
+                print(f"[daemon] edit mode: selection ({len(sel)} chars); listening "
+                      "for the instruction.", flush=True)
+                self._show_edit_overlay(sel)
+            self._watch_edit_take(take)
         except Exception as e:
             log_exception("daemon.edit_mode", "edit-mode trigger failed", e)
+
+    # -- One step: the edit hotkey's take (command_mode.Take) --------------
+
+    def _start_edit_take(self):
+        """Open the mic for an edit / command take. None when it didn't
+        (paused, or no input would open: the widget says so)."""
+        hk = (self.cfg.get("hotkeys") or {}).get("edit_mode", "")
+        threshold = float(self.cfg["audio"].get("silence_threshold", 0.01))
+        take = command_mode.Take(command_mode.Endpointer(threshold),
+                                 hotkey=command_mode.chord_label(hk))
+        self._edit_selection = ""
+        self._command = None
+        self._edit_pending = True      # on_record_start: no screen names, warm the LLM
+        self._edit_take = take
+        # Hands-free: no key is held, so the widget offers ✓ / ✕.
+        self.on_record_start(hands_free=True)
+        if self._edit_take is not take or not self.recorder.is_recording:
+            if self._edit_take is take:
+                self._edit_take = None
+            self._edit_pending = False
+            return None
+        self._show_edit_overlay()      # spawn it now; it gets the view on connect
+        return take
+
+    def _watch_edit_take(self, take) -> None:
+        """End-pointing: a pause after speech ends the take (command_mode.watch)."""
+        def live() -> bool:
+            return self._edit_take is take and self.recorder.is_recording
+
+        def on_end(why: str) -> None:
+            if why == command_mode.NO_SPEECH:
+                self._drop_edit_take(take, "nothing said")
+            else:
+                self._end_edit_take(take, why)
+
+        def run() -> None:
+            try:
+                command_mode.watch(take, lambda: self.recorder.current_rms, live, on_end)
+            except Exception as e:
+                log_exception("daemon.edit_mode", "edit take end-pointing failed", e)
+
+        threading.Thread(target=run, name="edit-endpoint", daemon=True).start()
+
+    def _end_edit_take(self, take, why: str) -> None:
+        """Stop the take and run it (the hotkey again, the record key, a pause)."""
+        with self._flow.lock:
+            if self._edit_take is not take or not self.recorder.is_recording:
+                return
+            print(f"[daemon] edit take ended ({why})", flush=True)
+            self._record_stop()
+
+    def _drop_edit_take(self, take, why: str) -> None:
+        """Nothing to run: close the mic quietly. A mic that heard nothing at
+        all says so on the widget, like any take."""
+        with self._flow.lock:
+            if self._edit_take is not take or not self.recorder.is_recording:
+                return
+            self._edit_take = None
+            print(f"[daemon] edit take dropped ({why})", flush=True)
+            self.recorder.cancel()
+            self._drop_stream()
+            self._screen = None
+            self._disarm_edit()
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            no_input = float(self.cfg["audio"].get("no_input_rms", NO_INPUT_RMS))
+            if why == "nothing said" and take.endpointer.loudest < no_input:
+                self._flow.no_audio(None, None)
+            else:
+                self._flow.idle_if_recording()
+
+    def _edit_take_key_press(self, take) -> None:
+        """The record key went down during the take. After speech it ends
+        the take. Before any, it's the old two-step (hotkey, then hold the
+        key and talk): the key holds the take and its release ends it."""
+        if take.heard:
+            self._end_edit_take(take, "record key")
+            return
+        take.held = True
+        print("[daemon] record key holds the edit take; release ends it", flush=True)
+
+    def _edit_take_key_tap(self, take) -> None:
+        """The record key was only tapped (or used as a modifier) during
+        the take: end it if something was said, else drop it."""
+        if take.heard:
+            self._end_edit_take(take, "record key")
+        else:
+            self._drop_edit_take(take, "record key tapped before speaking")
+
+    def _disarm_edit(self) -> None:
+        self._edit_pending = False
+        self._close_edit_overlay()
 
     def _copy_selection(self, target) -> str:
         """The selected text, via Cmd+C. "" when nothing is selected. A
@@ -1415,8 +1550,8 @@ class Daemon:
         self._edit_selection = ""
         self._command = pending
         self._edit_pending = True
-        print(f"[daemon] command mode armed (nothing selected) in {target.name or '?'}. "
-              "Hold record key and say what to write.", flush=True)
+        print(f"[daemon] command mode (nothing selected) in {target.name or '?'}; "
+              "listening for what to write.", flush=True)
         self._show_edit_overlay()
         pending.start()
 
@@ -1442,21 +1577,39 @@ class Daemon:
             log_exception("daemon.edit_overlay", "edit overlay socket unavailable", e)
             self._edit_overlay = None
 
-    def _edit_overlay_msg(self, selection: str | None = None) -> dict:
+    def _edit_overlay_msg(self, selection: str | None = None, take=None) -> dict:
         cmd = getattr(self, "_command", None)
+        take = take or getattr(self, "_edit_take", None)
+        sel = self._edit_selection if selection is None else selection
         if cmd is not None:
-            return command_mode.overlay_message(cmd)
-        return {"type": "show",
-                "selection": self._edit_selection if selection is None else selection}
+            msg = command_mode.overlay_message(cmd)
+        elif take is not None and not sel:
+            # Listening already; the selection is still being read.
+            msg = {"type": "show", "mode": command_mode.OVERLAY_PENDING, "selection": ""}
+        else:
+            msg = {"type": "show", "selection": sel}
+        if take is not None:
+            msg.update(take.overlay_fields())   # one step: listening / working
+        return msg
 
     def _show_edit_overlay(self, selection: str | None = None) -> None:
         server = getattr(self, "_edit_overlay", None)
         if server is None:
             return
-        # Already up: swap the text in place. Otherwise spawn it; it gets
-        # the selection when it connects.
+        # Already up: swap the text in place. Otherwise spawn it (once: it
+        # takes a moment to start); it gets the view when it connects.
         if not server.send(self._edit_overlay_msg(selection)):
-            _spawn_edit_overlay()
+            now = time.monotonic()
+            if now - getattr(self, "_overlay_spawned_at", -OVERLAY_SPAWN_WAIT_S) \
+                    >= OVERLAY_SPAWN_WAIT_S:
+                self._overlay_spawned_at = now
+                _spawn_edit_overlay()
+
+    def _update_edit_overlay(self, take) -> None:
+        """A one-step take changed phase: tell an overlay that is up."""
+        server = getattr(self, "_edit_overlay", None)
+        if server is not None:
+            server.send(self._edit_overlay_msg(take=take))
 
     def _close_edit_overlay(self) -> None:
         server = getattr(self, "_edit_overlay", None)
@@ -1464,6 +1617,7 @@ class Daemon:
             server.send({"type": "close"})
 
     def _on_edit_overlay_connect(self) -> None:
+        self._overlay_spawned_at = -OVERLAY_SPAWN_WAIT_S   # up: the next one may spawn
         if self._edit_pending:
             self._edit_overlay.send(self._edit_overlay_msg())
         else:

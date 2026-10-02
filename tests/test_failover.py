@@ -180,7 +180,9 @@ def run(t, stream=None, audio=AUDIO, opts=OPTS):
     return text, t.last_path, time.monotonic() - t0
 
 
-def test_healthy_stream_is_used(upload):
+def test_healthy_stream_is_used(upload, monkeypatch):
+    # Not a timing test: a busy machine mustn't let the upload hedge fire.
+    monkeypatch.setattr(tr, "STREAM_HEDGE_S", 5.0)
     groq = FakeGroq()
     text, path, _ = run(transcriber(groq), FakeStream())
     assert (text, path) == ("streamed", "stream")
@@ -188,7 +190,10 @@ def test_healthy_stream_is_used(upload):
 
 
 @pytest.mark.parametrize("stream", [FakeStream(error="connect failed"), FakeStream(text="")])
-def test_stream_failure_or_no_text_uses_the_upload(upload, stream):
+def test_stream_failure_or_no_text_uses_the_upload(upload, stream, monkeypatch):
+    # Not a timing test: under load the 0.1 s Groq hedge could beat the
+    # fake upload's thread start and win with its instant answer.
+    monkeypatch.setattr(tr, "UPLOAD_HEDGE_S", 5.0)
     text, path, _ = run(transcriber(FakeGroq()), stream)
     assert (text, path) == ("from upload", "upload")
 
