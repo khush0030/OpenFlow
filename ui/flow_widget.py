@@ -773,6 +773,13 @@ class FlowWidget(QWidget):
                 return "x"
             if math.hypot(pos.x() - ok.x(), pos.y() - ok.y()) <= 11 * S:
                 return "ok"
+        if self.view == "processing":
+            # The pill still shows ✕ while the take is transcribed: it must
+            # cancel (the daemon then discards the result), not be a dead
+            # button that lets the text paste anyway.
+            x, _ok = self._button_centers(r)
+            if math.hypot(pos.x() - x.x(), pos.y() - x.y()) <= 11 * S:
+                return "x"
         return None
 
     # painting

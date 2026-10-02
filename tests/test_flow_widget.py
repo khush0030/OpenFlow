@@ -135,6 +135,20 @@ def test_recording_buttons_hit_test(fa):
     assert fa.client.sent[-1] == {"action": "confirm"}
 
 
+def test_processing_x_cancels_and_tick_is_inert(fa):
+    # The processing pill still draws ✕ and ✓; ✕ used to be a dead button,
+    # so the transcript pasted after the user had clicked cancel.
+    fa._on_message({"type": "state", "state": "processing", "text": ""})
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (22, 88)
+    assert fa.widget.hit(QPointF(fw.M + 11, fw.M + 11)) == "x"
+    assert fa.widget.hit(QPointF(fw.M + 11, fw.M + 88 - 11)) is None
+    before = list(fa.client.sent)
+    fa.widget.click(QPointF(fw.M + 11, fw.M + 88 - 11))
+    assert fa.client.sent == before
+    fa.widget.click(QPointF(fw.M + 11, fw.M + 11))
+    assert fa.client.sent[-1] == {"action": "cancel"}
+
+
 def test_silent_shows_cant_hear_toast(fa):
     fa._on_message({"type": "state", "state": "silent", "text": ""})
     assert isinstance(fa.popup, fw.Toast)

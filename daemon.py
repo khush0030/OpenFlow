@@ -100,6 +100,7 @@ from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, FlowController, FlowHooks
+from flow_state import PROCESSING as FLOW_PROCESSING
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
@@ -767,7 +768,7 @@ class Daemon:
             ),
             silence_threshold=float(self.cfg["audio"].get("silence_threshold", 0.01)),
         )
-        self._widget = WidgetServer(on_message=self._flow.handle_action,
+        self._widget = WidgetServer(on_message=self._on_widget_action,
                                     on_connect=self._on_widget_connect)
 
     def _start_widget_channel(self) -> None:
@@ -846,6 +847,14 @@ class Daemon:
         except Exception as e:
             log_exception("daemon.widget", f"widget menu {action!r} failed", e)
 
+    def _on_widget_action(self, msg: dict) -> None:
+        """A click on the widget. Logged (the action only, never text) so a
+        paste after a cancel can be traced to Undo or to a missed cancel."""
+        action = msg.get("action") if isinstance(msg, dict) else None
+        if action in ("start", "confirm", "cancel", "undo", "retry", "copy", "dismiss"):
+            print(f"[daemon] widget {action} (state={self._flow.state})", flush=True)
+        self._flow.handle_action(msg)
+
     def _on_widget_connect(self) -> None:
         print("[daemon] flow widget connected", flush=True)
         self._send_widget(self._widget_config())
@@ -861,7 +870,10 @@ class Daemon:
             self._cancel_pending = False
 
     def _on_escape(self) -> None:
-        if self.recorder.is_recording:
+        # Recording: stop and discard. Processing: discard the result (the
+        # flow ignores Esc in every other state).
+        if self.recorder.is_recording or self._flow.state == FLOW_PROCESSING:
+            print(f"[daemon] Esc — cancel (state={self._flow.state})", flush=True)
             self._flow.handle_action({"action": "cancel"})
 
     def _start_worker(self, audio, ctx: RunContext, run: int) -> None:
@@ -1064,6 +1076,13 @@ class Daemon:
             self._stop_evt.wait(0.05)
 
     def on_record_stop(self) -> None:
+        # Under the flow lock, like every widget action: a key-up and a ✕ /
+        # Esc arriving together can't interleave, so the cancel either stops
+        # the recording itself or finds the run PROCESSING and discards it.
+        with self._flow.lock:
+            self._record_stop()
+
+    def _record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
         keyup_at = time.monotonic()
@@ -1123,7 +1142,7 @@ class Daemon:
         # flashes back to idle in between.
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
-        run = self._flow.processing()
+        run = self._flow.processing(audio, ctx)
         self._start_worker(audio, ctx, run)
 
     def on_undo(self) -> None:
@@ -1268,6 +1287,15 @@ class Daemon:
         print(f"[daemon] pipeline run {run} no longer owns the widget — result not shown",
               flush=True)
 
+    def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
+        """True (and logs) if the user cancelled this run: its text must
+        not be pasted, copied or saved."""
+        if not self._flow.is_cancelled(run):
+            return False
+        self._abort_stream(ctx)
+        print(f"[daemon] pipeline run {run} cancelled {where} — result discarded", flush=True)
+        return True
+
     def _pipeline_worker(self, audio, ctx: RunContext | None, run: int) -> None:
         ctx = ctx or RunContext()
         target = ctx.target
@@ -1287,6 +1315,8 @@ class Daemon:
             timings["record"] = ctx.record_s
         start = ctx.keyup_at if ctx.keyup_at is not None else time.monotonic()
         try:
+            if self._discarded(run, ctx, "before transcription"):
+                return  # e.g. cancelled while queued behind another dictation
             t0 = time.monotonic()
             tone = self._tone_for(target)
             if tone != self.state.tone:
@@ -1319,6 +1349,8 @@ class Daemon:
             if not raw.strip():
                 self._flow.done(run=run) or self._stale(run)
                 return
+            if self._discarded(run, ctx, "after transcription"):
+                return
 
             if ctx.edit_mode:
                 instruction = raw.strip()
@@ -1332,6 +1364,11 @@ class Daemon:
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
                 self._flow.done(run=run) or self._stale(run)
+                return
+            # Last chance: a cancel from here on is too late (commit marks
+            # the run as pasting under the flow lock).
+            if not self._flow.commit(run):
+                self._discarded(run, ctx, "before paste")
                 return
 
             self.state.last_pasted = final

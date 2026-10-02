@@ -324,3 +324,53 @@ def test_idle_if_recording_only_leaves_recording_states():
         enter()
         before = fc.state
         assert fc.idle_if_recording() is False and fc.state == before
+
+
+# -- cancel while processing (fix/cancel-discards) ----------------------------
+
+def test_cancel_while_processing_discards_the_run_and_offers_undo():
+    fc, calls, sent, clock = make()
+    fc.recording_started()
+    run = fc.processing("AUDIO", "TARGET")
+    fc.handle_action({"action": "cancel"})
+    assert fc.state == CANCELLED
+    assert sent[-1]["state"] == CANCELLED
+    assert ("cancel",) not in calls          # not a recording stop
+    assert fc.is_cancelled(run)
+    assert fc.commit(run) is False           # the worker must not paste it
+    assert fc.done(run=run) is False         # nor flip the widget
+    assert fc.show_card("okay", run=run) is False
+    assert fc.state == CANCELLED
+    clock.t += 4.9
+    fc.handle_action({"action": "undo"})     # Undo is the only way back
+    assert ("rerun", "AUDIO", "TARGET", fc.run) in calls
+    assert fc.run != run and not fc.is_cancelled(fc.run)
+
+
+def test_cancel_after_commit_is_too_late_and_ignored():
+    fc, _, _, _ = make()
+    run = fc.processing("AUDIO", "TARGET")
+    assert fc.commit(run) is True
+    fc.handle_action({"action": "cancel"})   # text is already being pasted
+    assert fc.state == PROCESSING
+    assert not fc.is_cancelled(run)
+    assert fc.done(run=run) is True
+
+
+def test_superseded_run_still_commits():
+    # A newer recording took the widget: the older dictation still pastes.
+    fc, _, _, _ = make()
+    run = fc.processing("AUDIO", "TARGET")
+    fc.recording_started()
+    assert fc.commit(run) is True
+    fc.handle_action({"action": "cancel"})   # cancels the new recording only
+    assert not fc.is_cancelled(run)
+
+
+def test_cancel_while_processing_without_a_take_still_cancels():
+    fc, _, _, _ = make()
+    run = fc.processing()
+    fc.handle_action({"action": "cancel"})
+    assert fc.state == CANCELLED and fc.commit(run) is False
+    fc.tick()                                # nothing kept: back to idle
+    assert fc.state == IDLE
