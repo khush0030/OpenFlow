@@ -41,7 +41,7 @@ Sarvam pipeline was committed but never deployed.
 - ✅ Flow bar no longer respawns every few minutes (App Nap disabled, 10s heartbeat tolerance)
 - ✅ README rewritten for Sarvam
 
-## Phase 1 — Widget & Hub UI (our own design, better than Wispr) — NEXT
+## Phase 1 — Widget & Hub UI (our own design, better than Wispr) 🟡
 
 Flow widget spec: [docs/superpowers/specs/2026-09-30-flow-widget-design.md](docs/superpowers/specs/2026-09-30-flow-widget-design.md) · mockup: [docs/design/flow-widget-mockup.html](docs/design/flow-widget-mockup.html)
 
@@ -50,38 +50,43 @@ match it for polish and add more to both.
 
 ### 1a. Design (before code)
 - Moodboard + teardown of Wispr's pill, macOS Dynamic Island, Raycast, Superwhisper
-- Full state set: idle · hover · listening (hold) · listening (hands-free) ·
+- 🟡 Full state set: idle · hover · listening (hold) · listening (hands-free) ·
   processing · done · error (no mic / no key / offline) · edit/command mode
-- Motion spec: morph between states, waveform driven by real RMS, processing shimmer
-- Light / dark / vibrancy, notch-aware placement, follows the active screen
+  (all but the separate error kinds; edit mode is still its own overlay)
+- ✅ Motion spec: morph between states, waveform driven by real RMS, processing shimmer
+- 🟡 Light / dark / vibrancy, notch-aware placement, follows the active screen
+  (no notch awareness yet)
 - Design tokens in one place (reuse `ui/tokens.py`, brand book)
 
 ### 1b. Flow widget
 - Live partial transcript while speaking (real partials need Phase 3 streaming; design the slot now)
 - Inline mode chip: tone + language, click to switch
 - Hover on "done" → copy · redo in another tone · undo
-- Never steals focus (non-activating panel)
+- ✅ Never steals focus (non-activating panel)
 
 ### 1c. Hub app
-- Home: words dictated, WPM, time saved, streak
-- History: search, re-run with another tone, copy raw vs final
-- Dictionary (auto-learned suggestions arrive in Phase 3)
-- Snippets, per-app styles, settings, permissions health check
+- ✅ Home: words dictated, WPM, time saved, streak (time saved is on Insights)
+- ✅ History: search, re-run with another tone, copy raw vs final
+- ✅ Dictionary (auto-learned suggestions arrive in Phase 3)
+- 🟡 Snippets, per-app styles, settings, permissions health check
+  (Settings and the Help page's permissions check are done)
 
 ### 1d. Tech decision
-Current UI = PyQt subprocesses coordinated through `/tmp/*.json` polled at
-20 Hz with a `pgrep` watchdog — the most fragile part of the app.
-- Replace file polling with a Unix-socket event channel (daemon ↔ UI)
+The UI used to be PyQt subprocesses coordinated through `/tmp/*.json` polled
+at 20 Hz with a `pgrep` watchdog — the most fragile part of the app. The flow
+widget and edit overlay now hold a socket to the daemon (a dropped connection
+means the peer is gone) and the hub talks to it over `control.sock`.
+- ✅ Replace file polling with a Unix-socket event channel (daemon ↔ UI)
 - Build the widget as a native SwiftUI `NSPanel`; Python core stays for now
 - Decide: keep PyQt for the hub or move it to SwiftUI too
 
-## Phase 2 — Daily-driver parity (speed, hands-free, undo, …)
+## Phase 2 — Daily-driver parity (speed, hands-free, undo, …) 🟡
 
 Everything needed to stop opening Wispr.
 
-- Hands-free toggle (`record_toggle` is in config but never registered) + double-tap option
+- ✅ Hands-free: double-tap the hold key (replaces the never-registered `record_toggle`)
 - Undo last paste (currently a stub)
-- Start/stop sounds (`sounds.py` exists, unwired)
+- ✅ Start/stop sounds
 - Per-app tone (`CONTEXT_HINTS` defined, `context_app` ignored)
 - Latency pass, target **< 1s from key-up to text for a 10s clip**
   - trim leading/trailing silence (use `silence_threshold`)
@@ -92,7 +97,8 @@ Everything needed to stop opening Wispr.
 - Snippets: spoken trigger → expanded text
 - Smoke test writes into the real `~/.openflow/openflow.log` — isolate it
 - Dev loop: run from source; signed build (~15 min) only per milestone
-- "Can't hear you" detection (mic muted / wrong device)
+- ✅ "Can't hear you" detection (mic muted / wrong device): the widget shows it
+  when the level stays under `silence_threshold`, with a Mic settings button
 
 ## Phase 3 — Beyond Wispr
 

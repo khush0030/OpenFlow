@@ -32,9 +32,12 @@ from ui.widget_copy import TONE_LABELS
 
 PAGE_SIZE = 200
 SEARCH_DEBOUNCE_MS = 200
-DETAIL_BG = "#FFFDF9"        # the detail pane is a touch lighter than the panel
-TAG_BG = "#ECE6DC"
-ROW_HOVER_SOFT = "#F4EFE7"
+# Master/detail split: the list takes a share of the card, clamped so the
+# detail pane always has room to wrap its paragraph (window ≥ 985 pt).
+LIST_SHARE, LIST_MIN, LIST_MAX = 0.38, 280, 420
+LIST_MIN_NARROW = 256             # below NARROW the list gives up more room
+NARROW = 700                      # split-card width under which the list narrows
+DETAIL_MAX_W = 680                # reading measure of the detail column
 
 # Tones a dictation can be re-run as. Raw is left out: it skips cleanup, so
 # "rewriting" as raw would just hand back what was said.
@@ -286,26 +289,31 @@ class _Flow(QLayout):
     def minimumSize(self) -> QSize:
         s = QSize()
         for it in self._items:
+            if it.widget() is not None and it.widget().isHidden():
+                continue
             s = s.expandedTo(it.minimumSize())
-        return s
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
 
     def _do(self, rect, apply: bool) -> int:
-        x, y, row_h = rect.x(), rect.y(), 0
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, row_h = r.x(), r.y(), 0
         for it in self._items:
             if it.widget() is not None and it.widget().isHidden():
                 continue
             hint = it.sizeHint()
-            if x > rect.x() and x + hint.width() > rect.right() + 1:
-                x, y, row_h = rect.x(), y + row_h + self._v, 0
+            if x > r.x() and x + hint.width() > r.right() + 1:
+                x, y, row_h = r.x(), y + row_h + self._v, 0
             if apply:
                 it.setGeometry(QRect(x, y, hint.width(), hint.height()))
             x += hint.width() + self._h
             row_h = max(row_h, hint.height())
-        return y + row_h - rect.y()
+        return y + row_h - r.y() + m.top() + m.bottom()
 
 
 _SCROLLBAR = ("QScrollBar:vertical{background:transparent;width:8px;margin:4px 2px 4px 0;}"
-              "QScrollBar::handle:vertical{background:#D9D1C4;border-radius:3px;min-height:30px;}"
+              f"QScrollBar::handle:vertical{{background:{S.DISABLED};border-radius:3px;min-height:30px;}}"
               "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
               "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
 
@@ -328,21 +336,22 @@ class _Row(QFrame):
         self.setObjectName("hrow")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(18, 11, 18, 11)
+        lay.setContentsMargins(20, 12, 18, 12)
         lay.setSpacing(5)
         top = QHBoxLayout()
         top.setSpacing(8)
         self._time = QLabel(clock_time(entry.ts))
+        self._time.setFont(S.mono(S.T_EYEBROW + 0.5, 400))
         self._tone = QLabel(tone_label(entry.tone))
+        self._tone.setFont(S.sans(S.T_SMALL))
         for lbl in (self._time, self._tone):
-            lbl.setFont(S.sans(12))
             lbl.setStyleSheet(f"color:{S.MUTED};background:transparent;")
         top.addWidget(self._time)
         top.addStretch(1)
         top.addWidget(self._tone)
         lay.addLayout(top)
         text = " ".join((entry.final or entry.raw or "(empty)").split())
-        lay.addWidget(_Clamp(text, S.sans(14), S.INK))
+        lay.addWidget(_Clamp(text, S.sans(S.T_BODY), S.INK))
         self.set_selected(False)
 
     def time_text(self) -> str:
@@ -353,9 +362,11 @@ class _Row(QFrame):
 
     def set_selected(self, on: bool) -> None:
         self.selected = on
-        bg = S.ROW_HOVER if on else "transparent"
-        hover = S.ROW_HOVER if on else ROW_HOVER_SOFT
-        self.setStyleSheet(f"QFrame#hrow{{background:{bg};border:none;}}"
+        # Selected: a soft fill and the widget-red bar on the leading edge.
+        bg = S.ROW_ON if on else "transparent"
+        bar = S.ACCENT if on else "transparent"
+        hover = S.ROW_ON if on else S.ROW_HOVER
+        self.setStyleSheet(f"QFrame#hrow{{background:{bg};border:none;border-left:3px solid {bar};}}"
                            f"QFrame#hrow:hover{{background:{hover};}}")
 
     def mousePressEvent(self, ev) -> None:
@@ -366,21 +377,47 @@ class _Row(QFrame):
 
 def _group_header(text: str) -> QLabel:
     lbl = S.eyebrow(text)
-    lbl.setContentsMargins(18, 16, 18, 8)
+    lbl.setContentsMargins(23, 18, 18, 8)
     lbl.setStyleSheet(f"color:{S.MUTED};background:transparent;")
     return lbl
 
 
+def _section(title: str, *widgets: QWidget, spacing: int = 10) -> QVBoxLayout:
+    box = QVBoxLayout()
+    box.setSpacing(spacing)
+    box.addWidget(S.eyebrow(title))
+    for w in widgets:
+        box.addWidget(w)
+    return box
+
+
+def _flow_host(hspace: int = 8, vspace: int = 8) -> tuple[QWidget, "_Flow"]:
+    host = QWidget()
+    host.setStyleSheet("background:transparent;")
+    flow = _Flow(host, hspace, vspace)
+    sp = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+    sp.setHeightForWidth(True)
+    host.setSizePolicy(sp)
+    return host, flow
+
+
 # ── detail ──────────────────────────────────────────────────────────────
 class _Detail(QWidget):
-    """Right pane. The page wires its buttons; this only builds and fills."""
+    """Right pane. The page wires its buttons; this only builds and fills.
+
+    Everything wide sits in wrapping rows (tags, actions, re-run chips) and
+    the paragraphs wrap, so the pane never needs more than one button's
+    width: nothing clips however narrow the window gets."""
+
+    PAD_X, PAD_TOP, PAD_BOTTOM = 30, 28, 28
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("hdetail")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setStyleSheet(f"QWidget#hdetail{{background:{DETAIL_BG};"
-                           f"border-top-right-radius:13px;border-bottom-right-radius:13px;}}")
+        self.setStyleSheet(f"QWidget#hdetail{{background:{S.PAPER};"
+                           f"border-top-right-radius:{S.RADIUS_CARD - 1}px;"
+                           f"border-bottom-right-radius:{S.RADIUS_CARD - 1}px;}}")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
@@ -391,7 +428,7 @@ class _Detail(QWidget):
         ph = QWidget()
         phl = QVBoxLayout(ph)
         phl.setContentsMargins(30, 26, 30, 26)
-        self.placeholder = S.muted("", 14)
+        self.placeholder = S.muted("", S.T_BODY)
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         phl.addWidget(self.placeholder)
         self.stack.addWidget(ph)
@@ -411,73 +448,117 @@ class _Detail(QWidget):
         self.scroll = scroll
 
         lay = QVBoxLayout(body)
-        lay.setContentsMargins(30, 26, 30, 22)
-        lay.setSpacing(20)
+        lay.setContentsMargins(self.PAD_X, self.PAD_TOP, self.PAD_X, self.PAD_BOTTOM)
+        lay.setSpacing(0)
+        self._lay = lay
 
-        # header: when + tags | Copy, Paste again
-        head = QHBoxLayout()
-        head.setSpacing(16)
-        meta = QVBoxLayout()
-        meta.setSpacing(8)
+        # when, then the tags in a wrapping row
         self.when = S.eyebrow("")
-        meta.addWidget(self.when)
-        self._tags_host = QWidget()
-        self._tags = _Flow(self._tags_host, 6, 6)
-        meta.addWidget(self._tags_host)
-        head.addLayout(meta, 1)
-        btns = QHBoxLayout()
-        btns.setSpacing(8)
+        self.when.setWordWrap(True)
+        self.when.setMinimumWidth(1)
+        lay.addWidget(self.when)
+        lay.addSpacing(10)
+        self._tags_host, self._tags = _flow_host(6, 6)
+        lay.addWidget(self._tags_host)
+        lay.addSpacing(18)
+
+        # actions: one wrapping row of pills
+        self._actions_host, self._actions = _flow_host(8, 8)
+        self.paste_btn = _fixed(S.button("Paste again", kind="primary"))
+        self.paste_btn.setIcon(_icon("paste", S.PAPER))
         self.copy_btn = _fixed(S.button("Copy"))
         self.copy_btn.setIcon(_icon("copy", S.INK))
-        self.paste_btn = _fixed(S.button("Paste again", primary=True))
-        self.paste_btn.setIcon(_icon("paste", S.PAPER))
-        btns.addWidget(self.copy_btn)
-        btns.addWidget(self.paste_btn)
-        head.addLayout(btns)
-        head.setAlignment(btns, Qt.AlignmentFlag.AlignTop)
-        lay.addLayout(head)
+        self.details_btn = _fixed(S.button("Show details"))
+        self.delete_btn = _fixed(S.button("Delete", kind="danger"))
+        # inline delete confirm: replaces the Delete pill, wraps like the row
+        self.confirm, cl = _flow_host(8, 8)
+        cl.setContentsMargins(0, 10, 0, 0)
+        self.confirm_label = QLabel("Delete this dictation?")
+        self.confirm_label.setFont(S.sans(S.T_UI))
+        self.confirm_label.setStyleSheet(f"color:{S.INK};background:transparent;")
+        self.confirm_delete = _fixed(S.button("Delete", kind="danger"))
+        self.confirm_cancel = _fixed(S.button("Cancel"))
+        cl.addWidget(self.confirm_label)
+        yes_no = QWidget()
+        yes_no.setStyleSheet("background:transparent;")
+        yl = QHBoxLayout(yes_no)
+        yl.setContentsMargins(0, 0, 0, 0)
+        yl.setSpacing(8)
+        yl.addWidget(self.confirm_delete)
+        yl.addWidget(self.confirm_cancel)
+        cl.addWidget(_fixed(yes_no))
+        self.confirm_label.setFixedHeight(S.CONTROL_H)       # centre on the pills
+        self.confirm.hide()
+        # two groups that wrap as units: use it | look closer / remove it
+        for pair in ((self.paste_btn, self.copy_btn), (self.details_btn, self.delete_btn)):
+            group = QWidget()
+            group.setStyleSheet("background:transparent;")
+            gl = QHBoxLayout(group)
+            gl.setContentsMargins(0, 0, 0, 0)
+            gl.setSpacing(8)
+            for b in pair:
+                gl.addWidget(b)
+            self._actions.addWidget(_fixed(group))
+        lay.addWidget(self._actions_host)
+        lay.addWidget(self.confirm)
+
+        self.meta = QLabel()
+        self.meta.setFont(S.mono(S.T_EYEBROW + 1, 400))
+        self.meta.setWordWrap(True)
+        self.meta.setMinimumWidth(1)
+        self.meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.meta.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+        self.meta.setContentsMargins(0, 12, 0, 0)
+        self.meta.hide()
+        lay.addWidget(self.meta)
 
         self.offline = QLabel()
-        self.offline.setFont(S.sans(13))
+        self.offline.setFont(S.sans(S.T_SMALL))
+        self.offline.setWordWrap(True)
+        self.offline.setMinimumWidth(1)
         self.offline.setTextFormat(Qt.TextFormat.RichText)
         self.offline.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+        self.offline.setContentsMargins(0, 12, 0, 0)
         self.offline.hide()
         lay.addWidget(self.offline)
+        lay.addSpacing(26)
 
-        pasted = QVBoxLayout()
-        pasted.setSpacing(8)
-        pasted.addWidget(S.eyebrow("What was pasted"))
-        self.pasted = _Para(S.serif(19), S.INK)
-        pasted.addWidget(self.pasted)
-        lay.addLayout(pasted)
+        # what was pasted: the hero, Fraunces, comfortable leading
+        self.pasted = _Para(S.serif(S.T_H3), S.INK, leading=150)
+        lay.addLayout(_section("What was pasted", self.pasted, spacing=10))
+        lay.addSpacing(24)
 
+        # what you said: a soft inset, muted Geist
         said = QFrame()
         said.setObjectName("said")
-        said.setStyleSheet(f"QFrame#said{{background:{S.CARD};border:1px solid {S.HAIR};border-radius:12px;}}")
+        said.setStyleSheet(f"QFrame#said{{background:{S.CARD};border:none;border-radius:12px;}}")
         sl = QVBoxLayout(said)
-        sl.setContentsMargins(18, 16, 18, 16)
+        sl.setContentsMargins(18, 14, 18, 16)
         sl.setSpacing(8)
         sh = QHBoxLayout()
         sh.addWidget(S.eyebrow("What you said"))
         sh.addStretch(1)
-        self.copy_raw_btn = _link("Copy", S.MUTED, 12.5)
+        self.copy_raw_btn = _link("Copy", S.ACCENT_TEXT, S.T_SMALL)
         self.copy_raw_btn.setToolTip("Copy what you said")
         sh.addWidget(self.copy_raw_btn)
         sl.addLayout(sh)
-        self.said = _Para(S.sans(14.5), S.INK_SOFT)
+        self.said = _Para(S.sans(S.T_BODY), S.INK_SOFT)
         sl.addWidget(self.said)
         lay.addWidget(said)
+        lay.addSpacing(26)
 
-        self._rerun_host = QWidget()
-        self._rerun = _Flow(self._rerun_host, 10, 10)
+        # run it again as… (tone chips, wrapping)
+        self._rerun_host, self._rerun = _flow_host(8, 8)
         self.rerun_chips: dict[str, QPushButton] = {}
-        lay.addWidget(self._rerun_host)
+        lay.addLayout(_section("Run it again as", self._rerun_host, spacing=12))
+        lay.addSpacing(16)
 
         # inline rerun result (not saved to history)
         self.result_card = QFrame()
         self.result_card.setObjectName("result")
         self.result_card.setStyleSheet(
-            f"QFrame#result{{background:{S.PAPER};border:1px solid {S.HAIR};border-radius:12px;}}")
+            f"QFrame#result{{background:{S.CARD};border:1px solid {S.HAIR};"
+            f"border-radius:12px;}}")
         rl = QVBoxLayout(self.result_card)
         rl.setContentsMargins(18, 16, 18, 16)
         rl.setSpacing(10)
@@ -488,69 +569,37 @@ class _Detail(QWidget):
         self.spinner = _Spinner()
         st.addWidget(self.spinner)
         self.result_status = QLabel()
-        self.result_status.setFont(S.sans(13.5))
+        self.result_status.setFont(S.sans(S.T_UI))
         self.result_status.setWordWrap(True)
+        self.result_status.setMinimumWidth(1)
         self.result_status.setTextFormat(Qt.TextFormat.RichText)
         self.result_status.setStyleSheet(f"color:{S.MUTED};background:transparent;")
         st.addWidget(self.result_status, 1)
         rl.addLayout(st)
-        self.result_text = _Para(S.sans(14.5), S.INK)
+        self.result_text = _Para(S.sans(S.T_BODY), S.INK)
         rl.addWidget(self.result_text)
-        rb = QHBoxLayout()
-        rb.setSpacing(8)
+        self._result_btns, rb = _flow_host(8, 8)
+        self.result_paste = _fixed(S.button("Paste", kind="primary"))
+        self.result_paste.setIcon(_icon("paste", S.PAPER))
         self.result_copy = _fixed(S.button("Copy"))
         self.result_copy.setIcon(_icon("copy", S.INK))
-        self.result_paste = _fixed(S.button("Paste", primary=True))
-        self.result_paste.setIcon(_icon("paste", S.PAPER))
-        rb.addWidget(self.result_copy)
         rb.addWidget(self.result_paste)
-        rb.addStretch(1)
-        self._result_btns = QWidget()
-        self._result_btns.setLayout(rb)
-        rb.setContentsMargins(0, 2, 0, 0)
+        rb.addWidget(self.result_copy)
+        rl.addSpacing(2)
         rl.addWidget(self._result_btns)
         self.result_card.hide()
         lay.addWidget(self.result_card)
 
         lay.addStretch(1)
 
-        # footer: Show details · Delete (inline confirm)
-        rule = QFrame()
-        rule.setFixedHeight(1)
-        rule.setStyleSheet(f"background:{S.HAIR};border:none;")
-        lay.addWidget(rule)
-        foot = QHBoxLayout()
-        foot.setContentsMargins(0, 0, 0, 0)
-        self.details_btn = _link("Show details", S.MUTED)
-        foot.addWidget(self.details_btn)
-        foot.addStretch(1)
-        self.delete_btn = _link("Delete", S.DANGER)
-        foot.addWidget(self.delete_btn)
-        self.confirm = QWidget()
-        cl = QHBoxLayout(self.confirm)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(14)
-        self.confirm_label = QLabel("Delete this dictation?")
-        self.confirm_label.setFont(S.sans(13.5))
-        self.confirm_label.setStyleSheet(f"color:{S.INK};background:transparent;")
-        self.confirm_delete = _link("Delete", S.DANGER)
-        self.confirm_delete.setFont(S.sans(13.5, 600))
-        self.confirm_cancel = _link("Cancel", S.MUTED)
-        cl.addWidget(self.confirm_label)
-        cl.addWidget(self.confirm_delete)
-        cl.addWidget(self.confirm_cancel)
-        self.confirm.hide()
-        foot.addWidget(self.confirm)
-        lay.addLayout(foot)
-        lay.setSpacing(20)
-
-        self.meta = QLabel()
-        self.meta.setFont(S.mono(11.5, 400))
-        self.meta.setWordWrap(True)
-        self.meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.meta.setStyleSheet(f"color:{S.MUTED};background:transparent;")
-        self.meta.hide()
-        lay.addWidget(self.meta)
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        # Keep a reading measure on wide windows: the column stops at
+        # DETAIL_MAX_W and the rest stays calm paper on the right.
+        super().resizeEvent(ev)
+        right = max(self.PAD_X, self.width() - self.PAD_X - DETAIL_MAX_W)
+        m = self._lay.contentsMargins()
+        if m.right() != right:
+            self._lay.setContentsMargins(self.PAD_X, self.PAD_TOP, right, self.PAD_BOTTOM)
 
     # -- fill ---------------------------------------------------------------
     def show_placeholder(self, text: str) -> None:
@@ -563,10 +612,10 @@ class _Detail(QWidget):
         self.when.setText(when_label(e.ts).upper())
         _clear(self._tags)
         tags = [S.tag(tone_label(e.tone))]
-        tags.append(S.tag(lang_label(e.lang), TAG_BG, S.INK))
-        tags.append(S.tag(f"{e.duration:.1f} s · {_words(word_count(e.final))}", TAG_BG, S.INK))
+        tags.append(S.neutral_tag(lang_label(e.lang)))
+        tags.append(S.neutral_tag(f"{e.duration:.1f} s · {_words(word_count(e.final))}"))
         if e.app:
-            tags.append(S.tag(e.app, TAG_BG, S.INK))
+            tags.append(S.neutral_tag(e.app))
         for t in tags:
             self._tags.addWidget(t)
         self.pasted.set_plain(e.final or "")
@@ -582,6 +631,7 @@ class _Detail(QWidget):
         self.delete_btn.show()
         self.result_card.hide()
         self._tags_host.updateGeometry()
+        self._actions_host.updateGeometry()
 
     def tag_texts(self) -> list[str]:
         return [self._tags.itemAt(i).widget().text() for i in range(self._tags.count())]
@@ -623,42 +673,45 @@ class HistoryPage(Page):
         self.setStyleSheet(f"QWidget#historyPage{{background:{S.PAPER};}}")
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(40, 34, 40, 28)
+        root.setContentsMargins(*S.PAGE_MARGINS)
         root.setSpacing(0)
+        self._root = root
 
+        # header: title, then a search field that flexes with the window
         head = QHBoxLayout()
-        head.setSpacing(20)
-        head.addWidget(S.page_title("History"), 0, Qt.AlignmentFlag.AlignBottom)
+        head.setSpacing(S.GAP)
+        title = S.page_title("History")
+        title.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        head.addWidget(title, 0, Qt.AlignmentFlag.AlignBottom)
         head.addStretch(1)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search everything you said")
-        self.search.setFont(S.sans(13.5))
-        self.search.setFixedWidth(260)
+        self.search = S.field("Search everything you said")
         self.search.setClearButtonEnabled(True)
         self.search.addAction(_icon("search", S.MUTED), QLineEdit.ActionPosition.LeadingPosition)
-        self.search.setStyleSheet(
-            f"QLineEdit{{background:{S.PAPER};color:{S.INK};border:1px solid {S.HAIR};"
-            f"border-radius:9px;padding:5px 8px 5px 2px;}}"
-            f"QLineEdit:focus{{border-color:{S.ACCENT};}}")
-        head.addWidget(self.search, 0, Qt.AlignmentFlag.AlignBottom)
+        self.search.setStyleSheet(self.search.styleSheet().replace("padding:0 10px;", "padding:0 8px 0 2px;"))
+        self.search.setMinimumWidth(200)
+        self.search.setMaximumWidth(340)
+        self.search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        head.addWidget(self.search, 3, Qt.AlignmentFlag.AlignBottom)
         root.addLayout(head)
-        root.addSpacing(18)
+        root.addSpacing(20)
 
-        self._chip_row = QHBoxLayout()
-        self._chip_row.setSpacing(8)
-        root.addLayout(self._chip_row)
-        root.addSpacing(18)
+        # filter chips: a row that wraps instead of running off the edge
+        self._chip_host, self._chip_row = _flow_host(8, 8)
+        root.addWidget(self._chip_host)
+        root.addSpacing(S.GAP)
 
-        # split card
+        # split card: list | detail, list width proportional (see _fit_split)
         card = QFrame()
         card.setObjectName("hsplit")
-        card.setStyleSheet(f"QFrame#hsplit{{background:{S.PAPER};border:1px solid {S.HAIR};border-radius:14px;}}")
+        card.setStyleSheet(f"QFrame#hsplit{{background:{S.CARD};border:1px solid {S.HAIR};"
+                           f"border-radius:{S.RADIUS_CARD}px;}}")
+        self._card = card
         split = QHBoxLayout(card)
         split.setContentsMargins(1, 1, 1, 1)
         split.setSpacing(0)
 
         self._list_scroll = QScrollArea()
-        self._list_scroll.setFixedWidth(379)
+        self._list_scroll.setMinimumWidth(LIST_MIN_NARROW)
         self._list_scroll.setWidgetResizable(True)
         self._list_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._list_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -668,7 +721,7 @@ class HistoryPage(Page):
         self._list_host.setObjectName("hlist")
         self._list_host.setStyleSheet("QWidget#hlist{background:transparent;}")
         self._list = QVBoxLayout(self._list_host)
-        self._list.setContentsMargins(0, 0, 0, 8)
+        self._list.setContentsMargins(0, 0, 0, 10)
         self._list.setSpacing(0)
         self._list.addStretch(1)
         self._list_scroll.setWidget(self._list_host)
@@ -676,8 +729,8 @@ class HistoryPage(Page):
         self._list_scroll.verticalScrollBar().valueChanged.connect(self._on_scroll)
         split.addWidget(self._list_scroll)
 
-        self._empty = S.muted("", 14)
-        self._empty.setContentsMargins(18, 22, 18, 0)
+        self._empty = S.muted("", S.T_BODY)
+        self._empty.setContentsMargins(23, 22, 18, 0)
         self._empty.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         divider = QFrame()
@@ -686,6 +739,7 @@ class HistoryPage(Page):
         split.addWidget(divider)
 
         self.detail = _Detail()
+        self.detail.setMinimumWidth(1)
         split.addWidget(self.detail, 1)
         root.addWidget(card, 1)
 
@@ -708,6 +762,30 @@ class HistoryPage(Page):
         d.offline.linkActivated.connect(lambda _h: None)        # "Start it": not wired yet
         d.result_status.linkActivated.connect(lambda _h: None)
         self._result_text = ""
+
+    # -- layout ---------------------------------------------------------------
+    @staticmethod
+    def list_width(card_w: int) -> int:
+        """List pane width for a split card `card_w` wide: LIST_SHARE of it,
+        clamped; narrower cards let the list shrink further so the detail
+        pane keeps room to wrap."""
+        lo = LIST_MIN if card_w >= NARROW else LIST_MIN_NARROW
+        return int(max(lo, min(LIST_MAX, round(card_w * LIST_SHARE))))
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        try:
+            self._fit(self.width())
+        except Exception as e:  # noqa: BLE001
+            print(f"[hub.history] resize: {e!r}", flush=True)
+
+    def _fit(self, width: int) -> None:
+        # content stops at PAGE_MAX_W and centres, like the scrolling pages
+        l, t, r, b = S.PAGE_MARGINS
+        extra = max(0, width - l - r - S.PAGE_MAX_W) // 2
+        self._root.setContentsMargins(l + extra, t, r + extra, b)
+        card_w = min(width - l - r, S.PAGE_MAX_W)
+        self._list_scroll.setFixedWidth(self.list_width(card_w))
 
     # -- public ---------------------------------------------------------------
     def shown(self, query: str | None = None, **kwargs) -> None:
@@ -829,6 +907,7 @@ class HistoryPage(Page):
         while self._chip_row.count():
             it = self._chip_row.takeAt(0)
             if it.widget():
+                it.widget().hide()
                 it.widget().deleteLater()
         self.chips = {}
         spec = [("all", "All"), ("today", "Today"), ("week", "This week")]
@@ -839,7 +918,7 @@ class HistoryPage(Page):
             c.clicked.connect(lambda _=False, k=key: self._guard(lambda: self.set_filter(k)))
             self.chips[key] = c
             self._chip_row.addWidget(c)
-        self._chip_row.addStretch(1)
+        self._chip_host.updateGeometry()
         if self._filter not in self.chips:
             self._filter = "all"
         for k, c in self.chips.items():
@@ -915,16 +994,13 @@ class HistoryPage(Page):
         d = self.detail
         _clear(d._rerun)
         d.rerun_chips = {}
-        lbl = QLabel("Run it again as")
-        lbl.setFont(S.sans(13.5))
-        lbl.setStyleSheet(f"color:{S.MUTED};background:transparent;padding-top:6px;")
-        d._rerun.addWidget(lbl)
         for tone in RERUN_TONES:
             if tone == e.tone:
                 continue
             c = S.chip(tone_label(tone))
-            c.setStyleSheet(c.styleSheet() + f"QPushButton:disabled{{color:#B5AB9D;border-color:{S.HAIR};}}"
-                            f"QPushButton:checked:disabled{{background:#5A534A;color:{S.PAPER};}}")
+            c.setStyleSheet(c.styleSheet() + f"QPushButton:disabled{{color:{S.DISABLED};border-color:{S.HAIR};}}"
+                            f"QPushButton:checked:disabled{{background:{S.INK_SOFT};color:{S.PAPER};"
+                            f"border-color:{S.INK_SOFT};}}")
             c.clicked.connect(lambda _=False, t=tone: self._guard(lambda: self._rerun(t)))
             d.rerun_chips[tone] = c
             d._rerun.addWidget(c)
@@ -1099,8 +1175,7 @@ class HistoryPage(Page):
 
     @staticmethod
     def _offline_html() -> str:
-        return (f'{OFFLINE} · <a href="start" style="color:{S.ACCENT};text-decoration:none">'
-                f'Start it</a>')
+        return f'{OFFLINE} · {S.link_html("Start it", "start")}'
 
     def _notice(self, text: str) -> None:
         self.detail.offline.setText(html.escape(text))

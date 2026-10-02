@@ -186,3 +186,34 @@ def test_daemon_calls_run_off_the_ui_thread_and_last_choice_wins():
     assert [c for c in ctx.calls] == [("set_tone", {"value": "email"}),
                                       ("set_tone", {"value": "casual"})]   # slack superseded
     assert peak[0] == 1 and set(seen) == {"hub-worker"}
+
+
+def test_tone_grid_columns_follow_width():
+    page = make(FakeCtx())
+    g = page.grid
+    assert g.columns_for(1000) == 3
+    assert g.columns_for(600) == 2
+    assert g.columns_for(400) == 1
+
+
+def test_language_goes_below_tones_when_narrow():
+    page = make(FakeCtx())
+    page.show()
+    page.resize(735, 700)
+    QApplication.processEvents()
+    assert page.body.stacked
+    assert page.grid.columns == 2
+    page.resize(1200, 800)
+    QApplication.processEvents()
+    assert not page.body.stacked
+    page.hide()
+
+
+def test_language_rows_share_one_height():
+    page = make(FakeCtx(general={"default_language": "auto"}))
+    page.show()
+    page.resize(1200, 800)
+    QApplication.processEvents()
+    heights = {r.height() for r in page.lang_rows.values()}
+    assert max(heights) - min(heights) <= 2, heights
+    page.hide()

@@ -236,3 +236,43 @@ def test_permission_poll_runs_off_the_ui_thread_one_at_a_time(make_page):
     assert deliver_queued(
         lambda: page.perm_rows["accessibility"].state_label.text() == "Not allowed")
     assert seen == ["hub-worker"]
+
+
+def test_shortcuts_card_goes_under_when_narrow_and_keycaps_fit(make_page):
+    page, _ = make_page({"status": status(mic=False)})
+    page.show()
+    page.shown()
+    page.resize(740, 760)                     # 985-wide window
+    QApplication.processEvents()
+    assert page.columns.stacked
+    left = page.columns._items[0][0]
+    assert page.sheet.y() >= left.y() + left.height()               # under, not beside
+    for row in page.sheet_rows:
+        keys = row.keys
+        assert keys.width() >= keys.sizeHint().width()          # never squeezed
+        right = keys.mapTo(page.sheet, keys.rect().topRight()).x()
+        assert right <= page.sheet.width()                       # never clipped
+    assert page.sheet.width() <= page.width()
+    page.resize(1300, 832)
+    QApplication.processEvents()
+    assert not page.columns.stacked
+    page.hide()
+
+
+def test_permission_button_sits_under_the_description(make_page):
+    page, _ = make_page({"status": status(mic=False)})
+    page.show()
+    page.shown()
+    page.resize(740, 760)
+    QApplication.processEvents()
+    row = page.perm_rows["microphone"]
+    btn_y = row.open_btn.mapTo(row, row.open_btn.rect().topLeft()).y()
+    assert btn_y > row.description.y() + row.description.height() - 1
+    assert row.state_label.text() == "Not allowed"
+    assert help_mod.S.DANGER in row.state_label.styleSheet()
+    page.hide()
+
+
+def test_footer_wraps(make_page):
+    page, _ = make_page({"status": status()})
+    assert page.footer.wordWrap()

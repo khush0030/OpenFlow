@@ -21,6 +21,7 @@ PROCESSING = "processing"
 CARD = "card"
 CANCELLED = "cancelled"
 ERROR = "error"
+NO_AUDIO = "no_audio"   # ERROR reason: the mic gave nothing at all
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
@@ -71,7 +72,13 @@ class FlowController:
         self.text = ""
         # A double-tap session: recording continues without holding the key.
         self.hands_free = False
+        # Why ERROR is showing: "" = transcription failed (Retry), NO_AUDIO =
+        # the mic gave nothing (Mic settings). Only ever set with ERROR.
+        self.reason = ""
         self._quiet_since: Optional[float] = None
+        # The mic has picked up speech this take: later quiet is a pause, not
+        # a muted / wrong mic, so "Can't hear you" never shows.
+        self._heard = False
         self._retained: Optional[_Retained] = None
         self._card_expires_at = 0.0
         # Id of the pipeline run that owns PROCESSING. Results passed with
@@ -85,11 +92,14 @@ class FlowController:
                    "text": self.text if self.state == CARD else ""}
             if self.hands_free:
                 msg["hands_free"] = True  # only ever sent while recording / silent
+            if self.reason:
+                msg["reason"] = self.reason
             return msg
 
-    def _set(self, state: str, text: str = "") -> None:
+    def _set(self, state: str, text: str = "", reason: str = "") -> None:
         if state not in (RECORDING, SILENT):
             self.hands_free = False
+        self.reason = reason
         self.state = state
         self.text = text
         self._emit(self.message())
@@ -99,6 +109,7 @@ class FlowController:
         with self._lock:
             self._retained = None
             self._quiet_since = None
+            self._heard = False
             self.hands_free = hands_free
             self._set(RECORDING)
 
@@ -108,11 +119,14 @@ class FlowController:
                 return
             now = self._clock()
             if rms < self._threshold:
+                if self._heard:
+                    return
                 if self._quiet_since is None:
                     self._quiet_since = now
                 if self.state == RECORDING and now - self._quiet_since >= SILENCE_AFTER_S:
                     self._set(SILENT)
             else:
+                self._heard = True
                 self._quiet_since = None
                 if self.state == SILENT:
                     self._set(RECORDING)
@@ -167,6 +181,14 @@ class FlowController:
             self._retained = _Retained(audio, target, self._clock() + RETRY_WINDOW_S)
             self._set(ERROR)
             return True
+
+    def no_audio(self, audio: Any, target: Any) -> None:
+        """The take was silence from start to end (muted or wrong mic): show
+        the can't-hear-you error instead of transcribing it. The audio is
+        kept only so the error times out like any other."""
+        with self._lock:
+            self._retained = _Retained(audio, target, self._clock() + RETRY_WINDOW_S)
+            self._set(ERROR, reason=NO_AUDIO)
 
     def dismiss(self) -> None:
         with self._lock:

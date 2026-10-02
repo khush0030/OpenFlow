@@ -53,6 +53,31 @@ def test_silence_for_two_seconds_shows_cant_hear_then_recovers():
     assert fc.state == RECORDING
 
 
+def test_a_pause_after_speech_is_not_cant_hear_you():
+    # Once the mic has heard the user, quiet is a pause (thinking, taking a
+    # screenshot mid hands-free session), not a muted or wrong mic.
+    for hands_free in (False, True):
+        fc, _, _, clock = make()
+        fc.recording_started(hands_free=hands_free)
+        fc.level(0.05)
+        for _ in range(10):
+            clock.t += 1.0
+            fc.level(0.001)
+        assert fc.state == RECORDING
+
+
+def test_cant_hear_you_again_on_the_next_take():
+    fc, _, _, clock = make()
+    fc.recording_started()
+    fc.level(0.05)
+    fc.processing()
+    fc.recording_started()
+    fc.level(0.001)
+    clock.t += 2.1
+    fc.level(0.001)
+    assert fc.state == SILENT
+
+
 def test_cancel_then_undo_within_window_reruns_with_kept_audio():
     fc, calls, _, clock = make()
     fc.recording_started()

@@ -10,11 +10,10 @@ from __future__ import annotations
 import copy
 import logging
 
-from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import QEvent, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QAbstractButton, QFrame, QGridLayout, QHBoxLayout, QLabel, QRadioButton,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QLabel, QRadioButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 import config as cfg_mod
@@ -22,7 +21,8 @@ from ui.hub import style as S
 from ui.hub import workers
 from ui.hub.context import ControlError
 from ui.hub.page import Page
-from ui.hub.pages.dictionary import Segmented, transparent_scroll
+from ui.hub.pages import _charts
+from ui.hub.pages import _controls as C
 from ui.widget_copy import key_name
 
 log = logging.getLogger(__name__)
@@ -47,53 +47,26 @@ TONES = (
 )
 # (value, label, description) — labels match the menu bar's.
 LANGUAGES = (
-    ("auto", "Auto", "Detects what you speak; English out (Always English is on)."),
-    ("en", "English", "English in, English out."),
-    ("hi", "हिन्दी · Hindi", "Hindi in Devanagari script."),
-    ("hi_roman", "Hindi (Roman)", "Hindi written in English letters."),
-    ("hinglish", "Hinglish", "Mixed Hindi and English, kept mixed."),
-    ("hi_to_en", "Hindi → English", "Speak Hindi, paste English."),
-    ("en_to_hi", "English → Hindi", "Speak English, paste Hindi."),
+    ("auto", "Auto", "Any language · Always English is on"),
+    ("en", "English", "English in, English out"),
+    ("hi", "हिन्दी · Hindi", "Hindi in Devanagari script"),
+    ("hi_roman", "Hindi (Roman)", "Hindi written in English letters"),
+    ("hinglish", "Hinglish", "Mixed Hindi and English, kept mixed"),
+    ("hi_to_en", "Hindi → English", "Speak Hindi, paste English"),
+    ("en_to_hi", "English → Hindi", "Speak English, paste Hindi"),
 )
-AUTO_DESC_OFF = "Detects what you speak and keeps it in that language."
+AUTO_DESC_OFF = "Detects your language and keeps it"
 SCRIPTS = (("devanagari", "Devanagari"), ("roman", "Roman"))
 
 
-def keycap(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setFont(S.mono(12.5, 500))
-    lbl.setStyleSheet(f"color:{S.INK};background:{S.PAPER};border:1px solid #D9D1C5;"
-                      "border-bottom-width:2px;border-radius:6px;padding:3px 8px;")
-    return lbl
-
-
-class Toggle(QAbstractButton):
-    """Switch from the mockup: 38×22, sage when on, white knob."""
-
-    def __init__(self, on: bool = False) -> None:
-        super().__init__()
-        self.setCheckable(True)
-        self.setChecked(on)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(38, 22)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(38, 22)
-
-    def paintEvent(self, _event) -> None:  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(S.SAGE if self.isChecked() else "#D8D0C4"))
-        p.drawRoundedRect(QRectF(0, 0, 38, 22), 11, 11)
-        p.setBrush(QColor("#FFFFFF"))
-        x = 18 if self.isChecked() else 2
-        p.drawEllipse(QRectF(x, 2, 18, 18))
-        p.end()
+TONE_MIN_W = 220          # a tone card never gets narrower than this
+LANG_SIDE_MIN = 1000      # page width from which Language sits beside the tones
+LANG_COL_W = 360          # Language column's share when side by side
 
 
 class ToneCard(QFrame):
-    """A clickable tone card; the default one gets a 2 pt Ink border and tag."""
+    """A clickable tone card. The default one gets an accent ring and a
+    "Default" tag; the example output sits in a soft inset."""
 
     clicked = pyqtSignal(str)
 
@@ -101,36 +74,43 @@ class ToneCard(QFrame):
         super().__init__()
         self.value = value
         self._default = False
+        self._hover = False
         self.setObjectName("tonecard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(f"{name} tone")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(1)
+        self.setStyleSheet("QFrame#tonecard{background:transparent;border:none;}"
+                           "QFrame#tonecard QLabel{border:none;}")
         self._lay = QVBoxLayout(self)
-        self._lay.setSpacing(8)
+        self._lay.setContentsMargins(18, 16, 18, 18)
+        self._lay.setSpacing(6)
 
         top = QHBoxLayout()
         top.setSpacing(8)
         title = QLabel(name)
-        title.setFont(S.serif(19))
-        title.setStyleSheet(f"color:{S.INK};background:transparent;border:none;")
-        top.addWidget(title)
-        top.addStretch(1)
-        self.default_tag = S.tag("Default", bg=S.SAGE_SOFT, fg=S.SAGE_TEXT)
-        top.addWidget(self.default_tag)
+        title.setFont(S.serif(S.T_H3))
+        title.setMinimumWidth(1)
+        title.setStyleSheet(f"color:{S.INK};background:transparent;")
+        top.addWidget(title, 1)
+        self.default_tag = S.tag("Default")
+        top.addWidget(self.default_tag, 0, Qt.AlignmentFlag.AlignVCenter)
         self._lay.addLayout(top)
 
-        d = QLabel(desc)
-        d.setFont(S.sans(13))
-        d.setWordWrap(True)
-        d.setStyleSheet(f"color:{S.MUTED};background:transparent;border:none;")
+        d = S.muted(desc, S.T_SMALL)
         self._lay.addWidget(d)
+        self._lay.addSpacing(6)
 
-        ex = QLabel(example)
-        ex.setFont(S.sans(13.5))
-        ex.setWordWrap(True)
-        ex.setStyleSheet(f"color:{S.INK};background:{S.CARD};border:none;border-radius:8px;padding:9px 11px;")
-        self._lay.addWidget(ex)
+        self.example = QLabel(example)
+        self.example.setFont(S.serif(S.T_BODY))
+        self.example.setWordWrap(True)
+        self.example.setMinimumWidth(1)
+        self.example.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.example.setStyleSheet(f"color:{S.INK_SOFT};background:{S.PAPER};"
+                                   f"border-radius:{S.RADIUS_FIELD}px;padding:10px 12px;")
+        self._lay.addWidget(self.example)
         self._lay.addStretch(1)
         self.set_default(False)
 
@@ -140,11 +120,41 @@ class ToneCard(QFrame):
     def set_default(self, on: bool) -> None:
         self._default = on
         self.default_tag.setVisible(on)
-        border = f"2px solid {S.INK}" if on else f"1px solid {S.HAIR}"
-        pad = 13 if on else 14          # keep content still when the border thickens
-        self._lay.setContentsMargins(16 - (1 if on else 0), pad, 16 - (1 if on else 0), pad)
-        self.setStyleSheet(f"QFrame#tonecard{{border:{border};border-radius:12px;background:{S.PAPER};}}")
         self.setAccessibleDescription("Default" if on else "")
+        self.update()
+
+    def paintEvent(self, _e) -> None:  # noqa: N802
+        # Drawn by hand: a 1.5 pt ring has no stylesheet equivalent, and the
+        # content mustn't shift when the ring appears.
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        rad = S.RADIUS_CARD - 2
+        p.setBrush(QColor(S.CARD))
+        if self._default:
+            pen = QPen(QColor(S.ACCENT), 1.5)
+        elif self._hover or self.hasFocus():
+            pen = QPen(QColor(S.MUTED), 1.0)
+        else:
+            pen = QPen(QColor(S.HAIR), 1.0)
+        p.setPen(pen)
+        p.drawRoundedRect(r, rad, rad)
+        p.end()
+
+    def event(self, e) -> bool:  # noqa: D401
+        t = e.type()
+        if t in (QEvent.Type.HoverEnter, QEvent.Type.HoverLeave):
+            self._hover = t == QEvent.Type.HoverEnter
+            self.update()
+        return super().event(e)
+
+    def focusInEvent(self, e) -> None:  # noqa: N802
+        super().focusInEvent(e)
+        self.update()
+
+    def focusOutEvent(self, e) -> None:  # noqa: N802
+        super().focusOutEvent(e)
+        self.update()
 
     def mouseReleaseEvent(self, e) -> None:  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
@@ -158,18 +168,52 @@ class ToneCard(QFrame):
             super().keyPressEvent(e)
 
 
+class ToneGrid(QWidget):
+    """Tone cards in 3 columns when wide, 2 at medium widths, 1 when narrow.
+    Cards in a row share its height."""
+
+    def __init__(self, cards: list[QWidget], spacing: int = 14) -> None:
+        super().__init__()
+        self._cards = cards
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setSpacing(spacing)
+        self.columns = 0
+        self._place(2)
+
+    def columns_for(self, width: int) -> int:
+        sp = self._grid.spacing()
+        return max(1, min(3, (width + sp) // (TONE_MIN_W + sp)))
+
+    def _place(self, cols: int) -> None:
+        if cols == self.columns:
+            return
+        self.columns = cols
+        for c in self._cards:
+            self._grid.removeWidget(c)
+        for i in range(4):
+            self._grid.setColumnStretch(i, 1 if i < cols else 0)
+        for i, c in enumerate(self._cards):
+            self._grid.addWidget(c, i // cols, i % cols)
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._place(self.columns_for(self.width()))
+
+
 _RADIO_CSS = (
     "QRadioButton{background:transparent;spacing:0;}"
-    "QRadioButton::indicator{width:14px;height:14px;border-radius:8px;"
-    f"border:1px solid {S.MUTED};background:{S.PAPER};}}"
-    "QRadioButton::indicator:checked{border:1px solid " + S.ACCENT + ";"
+    "QRadioButton::indicator{width:16px;height:16px;border-radius:9px;"
+    f"border:1.5px solid {S.MUTED};background:{S.PAPER};}}"
+    "QRadioButton::indicator:checked{border:1.5px solid " + S.ACCENT + ";"
     "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,"
-    f"stop:0 {S.ACCENT},stop:0.42 {S.ACCENT},stop:0.5 {S.PAPER},stop:1 {S.PAPER});}}"
+    f"stop:0 {S.ACCENT},stop:0.48 {S.ACCENT},stop:0.56 {S.PAPER},stop:1 {S.PAPER});}}"
 )
 
 
 class LanguageRow(QFrame):
-    """Radio row: dot, label (150 wide), muted description."""
+    """Radio row: red dot, name, muted one-line description underneath.
+    Every row has the same padding; the chosen one gets a soft fill."""
 
     clicked = pyqtSignal(str)
 
@@ -178,59 +222,38 @@ class LanguageRow(QFrame):
         self.value = value
         self.setObjectName("langrow")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumWidth(1)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 11, 14, 11)
+        lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(12)
         self.radio = QRadioButton()
         self.radio.setStyleSheet(_RADIO_CSS)
         self.radio.setAccessibleName(label)
         self.radio.clicked.connect(lambda: self.clicked.emit(self.value))
-        lay.addWidget(self.radio)
-        name = QLabel(label)
-        name.setFont(S.sans(14, 500))
-        name.setFixedWidth(140)
-        name.setStyleSheet(f"color:{S.INK};background:transparent;")
-        lay.addWidget(name)
-        self.desc = QLabel(desc)
-        self.desc.setFont(S.sans(13))
-        self.desc.setWordWrap(True)
-        self.desc.setStyleSheet(f"color:{S.MUTED};background:transparent;")
-        lay.addWidget(self.desc, 1)
+        lay.addWidget(self.radio, 0, Qt.AlignmentFlag.AlignVCenter)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        text.setContentsMargins(0, 0, 0, 0)
+        self.name = QLabel(label)
+        self.name.setFont(S.sans(S.T_BODY, 500))
+        self.name.setMinimumWidth(1)
+        self.name.setStyleSheet(f"color:{S.INK};background:transparent;")
+        text.addWidget(self.name)
+        self.desc = S.muted(desc, S.T_SMALL)
+        text.addWidget(self.desc)
+        lay.addLayout(text, 1)
         self.set_on(False)
 
     def set_on(self, on: bool) -> None:
         self.radio.setChecked(on)
         bg = S.ROW_HOVER if on else "transparent"
-        self.setStyleSheet(f"QFrame#langrow{{background:{bg};border-radius:10px;}}")
+        self.setStyleSheet(f"QFrame#langrow{{background:{bg};border-radius:{S.RADIUS_FIELD}px;}}"
+                           f"QFrame#langrow:hover{{background:{S.ROW_HOVER};}}")
 
     def mouseReleaseEvent(self, e) -> None:  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
             self.clicked.emit(self.value)
         super().mouseReleaseEvent(e)
-
-
-def _setting_row(label: str, desc: str, control: QWidget, first: bool) -> QFrame:
-    row = QFrame()
-    row.setObjectName("setrow")
-    row.setStyleSheet("QFrame#setrow{background:transparent;"
-                      + ("" if first else f"border-top:1px solid {S.HAIR};") + "}")
-    lay = QHBoxLayout(row)
-    lay.setContentsMargins(0, 16, 0, 16)
-    lay.setSpacing(24)
-    text = QVBoxLayout()
-    text.setSpacing(3)
-    a = QLabel(label)
-    a.setFont(S.sans(14.5, 500))
-    a.setStyleSheet(f"color:{S.INK};border:none;")
-    b = QLabel(desc)
-    b.setFont(S.sans(13))
-    b.setWordWrap(True)
-    b.setStyleSheet(f"color:{S.MUTED};border:none;")
-    text.addWidget(a)
-    text.addWidget(b)
-    lay.addLayout(text, 1)
-    lay.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
-    return row
 
 
 class TonesPage(Page):
@@ -247,97 +270,98 @@ class TonesPage(Page):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        scroll, content = transparent_scroll()
-        outer.addWidget(scroll)
+        content = QWidget()
+        outer.addWidget(_charts.scroll_page(content))
 
         page = QVBoxLayout(content)
-        page.setContentsMargins(40, 34, 40, 22)
-        page.setSpacing(22)
+        page.setContentsMargins(*S.PAGE_MARGINS)
+        page.setSpacing(28)
 
-        head = QHBoxLayout()
-        head.addWidget(S.page_title("Tone & language"), 0, Qt.AlignmentFlag.AlignBottom)
-        head.addStretch(1)
+        head = QVBoxLayout()
+        head.setSpacing(10)
+        head.addWidget(S.page_title("Tone & language"))
+        head.addWidget(S.muted(f"Click a tone to make it your default. Each card shows how "
+                               f"“{EXAMPLE_IN}” comes out.", S.T_BODY))
+        sub = QHBoxLayout()
+        sub.setSpacing(8)
         hint = QLabel("Cycle tones while dictating")
-        hint.setFont(S.sans(13.5))
-        hint.setStyleSheet(f"color:{S.MUTED};")
-        self.cycle_key = keycap("F6")
-        cyc = QHBoxLayout()
-        cyc.setSpacing(8)
-        cyc.addWidget(hint)
-        cyc.addWidget(self.cycle_key)
-        head.addLayout(cyc)
-        head.setAlignment(cyc, Qt.AlignmentFlag.AlignBottom)
+        hint.setFont(S.sans(S.T_UI))
+        hint.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+        sub.addWidget(hint, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.cycle_key = C.keycap("F6")
+        sub.addWidget(self.cycle_key, 0, Qt.AlignmentFlag.AlignVCenter)
+        sub.addStretch(1)
+        head.addLayout(sub)
         page.addLayout(head)
 
-        body = QHBoxLayout()
-        body.setSpacing(26)
-        body.addLayout(self._build_tones(), 135)
-        body.addLayout(self._build_languages(), 100)
-        page.addLayout(body)
+        self.body = S.Reflow(LANG_SIDE_MIN, spacing=32)
+        self.body.add(self._build_tones(), 640, Qt.AlignmentFlag.AlignTop)
+        self.body.add(self._build_languages(), LANG_COL_W, Qt.AlignmentFlag.AlignTop)
+        page.addWidget(self.body)
         page.addStretch(1)
 
     # ── layout ───────────────────────────────────────────────────────────
-    def _build_tones(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-        col.setSpacing(12)
-        head = QHBoxLayout()
-        head.addWidget(S.eyebrow("Tone"))
-        head.addStretch(1)
-        ex = QLabel(f"Example: “{EXAMPLE_IN}”")
-        ex.setFont(S.sans(12.5))
-        ex.setStyleSheet(f"color:{S.MUTED};")
-        head.addWidget(ex)
-        col.addLayout(head)
-        grid = QGridLayout()
-        grid.setSpacing(12)
+    def _build_tones(self) -> QWidget:
+        w = QWidget()
+        col = QVBoxLayout(w)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(10)
+        eb = S.eyebrow("Tone")
+        eb.setContentsMargins(2, 0, 0, 0)
+        col.addWidget(eb)
         self.cards: dict[str, ToneCard] = {}
-        for i, (value, name, desc, out) in enumerate(TONES):
+        for value, name, desc, out in TONES:
             card = ToneCard(value, name, desc, out)
             card.clicked.connect(self._on_tone)
             self.cards[value] = card
-            grid.addWidget(card, i // 2, i % 2)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        col.addLayout(grid)
-        col.addStretch(1)
-        return col
+        self.grid = ToneGrid(list(self.cards.values()))
+        col.addWidget(self.grid)
+        return w
 
-    def _build_languages(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-        col.setSpacing(12)
-        col.addWidget(S.eyebrow("Language"))
+    def _build_languages(self) -> QWidget:
+        # Language list and Output options: side by side when there's room,
+        # each an eyebrow over a soft card so their tops line up.
+        self.lang_split = S.Reflow(700, spacing=S.GAP)
+        lang = QWidget()
+        col = QVBoxLayout(lang)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(10)
+        eb = S.eyebrow("Language")
+        eb.setContentsMargins(2, 0, 0, 0)
+        col.addWidget(eb)
         box = QFrame()
         box.setObjectName("langbox")
-        box.setStyleSheet(f"QFrame#langbox{{border:1px solid {S.HAIR};border-radius:14px;background:{S.PAPER};}}")
+        box.setStyleSheet(f"QFrame#langbox{{border:1px solid {S.HAIR};"
+                          f"border-radius:{S.RADIUS_CARD - 2}px;background:{S.CARD};}}")
         lay = QVBoxLayout(box)
         lay.setContentsMargins(6, 6, 6, 6)
-        lay.setSpacing(0)
+        lay.setSpacing(2)
         self.lang_rows: dict[str, LanguageRow] = {}
         for value, label, desc in LANGUAGES:
             row = LanguageRow(value, label, desc)
             row.clicked.connect(self.select_language)
             self.lang_rows[value] = row
             lay.addWidget(row)
+        # Devanagari sits taller than Latin: give every row the tallest one's
+        # height so the list reads as even steps.
+        tallest = max(r.sizeHint().height() for r in self.lang_rows.values())
+        for r in self.lang_rows.values():
+            r.setMinimumHeight(tallest)
         col.addWidget(box)
+        self.lang_split.add(lang, 3, Qt.AlignmentFlag.AlignTop)
 
-        card = QFrame()
-        card.setObjectName("langcard")
-        card.setStyleSheet(f"QFrame#langcard{{background:{S.CARD};border:1px solid {S.HAIR};border-radius:14px;}}")
-        clay = QVBoxLayout(card)
-        clay.setContentsMargins(18, 4, 18, 4)
-        clay.setSpacing(0)
-        self.always_english = Toggle(True)
+        self.always_english = C.Toggle(True)
         self.always_english.setAccessibleName("Always output English")
         self.always_english.toggled.connect(self._on_always_english)
-        clay.addWidget(_setting_row("Always output English", "Translate anything you say into English",
-                                    self.always_english, first=True))
-        self.hindi_script = Segmented(list(SCRIPTS), "devanagari")
+        self.hindi_script = C.Segmented(list(SCRIPTS), "devanagari")
         self.hindi_script.changed.connect(self._on_script)
-        clay.addWidget(_setting_row("Hindi script", "How Hindi is written when it's kept",
-                                    self.hindi_script, first=False))
-        col.addWidget(card)
-        col.addStretch(1)
-        return col
+        out = C.Group("Output", [
+            C.Row("Always output English", "Translate what you say into English",
+                  self.always_english),
+            C.Row("Hindi script", "How Hindi is written when it's kept", self.hindi_script),
+        ])
+        self.lang_split.add(out, 2, Qt.AlignmentFlag.AlignTop)
+        return self.lang_split
 
     # ── state ────────────────────────────────────────────────────────────
     def _config(self) -> dict:

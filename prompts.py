@@ -1,3 +1,6 @@
+"""Prompt text for the Sarvam chat calls (ai.py)."""
+from __future__ import annotations
+
 PROMPTS = {
     "raw": None,
 
@@ -43,15 +46,127 @@ Apply the instruction. Return ONLY the edited text, no preamble or quotes.""",
 }
 
 
-CONTEXT_HINTS = {
-    "Slack": "slack",
-    "Slack.app": "slack",
-    "Mail": "email",
-    "Mail.app": "email",
-    "Gmail": "email",
-    "Code": "professional",
-    "Visual Studio Code": "professional",
-    "Cursor": "professional",
-    "Terminal": "raw",
-    "iTerm2": "raw",
+# Spoken self-corrections (ROADMAP Phase 2). Appended to every tone that
+# rewrites (not verbatim: that one may not drop a single word).
+SELF_CORRECTION_TONES = ("casual", "professional", "bullets", "email", "slack")
+
+SELF_CORRECTION = """Speakers correct themselves mid-sentence. When they do, keep
+only the corrected version: drop the words they took back and the correction
+cue itself. Cues include "no wait", "wait no", "scratch that", "I mean",
+"actually", "sorry", "make that", "rather", "let me rephrase", and in Hinglish
+"nahi nahi", "nahi", "matlab", "mera matlab", "galti se", "ek minute",
+"ruko". "Scratch that" or "delete that" on its own removes the sentence
+before it. Only treat a cue as a correction when it clearly replaces what was
+just said; "I actually liked it" or "matlab kya hai" are ordinary speech and
+stay. Examples:
+- "let's meet at 2pm, no wait, make it 3pm" -> "Let's meet at 3pm."
+- "send it to Rahul, sorry, I mean Rohit" -> "Send it to Rohit."
+- "kal 5 baje milte hain, nahi nahi, 6 baje" -> "Kal 6 baje milte hain."
+- "the budget is 50k, matlab 60k" -> "The budget is 60k."
+- "We'll order pizza. Scratch that. Let's get biryani." -> "Let's get biryani."
+"""
+
+
+# Snippets (snippets.py) arrive as placeholders; the stored text goes in
+# after cleanup, so the model must hand each one back untouched.
+SNIPPET_MARK = "{{snippet"
+SNIPPET_NOTE = """Tokens like {{snippet1}} stand for text that is inserted
+later. Copy each one exactly once, unchanged, where it belongs in the
+sentence. Do not translate, explain or remove them."""
+
+
+# Per-app context (ROADMAP Phase 2). The app being dictated into, by the
+# name macOS shows for it (lowercase), -> what kind of app it is.
+APP_KINDS = {
+    "slack": "chat", "discord": "chat", "whatsapp": "chat", "telegram": "chat",
+    "messages": "chat", "microsoft teams": "chat", "signal": "chat",
+    "mail": "email", "microsoft outlook": "email", "outlook": "email",
+    "spark": "email", "spark desktop": "email", "superhuman": "email",
+    "mimestream": "email", "airmail": "email",
+    "code": "code", "visual studio code": "code", "cursor": "code",
+    "windsurf": "code", "xcode": "code", "zed": "code", "sublime text": "code",
+    "pycharm": "code", "intellij idea": "code", "webstorm": "code",
+    "android studio": "code", "nova": "code",
+    "terminal": "code", "iterm2": "code", "iterm": "code", "warp": "code",
+    "ghostty": "code", "alacritty": "code", "kitty": "code", "wezterm": "code",
 }
+
+# Tones that leave the register open; only these take a chat / email style
+# note. A tone that already names a format (email, slack, bullets) is the
+# user's explicit choice and wins over the app.
+STYLE_TONES = ("casual", "professional")
+
+# kind -> (applies to, note). "style" notes shape the register (STYLE_TONES
+# only); "preserve" notes protect content and apply to every cleanup tone.
+CONTEXT_HINTS = {
+    "chat": ("style", """The text will be sent in a chat app ({app}). Keep it short
+and conversational, like a message typed by hand: no greeting, no sign-off,
+no headings."""),
+    "email": ("style", """The text goes into an email ({app}). Write complete,
+well-formed sentences in a polite, slightly formal register. Do not invent a
+greeting, sign-off or subject line the speaker did not say."""),
+    "code": ("preserve", """The text goes into a code editor or terminal ({app}).
+Keep code tokens exactly as spoken: identifiers, file names, paths, commands,
+flags, version numbers and symbols (snake_case, camelCase, --flags, ./paths).
+Do not translate, re-case or reword them, and do not wrap the result in
+quotes or code fences."""),
+}
+
+
+# Auto-formatting (formatting.py, [formatting] auto). Verbatim only calls a
+# model for what Python can't do itself (paragraphs in a long dictation),
+# and then with this prompt: layout only, every word kept. The daemon checks the result
+# (formatting.same_words) and pastes the unformatted text if a word moved.
+FORMAT_ONLY = """You lay out a voice transcription (often Indian English or
+Hinglish). Keep every word exactly as given, in the same order: do not add,
+remove, reorder, translate or substitute any word, and do not fix grammar.
+Filler words and slang stay. You may only change punctuation,
+capitalization and line breaks. Keep the line breaks already in the text.
+Return ONLY the formatted text, no preamble."""
+
+FORMAT_TASKS = {
+    "paragraphs": """Split the text into paragraphs where the topic changes,
+with a blank line between paragraphs. Keep sentences whole. Text that stays
+on one topic stays one paragraph.""",
+}
+
+# The cleanup tones already make a model call; when formatting.detect()
+# finds structure they get the matching notes (formatting.notes()).
+FORMAT_NOTES = {
+    "numbered": """The speaker is listing points with spoken numbering ("one
+is that", "second", "third is", "firstly", "pehli baat", "ek toh"). Format
+them as a numbered list: any lead-in sentence on its own line ending with a
+colon, then one point per line as "1. ", "2. ", "3. ". Drop the spoken
+numbering words; the numbers replace them. Use numbers, not bullet
+characters.""",
+    "bulleted": """The speaker is listing items. Format them as a bulleted
+list: the lead-in on its own line ending with a colon, then one item per
+line starting with "- ".""",
+    "paragraphs": """This is a long dictation: break it into paragraphs where
+the topic changes, with a blank line between them.""",
+    "breaks": """Keep the line breaks already in the text: the speaker asked
+for them.""",
+    "email": """Put the greeting (e.g. "Hi Rahul,") and the sign-off (e.g.
+"Thanks," then the name) on their own lines, with the body in between.""",
+}
+
+
+def app_kind(app: str | None) -> str | None:
+    """'chat' / 'email' / 'code' for a known app name, else None."""
+    if not app:
+        return None
+    name = app.strip().lower()
+    if name.endswith(".app"):
+        name = name[:-4]
+    return APP_KINDS.get(name)
+
+
+def context_note(app: str | None, mode: str) -> str | None:
+    """The cleanup-prompt note for dictating into `app` in tone `mode`."""
+    kind = app_kind(app)
+    if kind is None:
+        return None
+    scope, note = CONTEXT_HINTS[kind]
+    if scope == "style" and mode not in STYLE_TONES:
+        return None
+    return note.format(app=app.strip())

@@ -171,9 +171,12 @@ After ✕ / Esc during recording, the audio is kept for **5 s**.
 - After 5 s the audio is discarded and the widget returns to idle.
 
 ### Toast spec (states 4 and 7, also used for errors)
-Pill-shaped, surface colour, hairline border, shadow; padding 5 / 5 / 5 / 16;
-headline (Fraunces 15.5) + solid pill button (Geist 600, 14 pt, padding 6 / 13);
-14 pt gap between them.
+Pill-shaped, the widget's red accent (same look as the Dictate tooltip), shadow;
+padding 6 / 7 / 6 / 16; white headline (Fraunces 18) + the button as a soft white
+chip (rgba 255,255,255 at 20%, 32% on hover; Geist 600, 14 pt, padding 4 / 12);
+10 pt gap between them. The Undo countdown line is white.
+*Changed 2026-10-02 (user):* the original cream surface with a black button
+clashed with the red tooltip.
 
 ### Error toast (new, same component)
 If transcription fails (network / API error), show **"Couldn't transcribe"** +

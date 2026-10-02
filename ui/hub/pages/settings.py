@@ -10,12 +10,14 @@ from __future__ import annotations
 import importlib
 import os
 import subprocess
+from pathlib import Path
 from typing import Any, Callable
 
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSlider,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QBoxLayout, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QSizePolicy, QSlider, QSpacerItem, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 import config as cfg_mod
@@ -24,6 +26,7 @@ from ui.hub import style as S
 from ui.hub import workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
+from ui.hub.pages import _charts
 from ui.hub.pages import _controls as C
 
 # Same choices as the old Settings › AI tab.
@@ -46,6 +49,11 @@ STATUS_IDLE = "Changes save as you go"
 STATUS_SAVED = "Saved"
 PRESS_KEYS = "Press new keys…"
 NOT_RUNNING = "OpenFlow isn't running. Start it to hear the cues."
+NO_KEY = "No key yet. Paste one above to start dictating."
+
+NAV_SIDE_MIN = 860      # page width below which the sub-nav becomes a top tab row
+NAV_SIDE_W = 168
+CONTENT_MAX_W = 760     # a settings column reads best at this measure
 
 
 # ── seams (tests replace these; never the real Keychain / Finder) ────────
@@ -70,6 +78,71 @@ def keychain_save(key: str) -> None:
     import keyring
     from sarvam import KEYRING_SERVICE, KEYRING_USER
     keyring.set_password(KEYRING_SERVICE, KEYRING_USER, key)
+
+
+def _env_files() -> list[Path]:
+    """The .env files OpenFlow reads a key from (config.load_env and
+    sarvam.find_api_key): ~/.openflow/.env, the app's own, the working dir's."""
+    out: list[Path] = []
+    for p in (Path(cfg_mod.CONFIG_DIR) / ".env",
+              Path(cfg_mod.__file__).resolve().parent / ".env",
+              Path.cwd() / ".env"):
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _env_file_value(path: Path, name: str) -> str:
+    try:
+        if not path.is_file():
+            return ""
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == name:
+                return v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def key_source(env_name: str = "SARVAM_API_KEY") -> tuple[str, str] | None:
+    """Where the Sarvam key dictation will use comes from, mirroring
+    sarvam.find_api_key's order (environment → Keychain → .env files):
+    ("keychain", ""), ("file", "~/.openflow/.env"), ("env", "SARVAM_API_KEY"),
+    or None. Values are compared in memory only, never shown. A variable
+    that config.load_env copied from a file is reported as that file."""
+    kc = (keychain_read() or "").strip()
+    env = os.environ.get(env_name, "").strip()
+    files = [(p, _env_file_value(p, env_name)) for p in _env_files()]
+    if env:
+        if kc and env == kc:
+            return ("keychain", "")
+        for p, v in files:
+            if v and v == env:
+                return ("file", _home_short(str(p)))
+        return ("env", env_name)
+    if kc:
+        return ("keychain", "")
+    for p, v in files:
+        if v:
+            return ("file", _home_short(str(p)))
+    return None
+
+
+def key_source_text(src: tuple[str, str] | None) -> str:
+    if src is None:
+        return NO_KEY
+    kind, where = src
+    if kind == "keychain":
+        return "Using the key saved in your Keychain."
+    if kind == "file":
+        return f"Using the key in {where}."
+    return f"Using the key from the {where} environment variable."
 
 
 def check_sarvam_key(key: str, model: str) -> None:
@@ -100,8 +173,9 @@ class SettingsPage(Page):
         self._flash.setInterval(1600)
         self._flash.timeout.connect(self._status_idle)
 
+        left, top, right, _bottom = S.PAGE_MARGINS
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(40, 34, 40, 0)
+        outer.setContentsMargins(left, top, right, 0)
         outer.setSpacing(0)
 
         head = QHBoxLayout()
@@ -110,49 +184,54 @@ class SettingsPage(Page):
         head.addStretch(1)
         self.status_icon = C.icon_label(C.check_pixmap(S.SAGE, 14))
         self.status = QLabel()
-        self.status.setFont(S.sans(13))
-        status_box = QHBoxLayout()
+        self.status.setFont(S.sans(S.T_SMALL))
+        self.status.setMinimumWidth(1)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        status_box = self._status_box = QHBoxLayout()
         status_box.setSpacing(6)
-        status_box.addWidget(self.status_icon)
-        status_box.addWidget(self.status)
-        head.addLayout(status_box)
+        status_box.addStretch(1)
+        status_box.addWidget(self.status_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        status_box.addWidget(self.status, 0)
+        head.addLayout(status_box, 1)
         head.setAlignment(status_box, Qt.AlignmentFlag.AlignBottom)
         outer.addLayout(head)
-        outer.addSpacing(22)
+        outer.addSpacing(24)
 
-        body = QHBoxLayout()
-        body.setSpacing(30)
-        body.setContentsMargins(0, 0, 0, 0)
-        outer.addLayout(body, 1)
+        # Sub-nav: a slim column beside the content when there's room, a
+        # segmented tab row above it when there isn't (see _apply_width).
+        self._body = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self._body.setSpacing(32)
+        self._body.setContentsMargins(0, 0, 0, 0)
+        outer.addLayout(self._body, 1)
 
-        nav = QVBoxLayout()
-        nav.setSpacing(2)
-        nav.setContentsMargins(0, 0, 0, 0)
-        nav_box = QWidget()
-        nav_box.setFixedWidth(170)
-        nav_box.setLayout(nav)
+        self.nav_box = QFrame()
+        self.nav_box.setObjectName("subnav")
+        self._nav = QBoxLayout(QBoxLayout.Direction.TopToBottom, self.nav_box)
+        self._nav.setContentsMargins(0, 0, 0, 0)
+        self._nav.setSpacing(2)
         self.nav_buttons: dict[str, QPushButton] = {}
         for key, label in SECTIONS:
             b = QPushButton(label.replace("&", "&&"))
             b.setCheckable(True)
             b.setAutoExclusive(True)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFont(S.sans(14))
-            b.setStyleSheet(
-                f"QPushButton{{text-align:left;padding:8px 12px;border:none;border-radius:8px;"
-                f"background:transparent;color:{S.INK};}}"
-                f"QPushButton:hover{{background:{S.ROW_HOVER};}}"
-                f"QPushButton:checked{{background:{S.ROW_HOVER};font-weight:500;}}")
+            b.setFont(S.sans(S.T_UI, 500))
             b.clicked.connect(lambda _c=False, k=key: self.select(k))
-            nav.addWidget(b)
+            self._nav.addWidget(b)
             self.nav_buttons[key] = b
-        nav.addStretch(1)
-        body.addWidget(nav_box)
+        # Pushes the column's buttons up; zero-width in the tab row.
+        self._nav.addItem(QSpacerItem(0, 0, QSizePolicy.Policy.Minimum,
+                                      QSizePolicy.Policy.Expanding))
+        self.nav_top = None          # set by _apply_width
+        self._body.addWidget(self.nav_box, 0)
 
         self.stack = QStackedWidget()
-        self.stack.setMaximumWidth(700)
-        body.addWidget(self.stack, 1)
-        body.addStretch(0)   # the 700 pt column stays left; slack goes right
+        self.stack.setMaximumWidth(CONTENT_MAX_W)
+        self._body.addWidget(self.stack, 1)
+        # Slack past CONTENT_MAX_W goes to the right, so nav + content stay
+        # under the title (zero-height when the body is stacked).
+        self._body.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Policy.Expanding,
+                                             QSizePolicy.Policy.Minimum))
 
         builders = {"general": self._build_general, "shortcuts": self._build_shortcuts,
                     "sounds": self._build_sounds, "widget": self._build_widget,
@@ -161,28 +240,88 @@ class SettingsPage(Page):
         for key, _label in SECTIONS:
             content = QWidget()
             lay = QVBoxLayout(content)
-            lay.setContentsMargins(0, 0, 0, 28)
-            lay.setSpacing(26)
+            lay.setContentsMargins(0, 2, 8, S.PAGE_MARGINS[3])
+            lay.setSpacing(30)
             builders[key](lay)
             lay.addStretch(1)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            C.transparent_scroll(scroll, content)
+            scroll = _charts.scroll_page(content)
             self.stack.addWidget(scroll)
             self.sections[key] = scroll
 
+        self._apply_width(S.WIDE + 200)
         self._status_idle()
         self.select("general")
 
     # ── navigation ───────────────────────────────────────────────────────
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        self._apply_width(self.width() - S.PAGE_MARGINS[0] - S.PAGE_MARGINS[2])
+
+    def _apply_width(self, width: int) -> None:
+        top = width < NAV_SIDE_MIN
+        if top == self.nav_top:
+            return
+        self.nav_top = top
+        if top:
+            self._body.setDirection(QBoxLayout.Direction.TopToBottom)
+            self._body.setSpacing(26)
+            self._nav.setDirection(QBoxLayout.Direction.LeftToRight)
+            self._nav.setContentsMargins(3, 3, 3, 3)
+            self._nav.setSpacing(2)
+            self.nav_box.setMinimumWidth(0)
+            self.nav_box.setMaximumWidth(16777215)
+            self.nav_box.setFixedHeight(S.CONTROL_H)
+            self.nav_box.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+            self._body.setAlignment(self.nav_box, Qt.AlignmentFlag.AlignLeft)
+            self.stack.setMaximumWidth(16777215)
+            r = (S.CONTROL_H - 6) // 2
+            self.nav_box.setStyleSheet(
+                f"QFrame#subnav{{background:{C.SEG_TRACK};border-radius:{S.CONTROL_H // 2}px;}}"
+                f"QFrame#subnav QPushButton{{border:none;border-radius:{r}px;padding:0 14px;"
+                f"min-height:{S.CONTROL_H - 6}px;max-height:{S.CONTROL_H - 6}px;"
+                f"background:transparent;color:{S.MUTED};}}"
+                f"QFrame#subnav QPushButton:hover{{color:{S.INK};}}"
+                f"QFrame#subnav QPushButton:checked{{background:{S.PAPER};color:{S.ACCENT_TEXT};}}")
+        else:
+            self._body.setDirection(QBoxLayout.Direction.LeftToRight)
+            self._body.setSpacing(32)
+            self._nav.setDirection(QBoxLayout.Direction.TopToBottom)
+            self._nav.setContentsMargins(0, 0, 0, 0)
+            self._nav.setSpacing(2)
+            self.nav_box.setMinimumHeight(0)
+            self.nav_box.setMaximumHeight(16777215)
+            self.nav_box.setFixedWidth(NAV_SIDE_W)
+            self.nav_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+            self._body.setAlignment(self.nav_box, Qt.AlignmentFlag(0))
+            self.stack.setMaximumWidth(CONTENT_MAX_W)
+            self.nav_box.setStyleSheet(
+                "QFrame#subnav{background:transparent;}"
+                f"QFrame#subnav QPushButton{{text-align:left;padding:0 12px;border:none;"
+                f"border-radius:{S.RADIUS_FIELD}px;min-height:{S.CONTROL_H}px;"
+                f"max-height:{S.CONTROL_H}px;background:transparent;color:{S.INK_SOFT};}}"
+                f"QFrame#subnav QPushButton:hover{{background:{S.ROW_HOVER};}}"
+                f"QFrame#subnav QPushButton:checked{{background:{S.ROW_ON};color:{S.INK};}}")
+        self._mark_nav()
+
+    def _mark_nav(self) -> None:
+        """The tab row's chosen section is a raised pill, like C.Segmented."""
+        for b in self.nav_buttons.values():
+            if b.isChecked() and self.nav_top:
+                fx = QGraphicsDropShadowEffect(b)
+                fx.setBlurRadius(6)
+                fx.setOffset(0, 1)
+                fx.setColor(QColor(26, 24, 20, 38))
+                b.setGraphicsEffect(fx)
+            else:
+                b.setGraphicsEffect(None)
+
     def select(self, section: str) -> None:
         if section not in self.sections:
             return
         self._stop_recording()
         self.nav_buttons[section].setChecked(True)
         self.stack.setCurrentWidget(self.sections[section])
+        self._mark_nav()
 
     def shown(self, section: str | None = None, **kwargs) -> None:
         self._refresh()
@@ -217,6 +356,7 @@ class SettingsPage(Page):
             return False
         self._cfg.setdefault(section, {})[key] = value
         self.status_icon.show()
+        self._status_wrap(False)
         self.status.setText(STATUS_SAVED)
         self.status.setStyleSheet(f"color:{S.SAGE};")
         self._flash.start()
@@ -224,14 +364,21 @@ class SettingsPage(Page):
 
     def _status_idle(self) -> None:
         self.status_icon.show()
+        self._status_wrap(False)
         self.status.setText(STATUS_IDLE)
         self.status.setStyleSheet(f"color:{S.SAGE};")
 
     def _status_error(self, text: str) -> None:
         self._flash.stop()
         self.status_icon.hide()
+        self._status_wrap(True)
         self.status.setText(text)
         self.status.setStyleSheet(f"color:{S.DANGER};")
+
+    def _status_wrap(self, on: bool) -> None:
+        """Short notes hug the tick; a long error may wrap over the free width."""
+        self.status.setWordWrap(on)
+        self._status_box.setStretchFactor(self.status, 1 if on else 0)
 
     def _safe(self, fn: Callable, *args) -> None:
         """Slots never raise: PyQt aborts the process on an uncaught one."""
@@ -274,6 +421,7 @@ class SettingsPage(Page):
         self.history_size.setValue(self._history_cap())
         self.history_size.blockSignals(False)
         self._show_shortcuts()
+        self._key_placeholder(force=True)
 
     # ── general ──────────────────────────────────────────────────────────
     def _build_general(self, lay: QVBoxLayout) -> None:
@@ -320,15 +468,19 @@ class SettingsPage(Page):
             value = self._binding(action)
             rec = C.KeyRecorder(value, hold=(action == "record_hold"))
             hint = QLabel("")
-            hint.setFont(S.sans(12.5))
-            hint.setStyleSheet(f"color:{S.ACCENT};")
+            hint.setFont(S.sans(S.T_SMALL))
+            hint.setWordWrap(True)
+            hint.setMinimumWidth(1)
+            hint.setStyleSheet(f"color:{S.ACCENT_TEXT};")
+            hint.hide()
             rec.started.connect(lambda a=action: self._safe(self._on_rec_started, a))
             rec.captured.connect(lambda v, a=action: self._safe(self._on_captured, a, v))
-            rec.cancelled.connect(lambda a=action: self.hints[a].setText(""))
+            rec.cancelled.connect(lambda a=action: self._set_hint(a, ""))
             rec.failed.connect(lambda msg, a=action: self._hint_error(a, msg))
             self.recorders[action] = rec
             self.hints[action] = hint
-            rows[action] = C.Row(label, desc, hint, rec)
+            rows[action] = C.Row(label, desc, rec)
+            rows[action].text_col.addWidget(hint)
         hold = self._binding("record_hold")
         self.hands_free = C.KeyRecorder(hold, editable=False,
                                         caps=C.chord_caps(hold) * 2)
@@ -340,8 +492,10 @@ class SettingsPage(Page):
         ]))
         lay.addWidget(C.Group("Editing", [rows["edit_mode"], rows["undo_paste"],
                                           rows["cycle_mode"]]))
-        lay.addWidget(S.muted("Click a shortcut and press the new keys. "
-                              "Changes apply right away, no restart."))
+        note = S.muted("Click a shortcut and press the new keys. "
+                       "Changes apply right away, no restart.")
+        note.setContentsMargins(2, 0, 0, 0)
+        lay.addWidget(note)
 
     def _binding(self, action: str) -> str:
         return str(self._get("hotkeys", action, cfg_mod.DEFAULTS["hotkeys"].get(action, "")))
@@ -357,22 +511,26 @@ class SettingsPage(Page):
         for action, rec in getattr(self, "recorders", {}).items():
             if action != except_action and rec.recording:
                 rec.stop()
-                self.hints[action].setText("")
+                self._set_hint(action, "")
 
     def _on_rec_started(self, action: str) -> None:
         self._stop_recording(except_action=action)
-        for a, hint in self.hints.items():
+        for a in self.hints:
             if a != action:
-                hint.setText("")
-        self.hints[action].setStyleSheet(f"color:{S.ACCENT};")
-        self.hints[action].setText(PRESS_KEYS)
+                self._set_hint(a, "")
+        self._set_hint(action, PRESS_KEYS, S.ACCENT_TEXT)
+
+    def _set_hint(self, action: str, text: str, color: str = S.ACCENT_TEXT) -> None:
+        hint = self.hints[action]
+        hint.setStyleSheet(f"color:{color};")
+        hint.setText(text)
+        hint.setVisible(bool(text))
 
     def _hint_error(self, action: str, msg: str) -> None:
-        self.hints[action].setStyleSheet(f"color:{S.DANGER};")
-        self.hints[action].setText(msg)
+        self._set_hint(action, msg, S.DANGER)
 
     def _on_captured(self, action: str, value: str) -> None:
-        self.hints[action].setText("")
+        self._set_hint(action, "")
         if not C.daemon_accepts(action, value):
             self._hint_error(action, C.ERR_UNKNOWN)
             return
@@ -410,11 +568,12 @@ class SettingsPage(Page):
             f"QSlider::groove:horizontal{{height:4px;background:{C.SLIDER_TRACK};border-radius:2px;}}"
             f"QSlider::sub-page:horizontal{{background:{S.ACCENT};border-radius:2px;}}"
             f"QSlider::handle:horizontal{{background:#FFFFFF;border:1px solid {C.KEYCAP_BORDER};"
-            f"width:12px;height:12px;margin:-5px 0;border-radius:7px;}}")
+            f"width:14px;height:14px;margin:-6px 0;border-radius:8px;}}")
+        self.volume.setFixedHeight(22)
         self.volume_label = QLabel(f"{self.volume.value()}%")
-        self.volume_label.setFont(S.mono(12.5, 400))
+        self.volume_label.setFont(S.mono(S.T_SMALL, 400))
         self.volume_label.setStyleSheet(f"color:{S.MUTED};")
-        self.volume_label.setFixedWidth(36)
+        self.volume_label.setFixedWidth(40)   # "100%" in mono
         self.volume_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.volume.valueChanged.connect(self._on_volume_changed)
         self.volume.sliderReleased.connect(lambda: self._safe(self._write_volume))
@@ -428,11 +587,12 @@ class SettingsPage(Page):
 
         self.play_btn = S.button("Play cues")
         self.play_btn.clicked.connect(lambda: self._safe(self._play_cues))
-        self.play_note = S.muted("", 12.5)
-        self.play_note.setWordWrap(False)
+        self.play_note = S.muted("", S.T_SMALL)
+        self.play_note.setStyleSheet(f"color:{S.ACCENT_TEXT};background:transparent;")
         self.play_note.hide()
 
-        preview = C.Row("Preview", "Hear each cue once", self.play_note, self.play_btn)
+        preview = C.Row("Preview", "Hear each cue once", self.play_btn)
+        preview.text_col.addWidget(self.play_note)
         lay.addWidget(C.Group("Sounds", [
             C.Row("Sound cues", "Woodblock knocks when you start and stop", self.sound_toggle),
             C.Row("Volume", "How loud the cues are", vol_box),
@@ -489,12 +649,12 @@ class SettingsPage(Page):
     @staticmethod
     def _field_style() -> str:
         return (f"background:{S.PAPER};color:{S.INK};border:1px solid {S.HAIR};"
-                f"border-radius:9px;padding:7px 10px;")
+                f"border-radius:{S.RADIUS_FIELD}px;padding:0 10px;")
 
     def _combo(self, items: list[str]) -> QComboBox:
         c = C.Combo(items)
-        c.setFont(S.sans(13.5))
-        c.setMinimumWidth(200)
+        c.setMinimumWidth(180)
+        c.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         return c
 
     @staticmethod
@@ -504,24 +664,27 @@ class SettingsPage(Page):
         combo.setCurrentText(value)
 
     def _build_speech(self, lay: QVBoxLayout) -> None:
-        self.key_field = QLineEdit()
+        self.key_field = S.field("Paste your Sarvam key")
+        self.key_field.setAccessibleName("Sarvam API key")
         self.key_field.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_field.setFont(S.sans(13.5))
-        self.key_field.setFixedWidth(220)
-        self.key_field.setStyleSheet(f"QLineEdit{{{self._field_style()}}}")
-        self.key_save = S.button("Save")
+        self.key_field.setMinimumWidth(140)
+        self.key_field.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.key_save = S.button("Save", kind="primary")
         self.key_test = S.button("Test")
+        for b in (self.key_save, self.key_test):
+            b.setMinimumWidth(b.sizeHint().width())     # pills never clip
         self.key_save.clicked.connect(lambda: self._safe(self._save_key))
         self.key_test.clicked.connect(lambda: self._safe(self._test_key))
         self.key_field.returnPressed.connect(lambda: self._safe(self._save_key))
         key_row = C.Row("API key", "One Sarvam key for speech-to-text and cleanup. "
-                        "Kept in the Keychain, not in config.toml.",
-                        self.key_field, self.key_save, self.key_test)
+                        "Saving puts it in the Keychain, never in config.toml.",
+                        self.key_field, self.key_save, self.key_test, below=True, fill=True)
         self.key_status = QLabel("")
-        self.key_status.setFont(S.sans(12.5))
+        self.key_status.setFont(S.sans(S.T_SMALL))
         self.key_status.setWordWrap(True)
-        key_row.text_col.addWidget(self.key_status)
-        self._key_placeholder()
+        self.key_status.setMinimumWidth(1)
+        key_row.layout().addWidget(self.key_status)
+        self._key_placeholder(force=True)
         lay.addWidget(C.Group("Sarvam", [key_row]))
 
         self.stt_model = self._combo(STT_MODELS)
@@ -539,11 +702,17 @@ class SettingsPage(Page):
                   self.chat_model),
         ]))
 
-    def _key_placeholder(self) -> None:
-        has = bool(keychain_read())
-        self.key_field.setPlaceholderText("Saved in Keychain" if has else "Paste your Sarvam key")
-        if not self.key_status.text():
-            self._key_status("A key is saved." if has else "No key yet.", S.MUTED)
+    def _key_env(self) -> str:
+        return str(self._get("sarvam", "api_key_env", "SARVAM_API_KEY") or "SARVAM_API_KEY")
+
+    def _key_placeholder(self, force: bool = False) -> None:
+        """Field hint + status line say where the key in use comes from
+        (Keychain, a .env file, the environment), never the key itself."""
+        src = key_source(self._key_env())
+        self.key_field.setPlaceholderText("Paste a new key to replace it" if src
+                                          else "Paste your Sarvam key")
+        if force or not self.key_status.text():
+            self._key_status(key_source_text(src), S.SAGE_TEXT if src else S.ACCENT_TEXT)
 
     def _key_status(self, text: str, color: str) -> None:
         self.key_status.setText(text)
@@ -560,9 +729,9 @@ class SettingsPage(Page):
             log_exception("hub.settings", "keychain write failed", e)
             self._key_status(f"Couldn't save to the Keychain: {e}", S.DANGER)
             return
-        os.environ[str(self._get("sarvam", "api_key_env", "SARVAM_API_KEY"))] = key
+        os.environ[self._key_env()] = key
         self.key_field.clear()
-        self._key_status("Saved to the Keychain.", S.SAGE)
+        self._key_status("Saved to the Keychain.", S.SAGE_TEXT)
         self._key_placeholder()
 
     def _test_key(self) -> None:
@@ -574,7 +743,7 @@ class SettingsPage(Page):
         def done(_result, error) -> None:
             self.key_test.setEnabled(True)
             if error is None:
-                self._key_status("Connected to Sarvam.", S.SAGE)
+                self._key_status("Connected to Sarvam.", S.SAGE_TEXT)
             else:
                 self._key_status(f"Didn't work: {error}", S.DANGER)
 
@@ -598,25 +767,24 @@ class SettingsPage(Page):
         # Type, or ↑ ↓ / scroll; Qt's stepper arrows don't take the field style.
         self.history_size.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)   # write on Enter / focus out
         self.history_size.setValue(self._history_cap())
-        self.history_size.setFont(S.sans(13.5))
-        self.history_size.setFixedWidth(100)
-        self.history_size.setStyleSheet(f"QSpinBox{{{self._field_style()}}}")
+        self.history_size.setFont(S.sans(S.T_UI))
+        self.history_size.setFixedSize(96, S.CONTROL_H)   # a 4-digit number
+        self.history_size.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.history_size.setStyleSheet(f"QSpinBox{{{self._field_style()}}}"
+                                        f"QSpinBox:focus{{border-color:{S.ACCENT};}}")
         self.history_size.valueChanged.connect(
             lambda v: self._safe(self._save, "history", "size_cap", int(v)))
 
-        self.clear_btn = S.button("Clear history…")
+        self.clear_btn = S.button("Clear history…", kind="danger")
         self.clear_btn.clicked.connect(self._ask_clear)
         self.clear_confirm = QWidget()
         cl = QHBoxLayout(self.clear_confirm)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(8)
         ask = QLabel("Delete every dictation?")
-        ask.setFont(S.sans(13))
+        ask.setFont(S.sans(S.T_UI))
         ask.setStyleSheet(f"color:{S.INK};")
-        self.clear_yes = S.button("Delete")
-        self.clear_yes.setStyleSheet(
-            f"QPushButton{{background:{S.DANGER};color:{S.PAPER};border:1px solid {S.DANGER};"
-            f"border-radius:9px;padding:8px 14px;}}")
+        self.clear_yes = S.button("Delete", kind="accent")
         self.clear_cancel = S.button("Cancel")
         cl.addWidget(ask)
         cl.addWidget(self.clear_yes)
@@ -627,7 +795,9 @@ class SettingsPage(Page):
         clear_row = C.Row("Clear history", "Deletes every saved dictation. Can't be undone.",
                           self.clear_btn, self.clear_confirm)
         self.clear_note = QLabel("")
-        self.clear_note.setFont(S.sans(12.5))
+        self.clear_note.setFont(S.sans(S.T_SMALL))
+        self.clear_note.setWordWrap(True)
+        self.clear_note.setMinimumWidth(1)
         clear_row.text_col.addWidget(self.clear_note)
         self.clear_note.hide()
 

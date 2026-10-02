@@ -278,6 +278,9 @@ def test_frame_timer_runs_only_while_animating(fa):
 
 def test_toast_and_countdown_timers_stop_when_expired():
     t = fw.Toast(PAPER, "Transcript cancelled", "Undo", lambda: None, timer_s=5.0)
+    # Same look as the Dictate tooltip: the widget's red, a white chip button.
+    assert t.fill == fw.qc(PAPER.accent)
+    assert "rgba(255,255,255,0.2)" in t.button.styleSheet()
     assert t._timer.isActive()
     t._t0 -= 6
     t._tick()
@@ -776,3 +779,12 @@ def test_hover_pill_stays_red_while_the_tooltip_shows(fa):
     fa.widget._hot = None  # pointer in the margin, off the pill
     fill, _icon = fa.widget._dictate_colors(fa.theme)
     assert fill == fw.qc(fa.theme.accent)
+
+
+def test_no_audio_error_shows_cant_hear_with_mic_settings(fa):
+    fa._on_message({"type": "state", "state": "error", "text": "", "reason": "no_audio"})
+    assert isinstance(fa.popup, fw.Toast)
+    assert fa.popup.button.text() == "Mic settings"
+    # A transcription failure right after swaps the toast back to Retry.
+    fa._on_message({"type": "state", "state": "error", "text": ""})
+    assert fa.popup.button.text() == "Retry"

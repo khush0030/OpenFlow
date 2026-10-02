@@ -1,8 +1,10 @@
 """Home page (spec §5.1, mockup board "Home").
 
-Greeting + live status line, the Ink language banner, today's dictations
-(search, Copy, Paste again) and a right column with the headline numbers
-and a "Right now" card (tone, language, hands-free, permissions).
+Greeting + a live status pill, a slim Ink language banner, the all-time
+numbers as a 3-up strip, today's dictations (search, Copy, Paste again)
+and a "Right now" card (tone, language, hands-free, permissions). The list
+and Right now sit side by side on a wide panel and stack (list first) on a
+narrow one, so dictations always get the full text width.
 """
 from __future__ import annotations
 
@@ -10,9 +12,10 @@ import html
 from datetime import datetime
 from typing import Callable
 
-from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer
+from PyQt6.QtGui import QColor, QFontMetricsF, QPainter, QPixmap, QTextLayout
 from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                             QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
+                             QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 import stats
 from ui import widget_copy
@@ -22,10 +25,22 @@ from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.hub.pages import _charts as C
 from ui.hub.pages._charts import first_name  # noqa: F401  (tests patch home.first_name)
+from ui.hub.pages._controls import check_pixmap, cross_pixmap
 
-AMBER = "#C8851A"
-BANNER_BODY = "#CFC7BB"
+
+def _mix(fg: str, bg: str, alpha: float) -> str:
+    """`fg` laid over `bg` at `alpha`, as a hex colour."""
+    a, b = QColor(fg), QColor(bg)
+    return QColor(round(a.red() * alpha + b.red() * (1 - alpha)),
+                  round(a.green() * alpha + b.green() * (1 - alpha)),
+                  round(a.blue() * alpha + b.blue() * (1 - alpha))).name().upper()
+
+
+AMBER = S.AMBER                          # processing dot
+BANNER_BODY = _mix(S.PAPER, S.INK, 0.72)  # secondary copy on the Ink banner
 POLL_MS = 2000
+MAX_ROWS = 8          # today's newest; the rest are a click away in History
+SIDE_W = 296          # Right now column when it sits beside the list
 
 LANGUAGE_LABELS = {
     "auto": "Auto", "en": "English", "hi": "हिन्दी · Hindi", "hi_roman": "Hindi (Roman)",
@@ -33,6 +48,8 @@ LANGUAGE_LABELS = {
 }
 PERMISSIONS = (("microphone", "Microphone"), ("accessibility", "Accessibility"),
                ("input_monitoring", "Input Monitoring"))
+# Status pill fill for each dot colour (the widget's soft-fill pill).
+PILL_FILL = {S.ACCENT: S.ACCENT_SOFT, S.DANGER: S.ACCENT_SOFT, S.SAGE: S.SAGE_SOFT}
 
 
 def greeting_for(now: datetime, name: str | None) -> str:
@@ -50,26 +67,96 @@ def key_glyph(hold_key: str) -> str:
     return widget_copy.key_name(hold_key).split(" ")[0] or "⌘"
 
 
-def _mono_span(text: str, color: str = S.INK, size: float = 12.5) -> str:
+def _mono_span(text: str, color: str = S.INK, size: float = 12) -> str:
     return (f'<span style="font-family:\'{S.MONO}\',Menlo,monospace;font-size:{size}pt;'
             f'color:{color};">{html.escape(text)}</span>')
 
 
+def _ring_pixmap(color: str, size: int = 14) -> QPixmap:
+    """Hollow circle: a permission we can't read yet."""
+    ratio = 2.0
+    pm = QPixmap(int(size * ratio), int(size * ratio))
+    pm.setDevicePixelRatio(ratio)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QColor(color))
+    p.drawEllipse(QRectF(size * 0.3, size * 0.3, size * 0.4, size * 0.4))
+    p.end()
+    return pm
+
+
 def _icon_button(name: str, tip: str) -> QPushButton:
     b = QPushButton()
-    b.setIcon(C.icon(name, 15, S.MUTED))
-    b.setIconSize(QSize(15, 15))
-    b.setFixedSize(30, 30)
+    b.setIcon(C.icon(name, 14, S.MUTED))
+    b.setIconSize(QSize(14, 14))
+    b.setFixedSize(28, 28)
     b.setToolTip(tip)
     b.setAccessibleName(tip)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
-    b.setStyleSheet(f"QPushButton{{background:{S.PAPER};border:1px solid {S.HAIR};border-radius:8px;}}"
-                    f"QPushButton:hover{{background:{S.ROW_HOVER};}}")
+    b.setStyleSheet(f"QPushButton{{background:transparent;border:1px solid transparent;"
+                    f"border-radius:14px;}}"
+                    f"QPushButton:hover{{background:{S.PAPER};border-color:{S.HAIR};}}")
     return b
 
 
+class _Split(S.Reflow):
+    """List + side card: side by side when wide (side capped at SIDE_W),
+    stacked full width when narrow."""
+
+    def __init__(self, side: QWidget, breakpoint: int = S.WIDE) -> None:
+        super().__init__(breakpoint)
+        self.side = side
+
+    def apply(self, width: int) -> None:
+        super().apply(width)
+        self.side.setMaximumWidth(16777215 if self.stacked else SIDE_W)
+        self.side.setMinimumWidth(1 if self.stacked else SIDE_W)
+
+
+class _FitRow(S.Reflow):
+    """Stacks as soon as the children's natural widths don't fit side by
+    side (the greeting and status pill both grow with their text)."""
+
+    def apply(self, width: int) -> None:
+        need = sum(w.sizeHint().width() for w, _s, _a in self._items)
+        self.breakpoint = need + self.box.spacing() * max(0, len(self._items) - 1)
+        super().apply(width)
+
+
+T_ENTRY = S.T_H3      # dictation text: Fraunces, the list headline size
+CLAMP = 4             # lines of a long dictation before "Show more"
+
+
+def _wrap(text: str, font, width: float) -> list[tuple[int, int]]:
+    """(start, length) of each line `text` wraps to at `width`."""
+    if width < 40:
+        return [(0, len(text))]
+    out = []
+    for para_start, para in _paragraphs(text):
+        tl = QTextLayout(para, font)
+        tl.beginLayout()
+        while True:
+            line = tl.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            out.append((para_start + line.textStart(), line.textLength()))
+        tl.endLayout()
+    return out
+
+
+def _paragraphs(text: str) -> list[tuple[int, str]]:
+    out, pos = [], 0
+    for part in text.split("\n"):
+        out.append((pos, part))
+        pos += len(part) + 1
+    return out
+
+
 class EntryRow(QFrame):
-    """One dictation: time · text · tone tag + Copy / Paste again."""
+    """One dictation: time · tone tag · Copy / Paste again on one line,
+    the text under it at the full width of the list."""
 
     def __init__(self, entry, first: bool, on_paste: Callable[["EntryRow"], None]) -> None:
         super().__init__()
@@ -77,53 +164,83 @@ class EntryRow(QFrame):
         self.setObjectName("entryrow")
         top = "" if first else f"border-top:1px solid {S.HAIR};"
         self.setStyleSheet(f"QFrame#entryrow{{background:transparent;border:none;{top}}}")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 16, 20, 16)
-        lay.setSpacing(22)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 12, 14, 16)
+        lay.setSpacing(4)
 
+        meta = QHBoxLayout()
+        meta.setContentsMargins(0, 0, 0, 0)
+        meta.setSpacing(10)
         when = QLabel(datetime.fromtimestamp(entry.ts).strftime("%-I:%M %p").lower())
-        when.setFont(S.mono(12, 400))
-        when.setStyleSheet(f"color:{S.MUTED};padding-top:3px;")
-        when.setFixedWidth(70)
-        lay.addWidget(when, 0, Qt.AlignmentFlag.AlignTop)
-
-        mid = QVBoxLayout()
-        mid.setSpacing(6)
-        self.text = QLabel(f'<div style="line-height:23px;">{html.escape(entry.final)}</div>')
-        self.text.setTextFormat(Qt.TextFormat.RichText)
-        self.text.setWordWrap(True)
-        self.text.setFont(S.sans(15))
-        self.text.setStyleSheet(f"color:{S.INK};")
-        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        mid.addWidget(self.text)
-        self.note = QLabel()
-        self.note.setFont(S.sans(12.5))
-        self.note.setWordWrap(True)
-        self.note.hide()
-        mid.addWidget(self.note)
-        mid.addStretch(1)
-        lay.addLayout(mid, 1)
-
-        side = QVBoxLayout()
-        side.setSpacing(8)
-        side.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
-        t = S.tag(tone_label(entry.tone))
-        side.addWidget(t, 0, Qt.AlignmentFlag.AlignRight)
-        acts = QHBoxLayout()
-        acts.setSpacing(4)
+        when.setFont(S.mono(11.5, 400))
+        when.setStyleSheet(f"color:{S.MUTED};")
+        meta.addWidget(when, 0, Qt.AlignmentFlag.AlignVCenter)
+        meta.addWidget(S.tag(tone_label(entry.tone)), 0, Qt.AlignmentFlag.AlignVCenter)
+        meta.addStretch(1)
         self.copy_btn = _icon_button("copy", "Copy")
         self.paste_btn = _icon_button("paste", "Paste again")
         self.copy_btn.clicked.connect(lambda *_a: self._copy())
         self.paste_btn.clicked.connect(lambda *_a: on_paste(self))
-        acts.addWidget(self.copy_btn)
-        acts.addWidget(self.paste_btn)
-        side.addLayout(acts)
-        lay.addLayout(side)
+        meta.addWidget(self.copy_btn)
+        meta.addWidget(self.paste_btn)
+        lay.addLayout(meta)
+
+        self.expanded = False
+        self.text = QLabel(entry.final or "")
+        self.text.setWordWrap(True)
+        self.text.setMinimumWidth(1)
+        self.text.setFont(S.serif(T_ENTRY))
+        self.text.setStyleSheet(f"color:{S.INK};")
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        lay.addWidget(self.text)
+        self.more = QLabel()
+        self.more.setFont(S.sans(S.T_SMALL, 500))
+        self.more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.more.linkActivated.connect(lambda _h: self._toggle())
+        self.more.hide()
+        lay.addWidget(self.more, 0, Qt.AlignmentFlag.AlignLeft)
+        self.note = QLabel()
+        self.note.setFont(S.sans(S.T_SMALL))
+        self.note.setWordWrap(True)
+        self.note.setMinimumWidth(1)
+        self.note.hide()
+        lay.addWidget(self.note)
 
         self._note_timer = QTimer(self)
         self._note_timer.setSingleShot(True)
         self._note_timer.timeout.connect(self.note.hide)
+
+    # Long dictations show CLAMP lines and a "Show more" link; Copy and
+    # Paste again always use the full text.
+    def _toggle(self) -> None:
+        self.expanded = not self.expanded
+        self._fit()
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self) -> None:
+        full = self.entry.final or ""
+        lines = _wrap(full, self.text.font(), self.text.width() - 2)
+        if len(lines) <= CLAMP:
+            self.more.hide()
+            if self.text.text() != full:
+                self.text.setText(full)
+            return
+        if self.expanded:
+            shown, link = full, "Show less"
+        else:
+            fm = QFontMetricsF(self.text.font())
+            rest = full[lines[CLAMP - 1][0]:].replace("\n", " ")
+            last = fm.elidedText(rest, Qt.TextElideMode.ElideRight, self.text.width() - 2)
+            shown = "\n".join([full[a:a + n].rstrip() for a, n in lines[:CLAMP - 1]] + [last])
+            link = "Show more"
+        if self.text.text() != shown:
+            self.text.setText(shown)
+        self.more.setText(S.link_html(link, "more"))
+        self.more.show()
 
     def show_note(self, text: str, color: str = S.MUTED, ms: int = 0) -> None:
         self.note.setText(text)
@@ -141,37 +258,41 @@ class EntryRow(QFrame):
 
 
 class PermissionRow(QWidget):
+    """Mark · name · state. Allowed: sage tick. Not allowed: red ✕ and a red
+    "Not allowed" link to Help. Unknown: a faint ring and "Unknown"."""
+
     def __init__(self, label: str, navigate: Callable[..., None]) -> None:
         super().__init__()
         self.state: bool | None = None
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
+        lay.setSpacing(9)
         self.tick = QLabel()
-        self.tick.setFixedSize(15, 15)
-        lay.addWidget(self.tick)
+        self.tick.setFixedSize(14, 14)
+        lay.addWidget(self.tick, 0, Qt.AlignmentFlag.AlignVCenter)
         self.name = QLabel(label)
-        self.name.setFont(S.sans(13.5))
-        lay.addWidget(self.name)
-        lay.addStretch(1)
+        self.name.setFont(S.sans(S.T_UI))
+        self.name.setMinimumWidth(1)
+        lay.addWidget(self.name, 1)
         self.link = QLabel()
-        self.link.setFont(S.sans(12.5))
+        self.link.setFont(S.sans(S.T_SMALL))
         self.link.linkActivated.connect(lambda _h: navigate("help"))
-        lay.addWidget(self.link)
+        lay.addWidget(self.link, 0, Qt.AlignmentFlag.AlignVCenter)
         self.set_state(None)
 
     def set_state(self, state: bool | None) -> None:
         self.state = state
         if state is True:
-            self.tick.setPixmap(C.icon_pixmap("check", 15, S.SAGE, 2))
+            self.tick.setPixmap(check_pixmap(S.SAGE, 14, 2.2))
             self.name.setStyleSheet(f"color:{S.INK};")
-            self.link.setText("")
+            self.link.setText(f'<span style="color:{S.MUTED};">Allowed</span>')
         elif state is False:
-            self.tick.setPixmap(C.icon_pixmap("check", 15, S.HAIR, 2))
+            self.tick.setPixmap(cross_pixmap(S.DANGER, 14, 2.4))
             self.name.setStyleSheet(f"color:{S.INK};")
-            self.link.setText(f'<a href="help" style="color:{S.DANGER};text-decoration:none;">Not allowed</a>')
+            self.link.setText(f'<a href="help" style="color:{S.DANGER};text-decoration:none;'
+                              f'font-weight:600;">Not allowed</a>')
         else:
-            self.tick.setPixmap(C.icon_pixmap("check", 15, S.HAIR, 2))
+            self.tick.setPixmap(_ring_pixmap(S.MUTED, 14))
             self.name.setStyleSheet(f"color:{S.MUTED};")
             self.link.setText(f'<span style="color:{S.MUTED};">Unknown</span>')
 
@@ -180,21 +301,32 @@ def _kv_row(key: str) -> tuple[QWidget, QLabel]:
     w = QWidget()
     lay = QHBoxLayout(w)
     lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(12)
     k = QLabel(key)
-    k.setFont(S.sans(14))
+    k.setFont(S.sans(S.T_UI))
     k.setStyleSheet(f"color:{S.MUTED};")
     v = QLabel()
-    v.setFont(S.sans(14))
+    v.setFont(S.sans(S.T_UI, 500))
+    v.setMinimumWidth(1)
+    v.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     v.setStyleSheet(f"color:{S.INK};")
     lay.addWidget(k)
-    lay.addStretch(1)
-    lay.addWidget(v)
+    lay.addWidget(v, 1)
     return w, v
 
 
 def _stat_html(big: str, small: str) -> str:
-    return (f'<span style="font-family:\'{S.SERIF}\';font-size:34pt;color:{S.INK};">{html.escape(big)}</span>'
-            f'<span style="font-size:14.5pt;color:{S.MUTED};">&nbsp;&nbsp;{html.escape(small)}</span>')
+    """Number (the label's Fraunces T_STAT font) over a Geist caption."""
+    return (f'<div style="color:{S.INK};">{html.escape(big)}</div>'
+            f'<div style="font-family:\'{S.SANS}\';font-size:{S.T_SMALL}pt;color:{S.MUTED};">'
+            f'{html.escape(small)}</div>')
+
+
+def _vline() -> QFrame:
+    f = QFrame()
+    f.setFixedWidth(1)
+    f.setStyleSheet(f"background:{S.HAIR};border:none;")
+    return f
 
 
 class HomePage(Page):
@@ -207,6 +339,7 @@ class HomePage(Page):
         self._load_error: str | None = None
         self._hold_key = "cmd_r"
         self.rows: list[EntryRow] = []
+        self.more_link: QLabel | None = None
         self.status_dot_color = S.MUTED
         self._status_in_flight = False   # one status call at a time; ticks never pile up
 
@@ -215,170 +348,173 @@ class HomePage(Page):
         self.status_timer.timeout.connect(self._safe(lambda *_a: self.refresh_status()))
 
         body = QWidget()
-        body.setMinimumHeight(640)
         root = QVBoxLayout(body)
-        root.setContentsMargins(40, 34, 40, 24)
-        root.setSpacing(24)
+        root.setContentsMargins(*S.PAGE_MARGINS)
+        root.setSpacing(0)
 
-        # ── header ──
-        head = QHBoxLayout()
+        # ── header: greeting + status pill ──
+        self.header = _FitRow(spacing=12)
         self.greeting = S.page_title("")
-        head.addWidget(self.greeting, 0, Qt.AlignmentFlag.AlignBottom)
-        head.addStretch(1)
-        st = QHBoxLayout()
-        st.setSpacing(8)
-        self.status_dot = QLabel()
-        self.status_dot.setFixedSize(8, 8)
-        self.status_text = QLabel()
-        self.status_text.setFont(S.sans(13))
-        self.status_text.setTextFormat(Qt.TextFormat.RichText)
-        self.status_text.linkActivated.connect(self._safe(lambda *_a: self.ctx.navigate("help")))
-        st.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
-        st.addWidget(self.status_text, 0, Qt.AlignmentFlag.AlignVCenter)
-        head.addLayout(st)
-        root.addLayout(head)
+        self.greeting.setMinimumWidth(1)
+        self.header.add(self.greeting, 1, Qt.AlignmentFlag.AlignVCenter)
+        self.header.add(self._status_pill(), 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addWidget(self.header)
+        root.addSpacing(22)
 
-        cols = QHBoxLayout()
-        cols.setSpacing(22)
-        root.addLayout(cols, 1)
+        root.addWidget(self._banner())
+        root.addSpacing(S.GAP)
+        root.addWidget(self._stats_card())
+        root.addSpacing(30)
 
-        # ── left column ──
-        left = QVBoxLayout()
-        left.setSpacing(22)
-        cols.addLayout(left, 1)
-        left.addWidget(self._banner())
-
+        # ── today + right now ──
+        self.right_now = self._right_now_card()
+        self.columns = _Split(self.right_now)
+        today = QWidget()
+        tl = QVBoxLayout(today)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(12)
         bar = QHBoxLayout()
-        bar.addWidget(S.eyebrow("Today"))
+        bar.setSpacing(12)
+        self.today_label = S.eyebrow("Today")
+        bar.addWidget(self.today_label, 0, Qt.AlignmentFlag.AlignVCenter)
         bar.addStretch(1)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search your dictations")
-        self.search.setAccessibleName("Search your dictations")
-        self.search.setFixedWidth(252)
-        self.search.setFont(S.sans(13.5))
+        self.search = S.field("Search your dictations")
+        self.search.setMinimumWidth(150)
+        self.search.setMaximumWidth(260)
+        self.search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search.addAction(C.icon("search", 15, S.MUTED), QLineEdit.ActionPosition.LeadingPosition)
-        self.search.setStyleSheet(f"QLineEdit{{background:{S.PAPER};color:{S.INK};border:1px solid {S.HAIR};"
-                                  f"border-radius:9px;padding:6px 8px 6px 2px;}}"
-                                  f"QLineEdit:focus{{border-color:{S.ACCENT};}}")
+        self.search.setStyleSheet(self.search.styleSheet().replace("padding:0 10px", "padding:0 10px 0 2px"))
         self.search.textChanged.connect(self._safe(lambda _t: self._render_list()))
         self.search.returnPressed.connect(self._safe(lambda *_a: self._open_history()))
         bar.addWidget(self.search)
-        left.addLayout(bar)
+        tl.addLayout(bar)
 
-        self.list_box = QFrame()
-        self.list_box.setObjectName("listbox")
-        self.list_box.setStyleSheet(f"QFrame#listbox{{background:{S.PAPER};border:1px solid {S.HAIR};"
-                                    f"border-radius:14px;}}")
-        lb = QVBoxLayout(self.list_box)
-        lb.setContentsMargins(1, 1, 1, 1)
-        self.list_scroll = QScrollArea()
-        self.list_scroll.setWidgetResizable(True)
-        self.list_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + C.SCROLLBAR)
-        self.list_scroll.viewport().setObjectName("listviewport")
-        self.list_scroll.viewport().setStyleSheet("QWidget#listviewport{background:transparent;}")
-        self.list_inner = QWidget()
-        self.list_inner.setObjectName("listinner")
-        self.list_inner.setStyleSheet("QWidget#listinner{background:transparent;}")
-        self.list_layout = QVBoxLayout(self.list_inner)
-        self.list_layout.setContentsMargins(0, 0, 0, 0)
-        self.list_layout.setSpacing(0)
-        self.list_scroll.setWidget(self.list_inner)
-        lb.addWidget(self.list_scroll)
-        left.addWidget(self.list_box, 1)
+        self.list_box = S.Card(padding=0)
+        self.list_box.body.setContentsMargins(0, 4, 0, 4)
+        self.list_box.body.setSpacing(0)
+        self.list_layout = self.list_box.body
+        tl.addWidget(self.list_box)
+        tl.addStretch(1)
 
-        # ── right column ──
-        right = QVBoxLayout()
-        right.setSpacing(16)
-        cols.addLayout(right)
-        right_w = 262
-        stats_card = S.Card(padding=22)
-        stats_card.setFixedWidth(right_w)
-        stats_card.body.setSpacing(12)
-        self.words_stat, self.wpm_stat, self.streak_stat = (QLabel() for _ in range(3))
-        for l in (self.words_stat, self.wpm_stat, self.streak_stat):
-            l.setTextFormat(Qt.TextFormat.RichText)
-            l.setFont(S.sans(14.5))
-            l.setStyleSheet("background:transparent;")
-            stats_card.body.addWidget(l)
-        self.insights_link = QLabel(f'<a href="insights" style="color:{S.ACCENT};text-decoration:none;">'
-                                    f'See insights →</a>')
-        self.insights_link.setFont(S.sans(13.5))
-        self.insights_link.setStyleSheet("background:transparent;margin-top:4px;")
-        self.insights_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.insights_link.linkActivated.connect(self._safe(lambda _h: self.ctx.navigate("insights")))
-        stats_card.body.addWidget(self.insights_link)
-        right.addWidget(stats_card)
-
-        self.right_now = S.Card(padding=22)
-        self.right_now.setFixedWidth(right_w)
-        self.right_now.body.setContentsMargins(22, 20, 22, 20)
-        self.right_now.body.setSpacing(14)
-        self.right_now.body.addWidget(S.eyebrow("Right now"))
-        kv = QVBoxLayout()
-        kv.setSpacing(8)
-        r1, self.tone_value = _kv_row("Tone")
-        r2, self.lang_value = _kv_row("Language")
-        r3, self.hands_value = _kv_row("Hands-free")
-        self.hands_value.setFont(S.mono(12.5, 400))
-        for r in (r1, r2, r3):
-            r.setStyleSheet("background:transparent;")
-            kv.addWidget(r)
-        self.right_now.body.addLayout(kv)
-        self.right_now.body.addWidget(C.hairline())
-        perms = QVBoxLayout()
-        perms.setSpacing(7)
-        self.permission_rows: dict[str, PermissionRow] = {}
-        for key, label in PERMISSIONS:
-            pr = PermissionRow(label, self._safe(lambda *_a: self.ctx.navigate("help")))
-            pr.setStyleSheet("background:transparent;")
-            self.permission_rows[key] = pr
-            perms.addWidget(pr)
-        self.right_now.body.addLayout(perms)
-        right.addWidget(self.right_now)
-        right.addStretch(1)
+        self.columns.add(today, 1)
+        self.columns.add(self.right_now, 0, Qt.AlignmentFlag.AlignTop)
+        self.columns.apply(0)
+        root.addWidget(self.columns)
+        root.addStretch(1)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(C.scroll_page(body))
 
         self._set_dot(S.MUTED)
+        self.status_text.setText("Checking…")
         self._apply_name()
 
     # ── building blocks ──
+    def _status_pill(self) -> QFrame:
+        pill = QFrame()
+        pill.setObjectName("statuspill")
+        pill.setFixedHeight(30)
+        pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.status_pill = pill
+        lay = QHBoxLayout(pill)
+        lay.setContentsMargins(12, 0, 14, 0)
+        lay.setSpacing(8)
+        self.status_dot = QLabel()
+        self.status_dot.setFixedSize(8, 8)
+        self.status_text = QLabel()
+        self.status_text.setFont(S.sans(13))
+        self.status_text.setTextFormat(Qt.TextFormat.RichText)
+        self.status_text.linkActivated.connect(self._safe(lambda *_a: self.ctx.navigate("help")))
+        lay.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(self.status_text, 0, Qt.AlignmentFlag.AlignVCenter)
+        return pill
+
     def _banner(self) -> QFrame:
         f = QFrame()
         f.setObjectName("banner")
-        f.setStyleSheet(f"QFrame#banner{{background:{S.INK};border-radius:14px;}}")
+        f.setStyleSheet(f"QFrame#banner{{background:{S.INK};border-radius:{S.RADIUS_CARD}px;}}"
+                        "QFrame#banner QLabel{background:transparent;}")
         lay = QBoxLayout(QBoxLayout.Direction.LeftToRight, f)
         self._banner_layout = lay
-        lay.setContentsMargins(30, 26, 30, 26)
-        lay.setSpacing(24)
+        lay.setContentsMargins(26, 18, 20, 18)
+        lay.setSpacing(20)
         text = QVBoxLayout()
-        text.setSpacing(8)
-        h = QLabel(f'Speak Hinglish. <i>Paste English.</i>')
-        h.setFont(S.serif(27))
+        text.setSpacing(3)
+        h = QLabel('Speak Hinglish. <i>Paste English.</i>')
+        h.setTextFormat(Qt.TextFormat.RichText)
+        h.setFont(S.serif(S.T_H2))
         h.setWordWrap(True)
-        h.setStyleSheet(f"color:{S.PAPER};background:transparent;")
+        h.setMinimumWidth(1)
+        h.setStyleSheet(f"color:{S.PAPER};")
         text.addWidget(h)
-        p = QLabel("Pick how you talk and how it should land. Seven language modes, "
-                   "from Hindi in Devanagari to English out of anything.")
-        p.setFont(S.sans(14.5))
-        p.setWordWrap(True)
-        p.setMaximumWidth(440)
-        p.setStyleSheet(f"color:{BANNER_BODY};background:transparent;")
+        p = S.body("Seven language modes, from Hindi in Devanagari to English out of anything.",
+                   S.T_SMALL, BANNER_BODY)
         text.addWidget(p)
         lay.addLayout(text, 1)
-        self.language_button = QPushButton("Choose language")
-        self.language_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.language_button.setFont(S.sans(14, 500))
-        self.language_button.setStyleSheet(
-            f"QPushButton{{background:{S.PAPER};color:{S.INK};border:none;border-radius:10px;"
-            f"padding:10px 18px;}}QPushButton:hover{{background:{S.ROW_HOVER};}}")
+        self.language_button = S.button("Choose language")
         self.language_button.clicked.connect(self._safe(lambda *_a: self.ctx.navigate("tones")))
         lay.addWidget(self.language_button, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         return f
+
+    def _stats_card(self) -> QFrame:
+        card = S.Card(padding=22)
+        card.body.setContentsMargins(24, 16, 24, 20)
+        card.body.setSpacing(10)
+        top = QHBoxLayout()
+        top.addWidget(S.eyebrow("All time"))
+        top.addStretch(1)
+        self.insights_link = QLabel(S.link_html("See insights →", "insights"))
+        self.insights_link.setFont(S.sans(S.T_SMALL, 500))
+        self.insights_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.insights_link.linkActivated.connect(self._safe(lambda _h: self.ctx.navigate("insights")))
+        top.addWidget(self.insights_link)
+        card.body.addLayout(top)
+        strip = QHBoxLayout()
+        strip.setSpacing(22)
+        self.words_stat, self.wpm_stat, self.streak_stat = (QLabel() for _ in range(3))
+        for i, l in enumerate((self.words_stat, self.wpm_stat, self.streak_stat)):
+            if i:
+                strip.addWidget(_vline())
+            l.setTextFormat(Qt.TextFormat.RichText)
+            l.setFont(S.serif(S.T_STAT))
+            l.setMinimumWidth(1)
+            l.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            l.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            strip.addWidget(l, 1)
+        card.body.addLayout(strip)
+        return card
+
+    def _right_now_card(self) -> S.Card:
+        card = S.Card(padding=22)
+        card.body.setContentsMargins(22, 18, 22, 20)
+        card.body.setSpacing(12)
+        card.body.addWidget(S.eyebrow("Right now"))
+        self.right_now_split = S.Reflow(breakpoint=480, spacing=30)
+        kv_w = QWidget()
+        kv = QVBoxLayout(kv_w)
+        kv.setContentsMargins(0, 0, 0, 0)
+        kv.setSpacing(9)
+        r1, self.tone_value = _kv_row("Tone")
+        r2, self.lang_value = _kv_row("Language")
+        r3, self.hands_value = _kv_row("Hands-free")
+        self.hands_value.setFont(S.mono(12, 400))
+        for r in (r1, r2, r3):
+            kv.addWidget(r)
+        perms_w = QWidget()
+        perms = QVBoxLayout(perms_w)
+        perms.setContentsMargins(0, 0, 0, 0)
+        perms.setSpacing(9)
+        self.permission_rows: dict[str, PermissionRow] = {}
+        for key, label in PERMISSIONS:
+            pr = PermissionRow(label, self._safe(lambda *_a: self.ctx.navigate("help")))
+            self.permission_rows[key] = pr
+            perms.addWidget(pr)
+        self.right_now_split.add(kv_w, 1, Qt.AlignmentFlag.AlignTop)
+        self.right_now_split.add(perms_w, 1, Qt.AlignmentFlag.AlignTop)
+        self.right_now_split.apply(0)
+        card.body.addWidget(self.right_now_split)
+        return card
 
     @staticmethod
     def _safe(fn: Callable) -> Callable:
@@ -393,9 +529,16 @@ class HomePage(Page):
     def _set_dot(self, color: str) -> None:
         self.status_dot_color = color
         self.status_dot.setStyleSheet(f"background:{color};border-radius:4px;")
+        fill = PILL_FILL.get(color, S.ROW_ON)
+        self.status_pill.setStyleSheet(
+            f"QFrame#statuspill{{background:{fill};border-radius:15px;}}"
+            f"QFrame#statuspill QLabel#statustext{{color:{S.INK_SOFT};background:transparent;}}")
+        self.status_text.setObjectName("statustext")
+        QTimer.singleShot(0, self._safe(lambda: self.header.apply(self.header.width())))
 
     def _apply_name(self) -> None:
         self.greeting.setText(greeting_for(self.now(), first_name()))
+        self.header.apply(self.header.width())
 
     # ── lifecycle ──
     def shown(self, **kwargs) -> None:
@@ -404,7 +547,7 @@ class HomePage(Page):
         self.refresh_status()
         self.status_timer.start()
 
-    NARROW = 860   # below this page width the banner button goes under the copy
+    NARROW = 600   # below this page width the banner button goes under the copy
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
@@ -456,6 +599,8 @@ class HomePage(Page):
                 w.setParent(None)
                 w.deleteLater()
         self.rows = []
+        n = len(self._today)
+        self.today_label.setText(f"TODAY · {n}" if n else "TODAY")
         entries = self._filtered()
         if not entries:
             q = self.search.text().strip()
@@ -468,18 +613,27 @@ class HomePage(Page):
             else:
                 msg = (f"Nothing yet today. Hold {widget_copy.key_name(self._hold_key)} "
                        f"and say something.")
-            empty = QLabel(msg)
-            empty.setWordWrap(True)
-            empty.setFont(S.sans(14))
-            empty.setStyleSheet(f"color:{S.MUTED};padding:22px 20px;background:transparent;")
+            empty = S.body(msg, S.T_BODY, S.MUTED)
+            empty.setContentsMargins(22, 18, 22, 18)
             self.list_layout.addWidget(empty)
-            self.list_layout.addStretch(1)
             return
-        for i, e in enumerate(entries):
+        searching = bool(self.search.text().strip())
+        shown = entries if searching else entries[:MAX_ROWS]
+        for i, e in enumerate(shown):
             row = EntryRow(e, i == 0, self._safe(self._paste_again))
             self.rows.append(row)
             self.list_layout.addWidget(row)
-        self.list_layout.addStretch(1)
+        self.more_link = None
+        if len(shown) < len(entries):
+            more = QLabel(S.link_html(f"See all {len(entries)} from today in History →", "history"))
+            more.setObjectName("morelink")
+            more.setFont(S.sans(S.T_SMALL, 500))
+            more.setCursor(Qt.CursorShape.PointingHandCursor)
+            more.setStyleSheet(f"QLabel#morelink{{border-top:1px solid {S.HAIR};"
+                               f"padding:14px 22px 10px 22px;}}")
+            more.linkActivated.connect(self._safe(lambda _h: self.ctx.navigate("history")))
+            self.more_link = more
+            self.list_layout.addWidget(more)
 
     def _paste_again(self, row: EntryRow) -> None:
         text = row.entry.final
@@ -529,19 +683,21 @@ class HomePage(Page):
         state = st.get("state")
         if state == "recording":
             self._set_dot(S.ACCENT)
-            self.status_text.setText(f'<span style="color:{S.INK};">Recording</span>')
+            self.status_text.setText(f'<span style="color:{S.ACCENT_TEXT};font-weight:600;">'
+                                     f'Recording</span>')
         elif state == "processing":
             self._set_dot(AMBER)
             self.status_text.setText(f'<span style="color:{S.INK};">Processing</span>')
         elif any(perms.get(k) is False for k, _l in PERMISSIONS):
             self._set_dot(S.DANGER)
-            self.status_text.setText(f'<span style="color:{S.MUTED};">Needs permission · '
-                                     f'<a href="help" style="color:{S.ACCENT};text-decoration:none;">'
-                                     f'Fix</a></span> ')
+            self.status_text.setText(f'<span style="color:{S.ACCENT_TEXT};">Needs permission · '
+                                     f'<a href="help" style="color:{S.ACCENT_TEXT};'
+                                     f'font-weight:600;text-decoration:underline;">Fix</a></span>')
         else:
             self._set_dot(S.SAGE)
-            self.status_text.setText(f'<span style="color:{S.MUTED};">Ready · hold '
-                                     f'{_mono_span(key, S.INK, 13)} to dictate</span>')
+            self.status_text.setText(f'<span style="color:{S.SAGE_TEXT};">'
+                                     f'<span style="font-weight:600;">Ready</span> · hold '
+                                     f'{_mono_span(key, S.INK)} to dictate</span>')
         self._set_right_now(st.get("tone"), st.get("language"), self._hold_key)
         for k, row in self.permission_rows.items():
             v = perms.get(k)

@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QGuiApplication, QKeyEvent, QKeySequence
-from PyQt6.QtCore import QEvent
+from PyQt6.QtCore import QEvent, QPoint
 from PyQt6.QtWidgets import QApplication
 
 _app = QApplication.instance() or QApplication([])
@@ -444,3 +444,56 @@ def test_default_runner_keeps_rerun_off_the_ui_thread(hist):
     sip.delete(page)
     gate.set()
     assert deliver_queued(lambda: not workers._LIVE)
+
+
+# ── layout (2026-10-02 redesign: nothing clips at the narrowest window) ──
+def test_list_width_is_proportional_and_clamped():
+    from ui.hub.pages.history import LIST_MAX, LIST_MIN, LIST_MIN_NARROW
+    assert HistoryPage.list_width(655) >= LIST_MIN_NARROW        # 985-wide window
+    assert HistoryPage.list_width(655) < 300
+    assert HistoryPage.list_width(800) == round(800 * 0.38)
+    assert HistoryPage.list_width(720) >= LIST_MIN
+    assert HistoryPage.list_width(2000) == LIST_MAX
+
+
+def test_detail_fits_a_narrow_pane(hist):
+    """At a 985-wide window the detail pane is ~390 wide: its content must
+    fit (actions and tags wrap, paragraphs wrap) instead of clipping."""
+    page = make_page(hist)
+    page.resize(735, 760)
+    page.show()
+    QApplication.processEvents()
+    d = page.detail
+    d.details_btn.click()
+    d.delete_btn.click()                                   # confirm row showing too
+    QApplication.processEvents()
+    viewport = d.scroll.viewport().width()
+    assert d.scroll.widget().width() <= viewport
+    for w in (d.paste_btn, d.copy_btn, d.details_btn, d.confirm_delete, d.confirm_cancel):
+        assert w.width() >= w.sizeHint().width()             # never squeezed ("C")
+        assert w.mapTo(d.scroll.widget(), QPoint(0, 0)).x() + w.width() <= viewport
+    assert d.pasted.width() <= viewport
+    page.hide()
+
+
+def test_filter_chips_wrap_instead_of_running_off(hist):
+    page = make_page(hist)
+    page.resize(600, 760)
+    page.show()
+    QApplication.processEvents()
+    host = page._chip_host
+    for c in page.chips.values():
+        assert c.geometry().right() <= host.width()
+    ys = {c.geometry().y() for c in page.chips.values()}
+    assert len(ys) > 1                                     # wrapped onto a second row
+    page.hide()
+
+
+def test_tags_flow_in_rows_not_one_per_line(hist):
+    page = make_page(hist)
+    page.resize(1280, 800)
+    page.show()
+    QApplication.processEvents()
+    tags = [page.detail._tags.itemAt(i).widget() for i in range(page.detail._tags.count())]
+    assert len({t.geometry().y() for t in tags}) == 1
+    page.hide()

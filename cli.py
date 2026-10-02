@@ -6,8 +6,12 @@ Usage:
   python -m openflow dict list
   python -m openflow dict add NAME --hints "h1,h2" [--lang en|hi|both] [--context TEXT]
   python -m openflow dict remove NAME
+  python -m openflow snippets list
+  python -m openflow snippets add "my email" "me@example.com"
+  python -m openflow snippets remove "my email"
   python -m openflow history [--limit 20]
   python -m openflow config path
+  python -m openflow key set groq|anthropic   # fast cleanup LLM key → Keychain
   python -m openflow hub [page]      # open the main window (home, history, …)
 """
 from __future__ import annotations
@@ -16,12 +20,50 @@ import argparse
 import os
 import sys
 
-from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH
+from config import CONFIG_DIR, CONFIG_PATH, DICT_PATH, HISTORY_PATH
+
+# Held for the daemon's whole life. The LaunchAgent runs the daemon from
+# source while the Dock / Finder launch OpenFlow.app; without this a Dock
+# click started a second daemon (second menu bar icon, second set of hotkey
+# listeners) whose sockets all failed with "already running".
+DAEMON_LOCK = CONFIG_DIR / "daemon.lock"
+
+
+def acquire_daemon_lock(path) -> int | None:
+    """Exclusive non-blocking flock on `path`; the fd, or None when another
+    process holds it. The OS drops the lock if the process dies."""
+    import errno
+    import fcntl
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            return None
+        raise
+    return fd
+
+
+def release_daemon_lock(fd: int) -> None:
+    os.close(fd)  # closing drops the flock
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from daemon import main
-    main()
+    fd = acquire_daemon_lock(DAEMON_LOCK)
+    if fd is None:
+        # A daemon is already running: this launch is the user opening the
+        # app (Dock, Finder, Spotlight), so show the main window instead.
+        print("[cli] OpenFlow is already running; opening the main window.", flush=True)
+        return _open_hub("home")
+    try:
+        from daemon import main
+        main()
+    finally:
+        release_daemon_lock(fd)
     return 0
 
 
@@ -57,6 +99,41 @@ def _cmd_dict_remove(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _cmd_snippets_list(args: argparse.Namespace) -> int:
+    from snippets import Snippets
+    s = Snippets.load()
+    if not s.items:
+        print("(empty)")
+        return 0
+    for item in s.items:
+        print(f"{item.trigger!r} -> {item.expansion!r}")
+    return 0
+
+
+def _cmd_snippets_add(args: argparse.Namespace) -> int:
+    from snippets import Snippets
+    s = Snippets.load()
+    # Shells pass "\n" literally; let a signature span lines.
+    expansion = args.expansion.replace("\\n", "\n")
+    try:
+        s.add(args.trigger, expansion)
+    except ValueError as e:
+        print(f"error: {e}")
+        return 1
+    s.save()
+    print(f"added: {args.trigger}")
+    return 0
+
+
+def _cmd_snippets_remove(args: argparse.Namespace) -> int:
+    from snippets import Snippets
+    s = Snippets.load()
+    ok = s.remove(args.trigger)
+    s.save()
+    print("removed" if ok else "not found")
+    return 0 if ok else 1
+
+
 def _cmd_dict_edit(args: argparse.Namespace) -> int:
     """Old `dict edit` GUI: now the hub's Dictionary page."""
     return _open_hub("dictionary")
@@ -65,7 +142,7 @@ def _cmd_dict_edit(args: argparse.Namespace) -> int:
 def _cmd_edit_overlay(args: argparse.Namespace) -> int:
     """Launch the edit-mode overlay (subprocess target for daemon)."""
     from ui.edit_overlay import main as overlay_main
-    sys.argv = [sys.argv[0], args.selection]
+    sys.argv = [sys.argv[0]]
     return overlay_main()
 
 
@@ -107,7 +184,39 @@ def _cmd_history(args: argparse.Namespace) -> int:
     h = History()
     rows = h.recent(limit=args.limit)
     for r in rows:
-        print(f"[{r.tone}/{r.lang}] {r.final}")
+        took = f" ({r.t_total:.2f}s)" if r.t_total is not None else ""
+        print(f"[{r.tone}/{r.lang}]{took} {r.final}")
+    return 0
+
+
+def _cmd_key_set(args: argparse.Namespace) -> int:
+    """Store a fast cleanup provider's key in the Keychain. With [cleanup]
+    provider = "auto" (the default) the daemon switches to it on restart."""
+    import getpass
+    import keyring
+    import keyring.errors
+    from llm import FAST_PROVIDERS
+    from sarvam import KEYRING_SERVICE
+    key = (getpass.getpass(f"{args.provider} API key: ") or "").strip()
+    if not key:
+        print("No key entered; nothing changed.")
+        return 1
+    keyring.set_password(KEYRING_SERVICE, FAST_PROVIDERS[args.provider]["keyring_user"], key)
+    print(f"Saved. Restart OpenFlow to use {args.provider} for cleanup.")
+    return 0
+
+
+def _cmd_key_clear(args: argparse.Namespace) -> int:
+    import keyring
+    import keyring.errors
+    from llm import FAST_PROVIDERS
+    from sarvam import KEYRING_SERVICE
+    try:
+        keyring.delete_password(KEYRING_SERVICE, FAST_PROVIDERS[args.provider]["keyring_user"])
+    except keyring.errors.PasswordDeleteError:
+        print(f"No {args.provider} key stored.")
+        return 0
+    print("Removed. Restart OpenFlow to go back to Sarvam for cleanup.")
     return 0
 
 
@@ -204,8 +313,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     dsub.add_parser("edit", help="open the Dictionary page").set_defaults(func=_cmd_dict_edit)
 
+    sn = sub.add_parser("snippets", help="manage snippets (spoken trigger -> text)")
+    snsub = sn.add_subparsers(dest="scmd", required=True)
+    snsub.add_parser("list").set_defaults(func=_cmd_snippets_list)
+    sa = snsub.add_parser("add")
+    sa.add_argument("trigger")
+    sa.add_argument("expansion", help=r"text to paste; \n for a new line")
+    sa.set_defaults(func=_cmd_snippets_add)
+    sr = snsub.add_parser("remove")
+    sr.add_argument("trigger")
+    sr.set_defaults(func=_cmd_snippets_remove)
+
     eo = sub.add_parser("edit-overlay", help="(internal) launch edit-mode overlay")
-    eo.add_argument("selection", help="path to selection text file")
     eo.set_defaults(func=_cmd_edit_overlay)
 
     sub.add_parser("settings", help="open the Settings page").set_defaults(func=_cmd_settings)
@@ -220,6 +339,13 @@ def build_parser() -> argparse.ArgumentParser:
     h = sub.add_parser("history")
     h.add_argument("--limit", type=int, default=20)
     h.set_defaults(func=_cmd_history)
+
+    k = sub.add_parser("key", help="store a fast cleanup LLM key (groq, anthropic)")
+    ksub = k.add_subparsers(dest="kcmd", required=True)
+    for name, fn in (("set", _cmd_key_set), ("clear", _cmd_key_clear)):
+        kp = ksub.add_parser(name)
+        kp.add_argument("provider", choices=["groq", "anthropic"])
+        kp.set_defaults(func=fn)
 
     c = sub.add_parser("config")
     c.set_defaults(func=_cmd_config)

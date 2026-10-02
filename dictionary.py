@@ -29,19 +29,27 @@ class Dictionary:
     @classmethod
     def load(cls) -> "Dictionary":
         ensure_dirs()
-        if not DICT_PATH.exists():
+        return cls.load_from(DICT_PATH)
+
+    @classmethod
+    def load_from(cls, path: Path) -> "Dictionary":
+        path = Path(path)
+        if not path.exists():
             return cls()
-        data = json.loads(DICT_PATH.read_text())
+        data = json.loads(path.read_text())
         terms = [Term(**t) for t in data.get("terms", [])]
         return cls(terms=terms)
 
     def save(self) -> None:
         ensure_dirs()
+        self.save_to(DICT_PATH)
+
+    def save_to(self, path: Path) -> None:
         # Sort by canonical (case-insensitive) so file diffs stay tidy and
         # the editor's row order matches DESIGN_INTEGRATION §8 acceptance.
         sorted_terms = sorted(self.terms, key=lambda t: t.canonical.lower())
         payload = {"terms": [asdict(t) for t in sorted_terms]}
-        DICT_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
     # -- Mutators --------------------------------------------------------
 

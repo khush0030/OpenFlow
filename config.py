@@ -24,6 +24,9 @@ import tomli_w
 CONFIG_DIR = Path(os.path.expanduser("~/.openflow"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 DICT_PATH = CONFIG_DIR / "dictionary.json"
+# Auto-learn: corrections seen once, waiting for a second sighting or a yes.
+SUGGESTIONS_PATH = CONFIG_DIR / "dictionary_suggestions.json"
+SNIPPETS_PATH = CONFIG_DIR / "snippets.json"
 HISTORY_PATH = CONFIG_DIR / "history.sqlite"
 
 
@@ -54,16 +57,42 @@ DEFAULTS: dict[str, Any] = {
         "sample_rate": 16000,
         "device": "default",
         "silence_threshold": 0.01,
+        # A take whose loudest 50 ms stays under this is not sent to
+        # transcription: the widget says it can't hear you (audio.py).
+        "no_input_rms": 0.002,
     },
     "sarvam": {
         "stt_model": "saaras:v4",
         "chat_model": "sarvam-105b",
         "max_tokens": 1024,
         "api_key_env": "SARVAM_API_KEY",
+        # Stream speech to Sarvam's realtime API while the key is held, so
+        # the transcript is ready ~0.3 s after key-up (stream_stt.py).
+        # "auto": stream, and stop for the run if Sarvam refuses the session.
+        # true: stream every take. false: upload after key-up only. Any
+        # stream problem falls back to the upload for that take.
+        "streaming": "auto",
+    },
+    "cleanup": {
+        # LLM that rewrites dictation in the cleanup tones (llm.py).
+        # "auto": the first fast provider with a key (groq, then anthropic),
+        # else Sarvam ([sarvam] chat_model). Or name one: sarvam/groq/anthropic.
+        "provider": "auto",
+        "groq_model": "llama-3.3-70b-versatile",
+        "groq_api_key_env": "OPENFLOW_GROQ_API_KEY",
+        "anthropic_model": "claude-haiku-4-5-20251001",
+        "anthropic_api_key_env": "OPENFLOW_ANTHROPIC_API_KEY",
+        # Transcripts of at most this many words skip the LLM (Saaras already
+        # punctuates; "ok" doesn't need a rewrite). Bullets always go. 0 = off.
+        "skip_max_words": 3,
     },
     "dictionary": {
         "fuzzy_threshold": 85,
         "inject_into_cleanup": True,
+        # Learn a word when you fix it right after OpenFlow pastes it
+        # (autolearn.py): fixed twice, or added from the hub's Dictionary
+        # page, it joins the dictionary.
+        "auto_learn": True,
     },
     "widget": {
         # Flow widget dock position and look (spec 2026-09-30-flow-widget-design).
@@ -80,6 +109,35 @@ DEFAULTS: dict[str, Any] = {
         # pruned (the Settings spin box offers 50–5000).
         "enabled": True,
         "size_cap": 500,
+    },
+    "apps": {
+        # Tell cleanup which app the text is for (prompts.CONTEXT_HINTS):
+        # chat apps casual, mail formal, editors/terminals keep code tokens.
+        # Never changes the tone, and raw/verbatim never reach cleanup.
+        "context_hints": True,
+        # Per-app tone, by app name or bundle id, e.g. Slack = "casual",
+        # "com.apple.mail" = "professional". Replaces the default tone for
+        # that app; a tone switched to with F6 for the session still wins.
+        "tones": {},
+    },
+    "snippets": {
+        # Spoken trigger -> stored text, from snippets.json (snippets.py).
+        "enabled": True,
+    },
+    "formatting": {
+        # Auto-formatting in every tone but raw (formatting.py): spoken
+        # numbered/bulleted lists, "new line" / "new paragraph", paragraphs
+        # in long dictation, email greeting/sign-off lines. Verbatim keeps
+        # every word and only calls a model when Python can't do the layout.
+        "auto": True,
+    },
+    "context": {
+        # Names on screen (screen_context.py): at key-down, read the front
+        # window's visible text over Accessibility and pass the names,
+        # @handles and product terms in it to transcription (Saaras
+        # keyterms), cleanup and a conservative respelling. The text stays
+        # in memory for that one dictation; only the short term list is sent.
+        "screen_names": True,
     },
 }
 
@@ -208,6 +266,21 @@ def save_setting(section: str, key: str, value: Any) -> None:
     user = _read_user()
     user.setdefault(section, {})[key] = value
     save(user)
+
+
+def app_tone(apps: dict[str, Any] | None, name: str | None,
+             bundle_id: str | None = None) -> str | None:
+    """The [apps.tones] entry for an app, matched case-insensitively on its
+    bundle id, its name, or its name without ".app"; None if there is none."""
+    tones = (apps or {}).get("tones")
+    if not isinstance(tones, dict) or not tones:
+        return None
+    by_key = {str(k).strip().lower(): v for k, v in tones.items()}
+    n = (name or "").strip().lower()
+    for key in ((bundle_id or "").strip().lower(), n, n.removesuffix(".app")):
+        if key and isinstance(by_key.get(key), str):
+            return by_key[key]
+    return None
 
 
 def save_widget_setting(key: str, value: str) -> None:

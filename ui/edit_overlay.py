@@ -4,24 +4,23 @@ Frameless 480px translucent widget that surfaces the selection captured
 by daemon.on_edit_mode while the user dictates an instruction.
 
 Subprocess design:
-- Daemon writes selection text to a temp file path
-- Spawns ui/edit_overlay.py <selection_path>
-- Overlay reads + shows selection + "Listening for your edit…" caption
-- Overlay polls a state file for 'done'/'cancel' written by the daemon
-- Closes itself when state advances OR after 30s timeout
+- Daemon spawns ui/edit_overlay.py, which connects to
+  ~/.openflow/edit-overlay.sock (widget_channel, JSON lines)
+- Daemon sends {"type": "show", "selection": ...}; a later edit arm
+  sends another show, which swaps the text in place
+- {"type": "close"} (edit finished) or a dropped connection quits it
+- Esc or the 30s timeout just hangs up: the daemon reads the closed
+  connection as "edit cancelled" and disarms edit mode
 
 Keeps the existing record-then-rewrite flow in daemon.py unchanged.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
-import time
-from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt, QTimer, QSize
+from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QApplication, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QVBoxLayout,
@@ -34,9 +33,9 @@ from ui.fonts import load_fonts
 from ui.stylesheet import build_stylesheet
 from ui.tokens import Color, Font, Radius, Shadow, Space
 from ui.vibrancy import apply_vibrancy
+from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetClient
 
 
-STATE_PATH = Path("/tmp/openflow-edit-overlay.state.json")
 TIMEOUT_SECONDS = 30
 
 
@@ -65,12 +64,12 @@ class _PulsingDot(QLabel):
 
 
 class EditOverlay(QWidget):
-    """Frameless selected-text overlay. Closes on state advance or timeout."""
+    """Frameless selected-text overlay. The link owns its lifetime."""
 
-    def __init__(self, selection: str):
+    def __init__(self, selection: str,
+                 on_escape: Optional[Callable[[], None]] = None):
         super().__init__(None)
-        self._selection = selection
-        self._created = time.time()
+        self._on_escape = on_escape
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -86,12 +85,12 @@ class EditOverlay(QWidget):
         outer.setSpacing(Space.MD)
 
         # Selected text card — terracotta-bordered, 8% terracotta fill
-        sel = QLabel(self._truncate(selection), self)
+        sel = self._sel = QLabel(self)
         sf = QFont(Font.BODY, Font.SIZE_BODY_SM)
         sf.setItalic(True)
         sel.setFont(sf)
         sel.setWordWrap(True)
-        sel.setToolTip(selection)
+        self.set_selection(selection)
         sel.setStyleSheet(
             f"background-color: rgba(184, 73, 44, 0.10);"
             f"color: {Color.INK_SOFT};"
@@ -136,10 +135,12 @@ class EditOverlay(QWidget):
         # Try vibrancy after the native window exists
         QTimer.singleShot(50, lambda: apply_vibrancy(self, material="hud"))
 
-        # Poll state file + watchdog timeout
-        self._poller = QTimer(self)
-        self._poller.timeout.connect(self._poll)
-        self._poller.start(200)
+    def set_selection(self, selection: str) -> None:
+        self._sel.setText(self._truncate(selection))
+        self._sel.setToolTip(selection)
+
+    def selection_text(self) -> str:
+        return self._sel.toolTip()
 
     def _truncate(self, s: str) -> str:
         if len(s) <= 240:
@@ -166,52 +167,75 @@ class EditOverlay(QWidget):
         bg.setAlpha(245)
         p.fillPath(path, bg)
 
-    def _poll(self):
-        if time.time() - self._created > TIMEOUT_SECONDS:
-            self.close()
-            return
-        try:
-            if STATE_PATH.exists():
-                data = json.loads(STATE_PATH.read_text())
-                if data.get("status") in ("done", "cancel"):
-                    self.close()
-        except Exception:
-            pass
-
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
-            try:
-                STATE_PATH.write_text(json.dumps({"status": "cancel", "at": time.time()}))
-            except Exception:
-                pass
-            self.close()
+        if event.key() == Qt.Key.Key_Escape and self._on_escape is not None:
+            self._on_escape()
             return
         super().keyPressEvent(event)
 
 
+class OverlayLink(QObject):
+    """The overlay's end of the daemon socket. The overlay lives exactly as
+    long as the connection: no state files, no polling."""
+
+    # Socket callbacks arrive on a background thread; the signal hops to the UI thread.
+    message = pyqtSignal(dict)
+
+    def __init__(self, path: str = EDIT_OVERLAY_SOCKET_PATH,
+                 quit: Optional[Callable[[], None]] = None):
+        super().__init__()
+        self._quit = quit or QApplication.quit
+        self._finished = False
+        self.overlay: Optional[EditOverlay] = None
+        self.message.connect(self._on_message)
+        self.client = WidgetClient(
+            path, on_message=self.message.emit,
+            on_disconnect=lambda: self.message.emit({"type": "_disconnected"}))
+        self._timeout = QTimer(self)
+        self._timeout.setSingleShot(True)
+        self._timeout.setInterval(TIMEOUT_SECONDS * 1000)
+        self._timeout.timeout.connect(self.finish)
+
+    def open(self) -> bool:
+        return self.client.connect()
+
+    def _on_message(self, msg: dict) -> None:
+        kind = msg.get("type")
+        if kind == "show":
+            selection = str(msg.get("selection") or "")
+            if self.overlay is None:
+                self.overlay = EditOverlay(selection, on_escape=self.finish)
+                self.overlay.show()
+            else:
+                self.overlay.set_selection(selection)
+            self._timeout.start()  # a re-arm gets a fresh 30s
+        elif kind in ("close", "exit", "_disconnected"):
+            self.finish()
+
+    def finish(self) -> None:
+        """Close and hang up. Hanging up is the cancel signal the daemon
+        acts on; after a "close" it is already disarmed and ignores it."""
+        if self._finished:
+            return
+        self._finished = True
+        self._timeout.stop()
+        if self.overlay is not None:
+            self.overlay.close()
+            self.overlay = None
+        self.client.close()
+        self._quit()
+
+
 def main() -> int:
-    if len(sys.argv) < 2:
-        print("usage: edit_overlay.py <selection-file>", file=sys.stderr)
-        return 2
-    sel_path = Path(sys.argv[1])
-    try:
-        selection = sel_path.read_text()
-    except Exception as e:
-        print(f"[overlay] cannot read selection file {sel_path}: {e}", file=sys.stderr)
-        return 1
-
-    # Clear any stale state from a previous edit session
-    try:
-        if STATE_PATH.exists():
-            STATE_PATH.unlink()
-    except Exception:
-        pass
-
     app = QApplication.instance() or QApplication(sys.argv)
     load_fonts()
     app.setStyleSheet(build_stylesheet())
-    w = EditOverlay(selection)
-    w.show()
+    link = OverlayLink()
+    if not link.open():
+        # Spawned by the daemon after it bound the socket, so this means
+        # the daemon is gone already.
+        print("[overlay] daemon not reachable — exiting", file=sys.stderr)
+        return 1
     return app.exec()
 
 

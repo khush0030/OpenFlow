@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -68,13 +68,12 @@ _install_file_logger()
 
 import json
 import subprocess
-import tempfile
 
 import config as cfg_mod
 from openflow_logger import get_logger, log_exception
 
 _log = get_logger("daemon")
-from audio import Recorder, RecorderConfig
+from audio import NO_INPUT_RMS, Recorder, RecorderConfig, heard_nothing, loudest_rms
 from transcribe import Transcriber, TranscribeOptions
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
@@ -85,15 +84,23 @@ else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "escape"
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
-                   focused_editable, set_clipboard)
+                   focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
+from llm import make_cleanup_provider
+from sarvam import STT_URL, warm
 from dictionary import Dictionary
+from autolearn import AutoLearner, Correction, PasteWatch
+from paste import MAX_FIELD_CHARS, ax_field_text, ax_same_element
+from snippets import Snippets
+import formatting
+import screen_context
+from prompts import app_kind as prompts_app_kind
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, FlowController, FlowHooks
-from widget_channel import WidgetServer
+from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
 import sounds
@@ -203,6 +210,13 @@ def _config_mtime() -> float:
         return 0.0
 
 
+def _file_mtime(path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 @dataclass
 class RunContext:
     """What a pipeline run needs to be replayed by Undo/Retry. FlowController
@@ -210,6 +224,12 @@ class RunContext:
     target: object = None          # paste target captured at key-down
     edit_mode: bool = False
     selection: str = ""            # edit-mode selection the run applies to
+    # Latency bookkeeping for the live run only (Undo/Retry clear it):
+    keyup_at: float | None = None  # time.monotonic() when recording stopped
+    record_s: float | None = None  # key-up -> audio in hand (recorder.stop)
+    stream: object = None          # the take's StreamingSession, if streamed
+    # Names on screen at key-down (screen_context.py); in memory only.
+    screen_terms: tuple[str, ...] = ()
 
 
 class _WidgetWatchdog:
@@ -255,7 +275,6 @@ class _WidgetWatchdog:
                   f"backoff capped at {self.MAX_DELAY_S:.0f}s", flush=True)
 
 
-_EDIT_OVERLAY_STATE = Path("/tmp/openflow-edit-overlay.state.json")
 _ONBOARD_FLAG = Path(os.path.expanduser("~/.openflow/onboarded.flag"))
 _FIRST_RUN_CONFIG = Path(os.path.expanduser("~/.openflow/config.toml"))
 _FIRST_RUN_POLL_S = 0.25
@@ -298,23 +317,10 @@ def _maybe_run_onboarding_blocking() -> None:
         time.sleep(_FIRST_RUN_POLL_S)
 
 
-def _spawn_edit_overlay(selection: str) -> None:
-    """Spawn the PyQt6 edit-mode overlay (subprocess, never blocks)."""
-    try:
-        sel_file = Path(tempfile.mkstemp(prefix="openflow-edit-sel-", suffix=".txt")[1])
-        sel_file.write_text(selection)
-        _spawn_ui(["edit-overlay", str(sel_file)], "ui/edit_overlay.py",
-                  dev_args=(str(sel_file),))
-    except Exception as e:
-        print(f"[daemon] edit overlay spawn failed: {e}", flush=True)
-
-
-def _signal_edit_overlay(status: str) -> None:
-    """Tell the running overlay to close (status='done' or 'cancel')."""
-    try:
-        _EDIT_OVERLAY_STATE.write_text(json.dumps({"status": status, "at": time.time()}))
-    except Exception:
-        pass
+def _spawn_edit_overlay() -> subprocess.Popen | None:
+    """Spawn the PyQt6 edit-mode overlay (subprocess, never blocks). It
+    connects back over EDIT_OVERLAY_SOCKET_PATH for the selection."""
+    return _spawn_ui(["edit-overlay"], "ui/edit_overlay.py")
 
 
 class Daemon:
@@ -341,7 +347,10 @@ class Daemon:
         self.transcriber = Transcriber(
             model=sarvam_cfg.get("stt_model", "saaras:v4"),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
+            streaming=sarvam_cfg.get("streaming", "auto"),
         )
+        self._stream_enabled = True   # see _open_stream
+        self._stream = None
         threading.Thread(
             target=self.transcriber.preload, name="sarvam-preload", daemon=True
         ).start()
@@ -349,8 +358,17 @@ class Daemon:
             model=sarvam_cfg.get("chat_model", "sarvam-105b"),
             max_tokens=int(sarvam_cfg.get("max_tokens", 1024)),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
-        ))
+        ), provider=make_cleanup_provider(self.cfg))
+        print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
+              f"({self.ai.provider.model})", flush=True)
+        self._warm_enabled = True     # see _warm_up
+        self._screen_enabled = True   # see _start_screen_capture
         self.dictionary = Dictionary.load()
+        self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
+        self._autolearner = AutoLearner(cfg_mod.SUGGESTIONS_PATH, cfg_mod.DICT_PATH,
+                                        on_learned=self._on_learned)
+        self._paste_watch: PasteWatch | None = None
+        self.snippets = Snippets.load()
         self.history = History()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
@@ -396,12 +414,13 @@ class Daemon:
 
     # -- Pipeline pieces -------------------------------------------------
 
-    def _stt_opts(self) -> TranscribeOptions:
+    def _stt_opts(self, tone: ToneMode | None = None) -> TranscribeOptions:
         """Map OpenFlow language mode → Saaras language_code + mode."""
         m = self.state.language.value
         always_en = self.cfg["general"].get("always_english_output", True)
         sr = int(self.cfg["audio"].get("sample_rate", 16000))
-        tone_raw = self.state.tone.value == "raw"
+        tone_raw = (tone or self.state.tone).value == "raw"
+        silence = float(self.cfg["audio"].get("silence_threshold", 0.01))
 
         def _opts(language_code: str | None, mode: str) -> TranscribeOptions:
             if tone_raw and mode == "transcribe":
@@ -410,6 +429,7 @@ class Daemon:
                 language_code=language_code,
                 mode=mode,
                 sample_rate=sr,
+                silence_threshold=silence,
             )
 
         # Global override: collapse every input language to English, except
@@ -460,14 +480,105 @@ class Daemon:
             return bool(d["inject_into_cleanup"])
         return True
 
+    def _tone_for(self, target) -> ToneMode:
+        """Tone for a dictation into `target`: its [apps.tones] entry stands
+        in for the default tone. A tone switched to for the session (F6, the
+        hub), i.e. not the configured default, is an explicit choice and wins."""
+        tone = self.state.tone
+        default = (self.cfg.get("general") or {}).get("default_tone")
+        if default is not None and tone.value != default:
+            return tone
+        name = getattr(target, "name", None)
+        override = cfg_mod.app_tone(self.cfg.get("apps"), name,
+                                    getattr(target, "bundle_id", None))
+        if override is None:
+            return tone
+        try:
+            return ToneMode(override)
+        except ValueError:
+            self._warn(f"apps.tones: {name!r} = {override!r} is not a tone — using {tone.value}")
+            return tone
+
+    def _context_app(self, target) -> str | None:
+        """App name for the cleanup prompt's context hint, if enabled."""
+        if not (self.cfg.get("apps") or {}).get("context_hints", True):
+            return None
+        return getattr(target, "name", None) or get_active_app()
+
+    def _active_snippets(self) -> Snippets | None:
+        """The snippet store, re-read if snippets.json changed; None when
+        snippets are off or there are none."""
+        snips = getattr(self, "snippets", None)
+        if snips is None or not (self.cfg.get("snippets") or {}).get("enabled", True):
+            return None
+        snips.refresh()
+        return snips if snips.items else None
+
+    def _trivial(self, text: str, tone: str) -> bool:
+        """Short enough that the cleanup LLM can only add latency: at most
+        [cleanup] skip_max_words words (Saaras has already punctuated it).
+        Bullets still go, since even three words become a list."""
+        limit = int((self.cfg.get("cleanup") or {}).get(
+            "skip_max_words", cfg_mod.DEFAULTS["cleanup"]["skip_max_words"]))
+        return tone != "bullets" and 0 < len(text.split()) <= limit
+
+    def _auto_format(self) -> bool:
+        return bool((self.cfg.get("formatting") or {}).get(
+            "auto", cfg_mod.DEFAULTS["formatting"]["auto"]))
+
+    def _format_verbatim(self, text: str, *, email: bool = False) -> str:
+        """Verbatim auto-formatting: Python lays out what it can; a model
+        is called only for what it can't (paragraphs in a long dictation, a
+        list whose end is unclear), and its result is kept only if it has
+        exactly the transcript's words, less the spoken list cues."""
+        local = formatting.format_local(text, email=email)
+        if not local.model_tasks:
+            return local.text
+        src = local.text
+        try:
+            out = self.ai.format_only(src, local.model_tasks)
+        except Exception as e:
+            log_exception("daemon.pipeline", "formatting call failed — pasting unformatted", e)
+            return src
+        if out and formatting.same_words(src, out, formatting.removable_spans(src)):
+            print(f"[daemon] formatted ({', '.join(local.model_tasks)})", flush=True)
+            return out.strip()
+        print("[daemon] formatting changed words — pasting unformatted", flush=True)
+        return src
+
     def _post_process(self, raw: str, tone: ToneMode | None = None,
-                      language: LanguageMode | None = None) -> str:
+                      language: LanguageMode | None = None, target=None,
+                      *, skip_trivial: bool = True,
+                      screen_terms: tuple[str, ...] = ()) -> str:
         """Dictionary + cleanup for the current modes, or the given ones
-        (control `rerun`)."""
+        (control `rerun`, which always cleans up: the user asked for it).
+        target: the paste target, for the app context."""
         if not raw:
             return ""
         threshold = int(self.cfg["dictionary"].get("fuzzy_threshold", 85))
         corrected = self.dictionary.correct(raw, threshold=threshold)
+        if screen_terms:
+            corrected = screen_context.correct(corrected, list(screen_terms), threshold)
+
+        # Snippets (snippets.py): a dictation that is only a trigger pastes
+        # the stored text; otherwise triggers ride through as placeholders
+        # and done() puts the stored text back.
+        snips, slots = self._active_snippets(), []
+        if snips is not None:
+            whole = snips.whole(corrected)
+            if whole is not None:
+                print("[daemon] snippet: whole dictation is a trigger", flush=True)
+                return whole
+            corrected, slots = snips.protect(corrected)
+
+        def done(out: str) -> str:
+            if not slots:
+                return out
+            back = Snippets.restore(out, slots)
+            if back is None:   # the model dropped or mangled a placeholder
+                self._warn("snippet placeholder lost in cleanup — pasting the uncleaned text")
+                back = Snippets.restore(corrected, slots)
+            return back
 
         m_lang = (language or self.state.language).value
         m_tone = (tone or self.state.tone).value
@@ -476,35 +587,60 @@ class Daemon:
         # chat hop for raw/verbatim — that's the default path and the lag.
         if m_lang == "en_to_hi":
             try:
-                return self.ai.translate_en_to_hi(corrected)
+                return done(self.ai.translate_en_to_hi(corrected))
             except Exception as e:
                 log_exception("daemon.pipeline", "EN→HI failed — pasting English", e)
-                return corrected
+                return done(corrected)
         if m_lang == "hi_roman" and any("\u0900" <= ch <= "\u097F" for ch in corrected):
             try:
-                return self.ai.transliterate_to_roman(corrected)
+                return done(self.ai.transliterate_to_roman(corrected))
             except Exception as e:
                 log_exception("daemon.pipeline", "transliterate failed", e)
-                return corrected
-        if m_tone in ("raw", "verbatim"):
-            return corrected
+                return done(corrected)
+        if m_tone == "raw":
+            return done(corrected)   # raw is never formatted
+        # Auto-formatting (formatting.py): before the short-transcript skip,
+        # so structure always gets laid out.
+        email = False
+        structure = None
+        if self._auto_format():
+            if formatting.has_email_parts(corrected):
+                email = prompts_app_kind(self._context_app(target)) == "email"
+            structure = formatting.detect(corrected, email=email)
+        if m_tone == "verbatim":
+            if structure:
+                return done(self._format_verbatim(corrected, email=email))
+            return done(corrected)
+        if not structure and skip_trivial and self._trivial(corrected, m_tone):
+            print(f"[daemon] {len(corrected.split())}-word transcript — "
+                  "skipping cleanup", flush=True)
+            return done(corrected)
 
         glossary = None
         if self._inject_glossary():
             lang_for_prompt = "hi" if m_lang in ("hi", "hi_roman", "hi_to_en") else "en"
             glossary = self.dictionary.initial_prompt(language=lang_for_prompt)
+        screen_line = screen_context.glossary_line(list(screen_terms))
+        if screen_line:
+            glossary = f"{glossary}\n\n{screen_line}" if glossary else screen_line
+        extra = {}
+        if structure:
+            # Spoken line breaks are applied here, not left to the model.
+            corrected = formatting.apply_commands(corrected)
+            extra["format_notes"] = formatting.notes(structure)
         try:
-            return self.ai.cleanup(
+            return done(self.ai.cleanup(
                 corrected,
                 mode=m_tone,
-                context_app=get_active_app(),
+                context_app=self._context_app(target),
                 language=m_lang,
                 glossary=glossary,
                 examples=self._style_examples(),
-            )
+                **extra,
+            ))
         except Exception as e:
             log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
-            return corrected
+            return done(corrected)
 
     # -- Hotkey callbacks ------------------------------------------------
 
@@ -527,10 +663,91 @@ class Daemon:
                 f"ax={'yes' if remembered.ax_element is not None else 'no'}",
                 flush=True,
             )
+        self._open_stream()
+        self._start_screen_capture(remembered)
         self.recorder.start()
+        self._warm_up()
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
         self._flow.recording_started(hands_free=hands_free)
+
+    def _open_stream(self) -> None:
+        """Key-down: stream this take to Sarvam while the user talks
+        (stream_stt.py), so key-up only waits for the last words. Off per
+        [sarvam] streaming; the take falls back to batch on any problem.
+        Only a daemon built by __init__ streams; test daemons never do."""
+        self._drop_stream()
+        if not getattr(self, "_stream_enabled", False):
+            return
+        try:
+            opts = self._stt_opts(self._tone_for(self._paste_target))
+            stream = self.transcriber.begin_stream(opts)
+        except Exception as e:
+            print(f"[daemon] streaming skipped: {e}", flush=True)
+            return
+        if stream is not None:
+            self._stream = stream
+            self.recorder.on_block = stream.feed
+
+    def _take_stream(self):
+        """Detach the take's stream from the recorder; None if not streaming."""
+        stream = getattr(self, "_stream", None)
+        self._stream = None
+        if stream is not None:
+            self.recorder.on_block = None
+        return stream
+
+    @staticmethod
+    def _abort_stream(ctx: RunContext) -> None:
+        """A take that won't be transcribed now (cancel, too short, can't
+        hear you): close its stream. Undo/Retry replay through batch."""
+        if ctx.stream is not None:
+            ctx.stream.abort()
+
+    def _drop_stream(self) -> None:
+        stream = self._take_stream()
+        if stream is not None:
+            stream.abort()
+
+    def _start_screen_capture(self, target) -> None:
+        """Key-down: read the names on screen in the background (never
+        delays recording). Only a daemon built by __init__ reads the screen."""
+        self._screen = None
+        if (not getattr(self, "_screen_enabled", False) or target is None
+                or self._edit_pending
+                or not (self.cfg.get("context") or {}).get("screen_names", True)):
+            return
+        try:
+            self._screen = screen_context.Capture(
+                target.pid, getattr(target, "ax_element", None)).start()
+        except Exception as e:
+            print(f"[daemon] screen names skipped: {e}", flush=True)
+
+    def _screen_terms(self) -> tuple[str, ...]:
+        """Key-up: the names if the read finished; never waits. Logs counts
+        and timing only, never the text or the names."""
+        cap, self._screen = getattr(self, "_screen", None), None
+        if cap is None:
+            return ()
+        terms = tuple(cap.terms())
+        ms = f"{cap.elapsed_s * 1000:.0f}ms" if cap.elapsed_s is not None else "-"
+        print(f"[daemon] screen names: {len(terms)} terms ({cap.nodes} nodes, {ms}"
+              + (f", {cap.skipped}" if cap.skipped else "") + ")", flush=True)
+        return terms
+
+    def _warm_up(self) -> None:
+        """Key-down: open the STT connection (and the cleanup LLM's, when this
+        dictation will use it) while the user is still talking, so key-up
+        skips the TCP + TLS handshake. Only a daemon built by __init__ does
+        this; tests build bare ones that must never touch the network."""
+        if not getattr(self, "_warm_enabled", False):
+            return
+        try:
+            warm(STT_URL)
+            if self._edit_pending or self.state.tone.value not in ("raw", "verbatim"):
+                warm(getattr(self.ai.provider, "url", None))
+        except Exception as e:
+            print(f"[daemon] warm-up skipped: {e}", flush=True)
 
     # -- Flow widget wiring ----------------------------------------------
 
@@ -654,6 +871,9 @@ class Daemon:
     def _rerun(self, audio, ctx: RunContext, run: int) -> None:
         """Undo / Retry: run the pipeline again on kept audio, in the same
         mode and against the same paste target / selection."""
+        if isinstance(ctx, RunContext):
+            # The user waited on the card: key-up time no longer means anything.
+            ctx = replace(ctx, keyup_at=None, record_s=None, stream=None)
         self._start_worker(audio, ctx, run)
 
     def _save_widget_setting(self, key: str, value: str) -> None:
@@ -699,6 +919,14 @@ class Daemon:
                   f"volume={ch.sounds['volume']}", flush=True)
         if ch.general is not None:
             self.cfg["general"] = ch.general   # always_english_output, hindi_script
+        if ch.apps is not None:
+            self.cfg["apps"] = ch.apps         # per-app tones / context hints
+        if ch.snippets is not None:
+            self.cfg["snippets"] = ch.snippets
+        if ch.formatting is not None:
+            self.cfg["formatting"] = ch.formatting   # read per dictation
+        if ch.context is not None:
+            self.cfg["context"] = ch.context         # screen_names, read per dictation
         # Only a changed config value moves the daemon's tone/language, so a
         # menu bar or F6 choice survives unrelated config writes.
         if ch.tone is not None:
@@ -709,6 +937,24 @@ class Daemon:
         if ch.hotkeys is not None:
             self._pending_hotkeys = ch.hotkeys
             self._apply_pending_hotkeys()
+        if ch.dictionary is not None:
+            self.cfg["dictionary"] = ch.dictionary
+            if not self._auto_learn():
+                self._stop_paste_watch()
+            print(f"[daemon] dictionary auto_learn -> {self._auto_learn()}", flush=True)
+        # [sarvam] streaming: read per take (Transcriber.begin_stream).
+        streaming = (fresh.get("sarvam") or {}).get("streaming", "auto")
+        if streaming != (self.cfg.get("sarvam") or {}).get("streaming", "auto"):
+            self.cfg.setdefault("sarvam", {})["streaming"] = streaming
+            transcriber = getattr(self, "transcriber", None)
+            if hasattr(transcriber, "set_streaming"):
+                transcriber.set_streaming(streaming)
+            print(f"[daemon] streaming STT -> {streaming}", flush=True)
+        if ch.cleanup is not None:
+            self.cfg["cleanup"] = ch.cleanup
+            self.ai.provider = make_cleanup_provider(self.cfg)
+            print(f"[daemon] cleanup LLM -> {self.ai.provider.name} "
+                  f"({self.ai.provider.model})", flush=True)
 
     def choose_tone(self, tone: ToneMode) -> None:
         """A tone picked from a menu (menu bar or widget) becomes the default."""
@@ -811,6 +1057,7 @@ class Daemon:
                         cfg_mtime = mtime
                         self._reload_config()
                     self._apply_pending_hotkeys()
+                    self._reload_dictionary_if_changed()
                 watchdog.poll(self._widget.connected)
             except Exception as e:
                 print(f"[daemon] widget pump error: {e}", flush=True)
@@ -819,8 +1066,13 @@ class Daemon:
     def on_record_stop(self) -> None:
         if not self.recorder.is_recording:
             return
+        keyup_at = time.monotonic()
         audio = self.recorder.stop()
+        record_s = time.monotonic() - keyup_at
+        stream = self._take_stream()
         if audio.size == 0:
+            if stream is not None:
+                stream.abort()
             # Either another thread (✓/✕ racing the key release) already
             # stopped this recording — only that winner drives the flow — or
             # the tap was too short to capture a single block.
@@ -830,14 +1082,19 @@ class Daemon:
             return
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
-                         selection=getattr(self, "_edit_selection", "") if edit_mode else "")
+                         selection=getattr(self, "_edit_selection", "") if edit_mode else "",
+                         keyup_at=keyup_at, record_s=record_s, stream=stream,
+                         screen_terms=self._screen_terms())
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
             self._cancel_pending = False
             self._edit_pending = False   # a cancelled edit must not arm the next hold
+            if edit_mode:
+                self._close_edit_overlay()
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             print("[daemon] recording cancelled (undo available).", flush=True)
+            self._abort_stream(ctx)
             self._flow.cancelled(audio, ctx)
             return
         sr = self.cfg["audio"]["sample_rate"]
@@ -845,9 +1102,21 @@ class Daemon:
         print(f"[daemon] captured {dur:.2f}s; transcribing...", flush=True)
         if dur < 0.25:
             print("[daemon] too short, ignoring.", flush=True)
+            self._abort_stream(ctx)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             self._flow.done()
+            return
+        no_input = float(self.cfg["audio"].get("no_input_rms", NO_INPUT_RMS))
+        if heard_nothing(audio, sr, no_input):
+            # Muted or wrong input: transcribing silence only costs a round
+            # trip (or comes back as a made-up phrase). Say so instead.
+            print(f"[daemon] can't hear you: loudest {loudest_rms(audio, sr):.5f} < "
+                  f"{no_input} — mic muted or wrong input? Not transcribing.", flush=True)
+            self._abort_stream(ctx)
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            self._flow.no_audio(audio, ctx)
             return
         self._edit_pending = False
         # Mark processing before the worker starts so the widget never
@@ -858,9 +1127,70 @@ class Daemon:
         self._start_worker(audio, ctx, run)
 
     def on_undo(self) -> None:
-        # Best-effort: just type the inverse via paste of empty + restore previous clipboard.
-        # True undo requires app-level integration. We leave this as a stub.
-        print("[daemon] undo: not implemented", flush=True)
+        # Chords fire on the main thread; the undo waits for the chord's
+        # modifiers to come up, so it runs off it (paste.py has the guards).
+        threading.Thread(target=self._undo_last_paste, name="undo-paste",
+                         daemon=True).start()
+
+    def _undo_last_paste(self) -> None:
+        try:
+            status = undo_last_paste()
+        except Exception as e:
+            log_exception("daemon.undo", "undo last paste failed", e)
+            return
+        print(f"[daemon] undo last paste -> {status}", flush=True)
+
+    # -- Auto-learn: corrections right after a paste (autolearn.py) --------
+
+    def _auto_learn(self) -> bool:
+        d = self.cfg.get("dictionary") or {}
+        return bool(d.get("auto_learn", True))
+
+    def _watch_paste(self, text: str, target) -> None:
+        """Watch the field we just pasted into for a word the user fixes."""
+        pid = getattr(target, "pid", 0) or 0
+        if not self._auto_learn() or pid <= 0:
+            return
+        self._paste_watch = PasteWatch(
+            text, pid,
+            read_field=lambda p: ax_field_text(p, max_chars=MAX_FIELD_CHARS),
+            front_pid=lambda: getattr(capture_front_app(), "pid", None),
+            same_element=ax_same_element,
+            on_correction=self._on_autolearn_correction,
+        ).start()
+
+    def _stop_paste_watch(self) -> None:
+        watch, self._paste_watch = getattr(self, "_paste_watch", None), None
+        if watch is not None:
+            watch.stop()
+
+    def _on_autolearn_correction(self, c: Correction) -> None:
+        # Logs never carry what was typed; AutoLearner logs a learned term.
+        try:
+            status = self._autolearner.observe(c.heard, c.term)
+        except Exception as e:
+            log_exception("daemon.autolearn", "could not record a correction", e)
+            return
+        if status == "suggested":
+            print("[autolearn] correction noted as a suggestion", flush=True)
+
+    def _on_learned(self, d: Dictionary) -> None:
+        self.dictionary = d
+        self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
+
+    def _reload_dictionary_if_changed(self) -> None:
+        """dictionary.json changed (the hub, a suggestion accepted there):
+        use it from the next dictation on."""
+        mtime = _file_mtime(cfg_mod.DICT_PATH)
+        if mtime == getattr(self, "_dict_mtime", mtime):
+            return
+        self._dict_mtime = mtime
+        try:
+            self.dictionary = Dictionary.load_from(cfg_mod.DICT_PATH)
+        except Exception as e:   # mid-write or hand-broken: keep the old one
+            log_exception("daemon.dictionary", "dictionary.json unreadable — keeping current", e)
+            return
+        print(f"[daemon] dictionary reloaded ({len(self.dictionary.terms)} words)", flush=True)
 
     def on_edit_mode(self) -> None:
         # Capture currently selected text (Cmd+C), then start recording.
@@ -884,9 +1214,53 @@ class Daemon:
             self._edit_selection = sel
             self._edit_pending = True
             print(f"[daemon] edit mode armed; selection ({len(sel)} chars). Hold record key and speak instruction.", flush=True)
-            _spawn_edit_overlay(sel)
+            self._show_edit_overlay(sel)
         except Exception as e:
             log_exception("daemon.edit_mode", "edit-mode trigger failed", e)
+
+    # -- Edit overlay link (~/.openflow/edit-overlay.sock) ----------------
+    # Same channel as the flow widget: the overlay process lives exactly as
+    # long as its connection, so there is no state file and no polling.
+
+    def _start_edit_overlay_channel(self) -> None:
+        self._edit_overlay = WidgetServer(EDIT_OVERLAY_SOCKET_PATH,
+                                          on_connect=self._on_edit_overlay_connect,
+                                          on_disconnect=self._on_edit_overlay_gone)
+        try:
+            self._edit_overlay.start()
+        except OSError as e:
+            # Another daemon owns the socket: edit mode still works, just
+            # without the on-screen selection.
+            log_exception("daemon.edit_overlay", "edit overlay socket unavailable", e)
+            self._edit_overlay = None
+
+    def _show_edit_overlay(self, selection: str) -> None:
+        server = getattr(self, "_edit_overlay", None)
+        if server is None:
+            return
+        # Already up: swap the text in place. Otherwise spawn it; it gets
+        # the selection when it connects.
+        if not server.send({"type": "show", "selection": selection}):
+            _spawn_edit_overlay()
+
+    def _close_edit_overlay(self) -> None:
+        server = getattr(self, "_edit_overlay", None)
+        if server is not None:
+            server.send({"type": "close"})
+
+    def _on_edit_overlay_connect(self) -> None:
+        if self._edit_pending:
+            self._edit_overlay.send({"type": "show", "selection": self._edit_selection})
+        else:
+            self._edit_overlay.send({"type": "close"})  # the edit ended before it came up
+
+    def _on_edit_overlay_gone(self) -> None:
+        # Esc, its 30 s timeout or a crash. An edit already being dictated
+        # carries on; an armed one is dropped so the next hold dictates
+        # normally instead of rewriting a selection the user can't see.
+        if self._edit_pending and not self.recorder.is_recording:
+            self._edit_pending = False
+            print("[daemon] edit overlay closed — edit mode cancelled.", flush=True)
 
     # -- Worker ----------------------------------------------------------
 
@@ -901,23 +1275,45 @@ class Daemon:
             # The previous dictation never finished: keep this audio and
             # offer Retry rather than dropping it.
             print("[daemon] previous dictation still processing — offering Retry.", flush=True)
+            self._abort_stream(ctx)
             self._flow.failed(audio, ctx, run=run) or self._stale(run)
             return
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
+        # Stage timings (seconds) for the log line and the history row.
+        # Total runs from key-up for a live run, else from here (Undo/Retry).
+        timings: dict[str, float] = {}
+        if ctx.record_s is not None:
+            timings["record"] = ctx.record_s
+        start = ctx.keyup_at if ctx.keyup_at is not None else time.monotonic()
         try:
-            t0 = time.time()
-            opts = self._stt_opts()
+            t0 = time.monotonic()
+            tone = self._tone_for(target)
+            if tone != self.state.tone:
+                print(f"[daemon] tone for {getattr(target, 'name', '?')}: {tone.value}", flush=True)
+            opts = self._stt_opts(tone)
+            if ctx.screen_terms and not ctx.edit_mode:
+                opts.keyterms = tuple(screen_context.keyterms(list(ctx.screen_terms)))
             try:
-                raw = self.transcriber.transcribe(audio, opts)
+                if ctx.stream is not None:
+                    raw = self.transcriber.transcribe(audio, opts, stream=ctx.stream)
+                else:
+                    raw = self.transcriber.transcribe(audio, opts)
             except Exception as e:
                 log_exception("daemon.pipeline", "transcription failed — offering Retry", e)
                 self._flow.failed(audio, ctx, run=run) or self._stale(run)
                 return
-            t1 = time.time()
+            t1 = time.monotonic()
+            stt_t = getattr(self.transcriber, "last_timings", None) or {}
+            encode_s = stt_t.get("encode")
+            if encode_s is not None:
+                timings["encode"] = encode_s
+            timings["stt"] = stt_t.get("stt", (t1 - t0) - (encode_s or 0.0))
             print(
-                f"[daemon] sarvam-stt {t1-t0:.2f}s mode={opts.mode} "
-                f"lang={opts.language_code!r}: {raw!r}",
+                f"[daemon] sarvam-stt {t1-t0:.2f}s "
+                f"via={getattr(self.transcriber, 'last_source', 'batch')} mode={opts.mode} "
+                f"lang={opts.language_code!r} "
+                f"trimmed={getattr(self.transcriber, 'last_trimmed_s', 0.0):.2f}s: {raw!r}",
                 flush=True,
             )
             if not raw.strip():
@@ -927,11 +1323,12 @@ class Daemon:
             if ctx.edit_mode:
                 instruction = raw.strip()
                 final = self.ai.edit_selection(ctx.selection, instruction)
-                _signal_edit_overlay("done")
             else:
-                final = self._post_process(raw)
+                final = self._post_process(raw, tone=tone, target=target,
+                                           screen_terms=ctx.screen_terms)
 
-            t2 = time.time()
+            t2 = time.monotonic()
+            timings["cleanup"] = t2 - t1
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
                 self._flow.done(run=run) or self._stale(run)
@@ -943,25 +1340,35 @@ class Daemon:
                 print("[daemon] no text box focused — showing card", flush=True)
                 self._flow.show_card(final, run=run) or self._stale(run)
             else:
+                self._stop_paste_watch()
                 paste_status = paste(final, target=target)
                 self.state.last_paste_at = time.time()
                 print(f"[daemon] paste {paste_status}", flush=True)
+                if paste_status == "pasted":
+                    self._watch_paste(final, target)
                 if paste_status in ("clipboard", "failed"):
                     # Accessibility missing or paste failed: never lose the
                     # text (spec §8).
                     self._flow.show_card(final, run=run) or self._stale(run)
                 else:
+                    sounds.play("paste")
                     self._flow.done(run=run) or self._stale(run)
+            t3 = time.monotonic()
+            timings["paste"] = t3 - t2
+            timings["total"] = t3 - start
+            print("[daemon] timing " + " ".join(
+                f"{k}={v:.2f}s" for k, v in timings.items()), flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
             if hist_cfg["enabled"]:
                 self.history.add(
                     raw=raw,
                     final=final,
-                    tone=self.state.tone.value,
+                    tone=tone.value,
                     lang=self.state.language.value,
                     duration=audio.size / self.cfg["audio"]["sample_rate"],
                     app=getattr(target, "name", None) or None,
                     cap=int(hist_cfg["size_cap"]),
+                    timings=timings,
                 )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
@@ -970,6 +1377,10 @@ class Daemon:
             self._busy.release()
             self.state.recording = RecordingState.IDLE
             self.state.notify()
+            if ctx.edit_mode and not self._edit_pending:
+                # Done, failed or empty: the overlay's job is over (unless
+                # the user already armed the next edit on it).
+                self._close_edit_overlay()
 
     # -- Control socket (app hub, spec 2026-10-01 §3) ----------------------
     # Each connection is served on its own control-conn thread (never the
@@ -987,6 +1398,9 @@ class Daemon:
             "rerun": self._ctl_rerun,
             "play_cues": self._ctl_play_cues,
             "check": self._ctl_check,
+            "dictionary_suggestions": self._ctl_dictionary_suggestions,
+            "accept_suggestion": self._ctl_accept_suggestion,
+            "dismiss_suggestion": self._ctl_dismiss_suggestion,
         }
 
     def _start_control_channel(self) -> None:
@@ -1066,7 +1480,7 @@ class Daemon:
         Like the pipeline, a failed chat call falls back to the corrected raw text."""
         t = self._parse_tone(tone)
         lang = self._parse_language(language) if language else self.state.language
-        text = self._post_process(raw or "", tone=t, language=lang)
+        text = self._post_process(raw or "", tone=t, language=lang, skip_trivial=False)
         return {"text": text, "tone": t.value, "language": lang.value}
 
     def _ctl_play_cues(self) -> dict:
@@ -1077,6 +1491,19 @@ class Daemon:
     def _ctl_check(self) -> dict:
         import doctor
         return {"checks": doctor.run_checks()}
+
+    def _ctl_dictionary_suggestions(self) -> dict:
+        return {"suggestions": self._autolearner.suggestions()}
+
+    def _ctl_accept_suggestion(self, term: str) -> dict:
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError("no term")
+        return {"accepted": self._autolearner.accept(term)}
+
+    def _ctl_dismiss_suggestion(self, term: str) -> dict:
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError("no term")
+        return {"dismissed": self._autolearner.dismiss(term)}
 
     # -- Lifecycle -------------------------------------------------------
 
@@ -1118,6 +1545,7 @@ class Daemon:
         self._start_widget_channel()
         # Hub -> daemon commands (status, Paste again, Run it again as…).
         self._start_control_channel()
+        self._start_edit_overlay_channel()
 
         sv = self.cfg.get("sarvam") or {}
         print(
@@ -1156,6 +1584,8 @@ class Daemon:
             if self._widget is not None:
                 self._widget.stop()
             self._stop_control_channel()
+            if getattr(self, "_edit_overlay", None) is not None:
+                self._edit_overlay.stop()   # the overlay quits on the hang-up
             if self._hold:
                 self._hold.stop()
             if self._chords:

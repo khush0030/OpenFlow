@@ -65,7 +65,15 @@ def opened(monkeypatch):
 
 
 @pytest.fixture
-def make_page(tmp_config, keychain, opened):
+def env_files(tmp_config, monkeypatch):
+    """Only a tmp .env is consulted (never ~/.openflow or the repo's)."""
+    path = tmp_config / ".env"
+    monkeypatch.setattr(settings_mod, "_env_files", lambda: [path])
+    return path
+
+
+@pytest.fixture
+def make_page(tmp_config, keychain, opened, env_files):
     def make(replies=None):
         ctl = FakeControl(replies)
         ctx = HubContext(history_path=tmp_config / "history.sqlite",
@@ -243,6 +251,81 @@ def test_api_key_test_reports(make_page, monkeypatch):
     monkeypatch.setattr(settings_mod, "check_sarvam_key", bad)
     page.key_test.click()
     assert "401" in page.key_status.text()
+
+
+def test_key_status_says_where_the_key_comes_from(make_page, keychain, env_files, monkeypatch):
+    monkeypatch.delenv("SARVAM_API_KEY", raising=False)
+    page, _ = make_page()
+    assert page.key_status.text() == settings_mod.NO_KEY
+    assert "Paste your Sarvam key" == page.key_field.placeholderText()
+
+    env_files.write_text("# comment\nSARVAM_API_KEY='sk-file-secret'\n")
+    page.shown()
+    assert page.key_status.text() == f"Using the key in {settings_mod._home_short(str(env_files))}."
+    assert "sk-file-secret" not in page.key_status.text() + page.key_field.placeholderText()
+
+    # load_env copied the file into the environment: still reported as the file
+    monkeypatch.setenv("SARVAM_API_KEY", "sk-file-secret")
+    page.shown()
+    assert ".env" in page.key_status.text()
+
+    monkeypatch.setenv("SARVAM_API_KEY", "sk-shell")
+    page.shown()
+    assert page.key_status.text() == \
+        "Using the key from the SARVAM_API_KEY environment variable."
+
+    monkeypatch.delenv("SARVAM_API_KEY")
+    env_files.unlink()
+    keychain["key"] = "sk-kc"
+    page.shown()
+    assert page.key_status.text() == "Using the key saved in your Keychain."
+    monkeypatch.setenv("SARVAM_API_KEY", "sk-kc")    # find_api_key caches it in env
+    page.shown()
+    assert "Keychain" in page.key_status.text()
+    assert "sk-kc" not in page.key_status.text()
+    monkeypatch.delenv("SARVAM_API_KEY")
+
+
+# ── layout ──────────────────────────────────────────────────────────────
+def test_subnav_is_a_tab_row_when_narrow_and_a_column_when_wide(make_page):
+    page, _ = make_page()
+    page.resize(700, 700)
+    page.show()
+    QApplication.processEvents()
+    assert page.nav_top
+    page.resize(1100, 700)
+    QApplication.processEvents()
+    assert not page.nav_top
+    page.hide()
+
+
+def test_row_controls_drop_below_when_narrow():
+    row = C.Row("API key", "A long description that should wrap rather than squeeze",
+                C.Combo(["saaras:v4"]))
+    row.resize(700, 80)
+    row.show()
+    QApplication.processEvents()
+    assert not row.stacked
+    row.resize(300, 120)
+    QApplication.processEvents()
+    assert row.stacked
+    row.resize(700, 80)
+    QApplication.processEvents()
+    assert not row.stacked
+    assert C.Row("x", "y", C.Toggle(), below=True).stacked
+    row.hide()
+
+
+def test_api_key_buttons_never_clip_at_narrow_width(make_page):
+    page, _ = make_page()
+    page.resize(735, 700)
+    page.show()
+    page.select("speech")
+    QApplication.processEvents()
+    for b in (page.key_save, page.key_test):
+        assert b.width() >= b.sizeHint().width()
+    assert page.key_field.width() >= 140
+    page.hide()
 
 
 # ── privacy ─────────────────────────────────────────────────────────────

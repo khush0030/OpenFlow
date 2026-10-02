@@ -108,12 +108,12 @@ class NavRow(QFrame):
         row.setSpacing(12)
         self.icon = QLabel()
         self.icon.setFixedSize(18, 18)
-        self.icon.setPixmap(svg_pixmap(icon_svg(key), 18, _dpr()))
+        self.icon.setPixmap(svg_pixmap(icon_svg(key, style.INK_SOFT), 18, _dpr()))
         self.icon.setStyleSheet("background:transparent;")
         self.label = QLabel(label)
         self.label.setObjectName("navlabel")
         self.label.setStyleSheet(f"color:{style.INK};background:transparent;")
-        self.label.setFont(style.sans(14.5))
+        self.label.setFont(style.sans(14))
         row.addWidget(self.icon)
         row.addWidget(self.label, 1)
         self.setAccessibleName(label)
@@ -122,7 +122,9 @@ class NavRow(QFrame):
         if self.property("on") == on:
             return
         self.setProperty("on", on)
-        self.label.setFont(style.sans(14.5, 600 if on else 400))
+        self.label.setFont(style.sans(14, 600 if on else 400))
+        self.icon.setPixmap(svg_pixmap(icon_svg(self.key, style.INK if on else style.INK_SOFT,
+                                                1.9 if on else 1.7), 18, _dpr()))
         self._repolish()
 
     def _repolish(self) -> None:

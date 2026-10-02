@@ -240,13 +240,6 @@ class PermissionsStep(Step):
             row = PermissionRow(key, label, desc.format(key=key_name(hold)),
                                 lambda _c=False, k=key: _safe("open settings", self.open_settings, k))
             row.label.setFont(S.sans(15, 500))
-            # Room for the longest state, pushed right (the card is narrower
-            # than Help's, and "Not allowed" got clipped).
-            state = row.state_icon.parentWidget()
-            state.layout().insertStretch(0, 1)
-            fm = row.state_label.fontMetrics()
-            state.setMinimumWidth(row.state_icon.width() + 6 + 4 + max(
-                fm.horizontalAdvance(t) for t in ("Allowed", "Not allowed", "Can't tell")))
             if i:
                 body.addWidget(C.hairline())
             body.addWidget(row)

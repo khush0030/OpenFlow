@@ -7,10 +7,15 @@ Four short cues, rendered by scripts/make_sounds.py into assets/sounds/:
   error  — low double tone when transcription fails
   handsfree_start / handsfree_stop — three-knock variants for double-tap
                    (hands-free) sessions, so you can tell the modes apart
+  paste  — optional, after text lands; no bundled file, so it only plays
+           from a user override (below)
 
 We use NSSound via pyobjc instead of pulling in a heavy audio library — the
 recorder already owns sounddevice and we don't want to compete for the
 output device. Configured from config [sounds] enabled / volume.
+
+A <cue>.wav in ~/.openflow/sounds/ replaces the bundled one, so a personal
+sound set can live outside the repo (and never ship with the app).
 """
 from __future__ import annotations
 
@@ -18,11 +23,14 @@ import sys
 from pathlib import Path
 from typing import Literal
 
-Cue = Literal["start", "stop", "cancel", "error", "handsfree_start", "handsfree_stop"]
+Cue = Literal["start", "stop", "cancel", "error", "handsfree_start", "handsfree_stop",
+              "paste"]
+# Bundled cues (assets/sounds/). "paste" is user-override only.
 CUES: tuple[Cue, ...] = ("start", "stop", "cancel", "error", "handsfree_start", "handsfree_stop")
 DEFAULT_VOLUME = 0.35
 
 _ASSETS = Path(__file__).resolve().parent / "assets" / "sounds"
+_USER_SOUNDS = Path.home() / ".openflow" / "sounds"
 
 _RECORDING = ("recording", "silent")
 
@@ -58,6 +66,12 @@ def cue_for_transition(prev: str, new: str, hands_free: bool = False) -> Cue | N
     return None
 
 
+def path_for(cue: Cue) -> Path:
+    """The user's override for the cue if present, else the bundled file."""
+    user = _USER_SOUNDS / f"{cue}.wav"
+    return user if user.is_file() else _ASSETS / f"{cue}.wav"
+
+
 def _load(cue: Cue):
     """Return an NSSound for the cue, or None if unavailable."""
     if cue in _cache:
@@ -65,7 +79,7 @@ def _load(cue: Cue):
     if sys.platform != "darwin":
         return None
 
-    path = _ASSETS / f"{cue}.wav"
+    path = path_for(cue)
     if not path.exists():
         return None
 
