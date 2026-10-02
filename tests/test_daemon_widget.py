@@ -626,7 +626,7 @@ def test_hold_start_cue_waits_briefly_then_plays_while_held(keyed):
     d.recorder.audio = AUDIO
     d._hold._press_ms -= 1000
     d._hold._on_release()
-    assert played == ["start", "stop"]
+    assert played == ["start", "stop", "paste"]   # paste: after the text lands
 
 
 def test_double_tap_plays_only_the_hands_free_start_cue(keyed):
@@ -640,7 +640,7 @@ def test_double_tap_plays_only_the_hands_free_start_cue(keyed):
     d._hold._on_release()
     d.recorder.audio = AUDIO
     d._hold._on_press()                      # a tap ends the session
-    assert played == ["handsfree_start", "handsfree_stop"]
+    assert played == ["handsfree_start", "handsfree_stop", "paste"]
 
 
 def test_lone_quick_tap_stays_silent_and_idle(keyed):

@@ -1351,6 +1351,7 @@ class Daemon:
                     # text (spec §8).
                     self._flow.show_card(final, run=run) or self._stale(run)
                 else:
+                    sounds.play("paste")
                     self._flow.done(run=run) or self._stale(run)
             t3 = time.monotonic()
             timings["paste"] = t3 - t2

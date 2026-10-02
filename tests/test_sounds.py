@@ -126,3 +126,22 @@ def test_other_cues_leave_the_hold_tick_alone(monkeypatch):
     monkeypatch.setattr(sounds, "_load", lambda cue: other)
     sounds.play("stop")
     assert stopped == []
+
+
+def test_a_user_sound_overrides_the_bundled_cue(monkeypatch, tmp_path):
+    monkeypatch.setattr(sounds, "_USER_SOUNDS", tmp_path)
+    (tmp_path / "start.wav").write_bytes(b"RIFF")
+    assert sounds.path_for("start") == tmp_path / "start.wav"
+    assert sounds.path_for("stop") == sounds._ASSETS / "stop.wav"  # no override
+
+
+def test_missing_user_dir_falls_back_to_bundled(monkeypatch, tmp_path):
+    monkeypatch.setattr(sounds, "_USER_SOUNDS", tmp_path / "nope")
+    assert sounds.path_for("error") == sounds._ASSETS / "error.wav"
+
+
+def test_paste_cue_is_silent_without_a_user_override(monkeypatch, tmp_path):
+    monkeypatch.setattr(sounds, "_USER_SOUNDS", tmp_path)
+    assert not sounds.path_for("paste").exists()
+    (tmp_path / "paste.wav").write_bytes(b"RIFF")
+    assert sounds.path_for("paste") == tmp_path / "paste.wav"
