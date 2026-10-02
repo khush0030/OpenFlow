@@ -505,7 +505,7 @@ class SettingsPage(Page):
             lambda on: self._safe(self._save_dock, bool(on)))
         lay.addWidget(C.Group("Startup", [
             C.Row("Open at login", "Start OpenFlow quietly when you log in", self.login_toggle),
-            C.Row("Show in Dock", "Only while this window is open", self.dock_toggle),
+            C.Row("Show in Dock", "OpenFlow sits in the Dock while it runs; quitting it there closes everything", self.dock_toggle),
         ]))
         li = _login_item()
         on = bool(self._get("general", "auto_launch", False))

@@ -449,6 +449,20 @@ class Daemon:
     def shutdown(self) -> None:
         self._stop_evt.set()
 
+    def close_ui(self) -> None:
+        """Quitting from the Dock / ⌘Q ends the process inside AppKit, so the
+        run loop's cleanup never runs: tell the widget and edit overlay to
+        go now (best effort)."""
+        try:
+            self._send_widget({"type": "exit"})
+        except Exception as e:
+            log_exception("daemon", "could not close the flow widget", e)
+        try:
+            if getattr(self, "_edit_overlay", None) is not None:
+                self._edit_overlay.stop()
+        except Exception as e:
+            log_exception("daemon", "could not close the edit overlay", e)
+
     # -- Pipeline pieces -------------------------------------------------
 
     def _stt_opts(self, tone: ToneMode | None = None,
@@ -1073,6 +1087,14 @@ class Daemon:
         if ch.hotkeys is not None:
             self._pending_hotkeys = ch.hotkeys
             self._apply_pending_hotkeys()
+        # Settings › General › Show in Dock (not part of plan_changes).
+        from tray import show_in_dock
+        dock = show_in_dock(fresh)
+        if dock != show_in_dock(self.cfg):
+            self.cfg["hub"] = dict(fresh.get("hub") or {})
+            tray = getattr(self, "_tray", None)
+            if tray is not None:
+                tray.set_dock(dock)
         if ch.dictionary is not None:
             self.cfg["dictionary"] = ch.dictionary
             if not self._auto_learn():
