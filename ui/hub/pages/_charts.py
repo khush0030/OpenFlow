@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtWidgets import QFrame, QScrollArea, QSizePolicy, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QSizePolicy, QWidget
 
 from ui.hub import style as S
 
@@ -92,7 +92,16 @@ def scroll_page(content: QWidget) -> QScrollArea:
     sa.viewport().setStyleSheet(f"QWidget#pageviewport{{background:{S.PAPER};}}")
     content.setObjectName("pagebody")
     content.setStyleSheet(f"QWidget#pagebody{{background:{S.PAPER};}}")
-    sa.setWidget(content)
+    content.setMaximumWidth(S.PAGE_MAX_W)
+    # Centre the body once the window is wider than PAGE_MAX_W.
+    holder = QWidget()
+    holder.setObjectName("pageholder")
+    holder.setStyleSheet(f"QWidget#pageholder{{background:{S.PAPER};}}")
+    row = QHBoxLayout(holder)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(0)
+    row.addWidget(content, 1)
+    sa.setWidget(holder)
     return sa
 
 
@@ -148,7 +157,7 @@ class Gauge(QWidget):
 
 # ── horizontal bars ──────────────────────────────────────────────────────
 BAR_TRACK = "#EDE7DD"
-BAR_SOFT = "#D9A08A"
+BAR_SOFT = "#F2A99E"
 BAR_UNKNOWN = "#D6CDBF"          # "Not recorded" rows: present, not highlighted
 
 
@@ -218,7 +227,7 @@ class SplitBar(QWidget):
 
 
 # ── heatmap ──────────────────────────────────────────────────────────────
-HEAT_COLORS = ("#ECE6DC", "#F0CDBE", "#DB8E72", "#C4603F", "#9E3B22")
+HEAT_COLORS = ("#ECE6DC", "#F8D5CE", "#F09484", "#E5402F", "#A82A1A")
 WEEKS = 22
 CELL, GAP, LABEL_W = 13, 4, 34
 

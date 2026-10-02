@@ -14,8 +14,8 @@ from typing import Callable, Iterable, Optional
 from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QKeyEvent, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QAbstractButton, QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect, QHBoxLayout,
-    QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractButton, QBoxLayout, QButtonGroup, QComboBox, QFrame, QGraphicsDropShadowEffect,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ui.hub import style as S
@@ -68,7 +68,7 @@ def icon_label(pm: QPixmap) -> QLabel:
 
 # ── toggle ──────────────────────────────────────────────────────────────
 class Toggle(QAbstractButton):
-    """38×22 pill switch: sage when on (mockup), warm grey when off."""
+    """38×22 pill switch: widget red when on, warm grey when off."""
 
     W, H, THUMB = 38, 22, 18
 
@@ -87,7 +87,7 @@ class Toggle(QAbstractButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = QPainterPath()
         track.addRoundedRect(QRectF(0, 0, self.W, self.H), self.H / 2, self.H / 2)
-        p.fillPath(track, QColor(S.SAGE if self.isChecked() else TOGGLE_OFF))
+        p.fillPath(track, QColor(S.ACCENT if self.isChecked() else TOGGLE_OFF))
         x = self.W - self.THUMB - 2 if self.isChecked() else 2
         thumb = QPainterPath()
         thumb.addEllipse(QRectF(x, 2, self.THUMB, self.THUMB))
@@ -97,7 +97,8 @@ class Toggle(QAbstractButton):
 
 # ── segmented control ───────────────────────────────────────────────────
 class Segmented(QFrame):
-    """Left / Bottom / Right style picker. `changed(value)` on a click."""
+    """Left / Bottom / Right style picker: sand track, the chosen option a
+    raised Paper pill in accent text. `changed(value)` on a click."""
 
     changed = pyqtSignal(str)
 
@@ -105,22 +106,27 @@ class Segmented(QFrame):
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("seg")
-        self.setStyleSheet(f"QFrame#seg{{background:{SEG_TRACK};border-radius:9px;}}")
+        self.setStyleSheet(f"QFrame#seg{{background:{SEG_TRACK};border-radius:{S.CONTROL_H // 2}px;}}")
+        self.setFixedHeight(S.CONTROL_H)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(3, 3, 3, 3)
         lay.setSpacing(2)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons: dict[str, QPushButton] = {}
+        r = (S.CONTROL_H - 6) // 2
         for val, label in options:
             b = QPushButton(label)
             b.setCheckable(True)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setFont(S.sans(13))
+            b.setFont(S.sans(13, 500))
+            b.setFixedHeight(S.CONTROL_H - 6)
             b.setStyleSheet(
-                f"QPushButton{{border:none;border-radius:7px;padding:6px 12px;"
+                f"QPushButton{{border:none;border-radius:{r}px;padding:0 14px;"
                 f"background:transparent;color:{S.MUTED};}}"
-                f"QPushButton:checked{{background:{S.PAPER};color:{S.INK};}}")
+                f"QPushButton:hover{{color:{S.INK};}}"
+                f"QPushButton:checked{{background:{S.PAPER};color:{S.ACCENT_TEXT};}}")
             self.group.addButton(b)
             lay.addWidget(b)
             self.buttons[val] = b
@@ -138,12 +144,17 @@ class Segmented(QFrame):
             b.setChecked(v == value)
             if v == value:
                 fx = QGraphicsDropShadowEffect(b)
-                fx.setBlurRadius(4)
+                fx.setBlurRadius(6)
                 fx.setOffset(0, 1)
-                fx.setColor(QColor(26, 24, 20, 40))
+                fx.setColor(QColor(26, 24, 20, 38))
                 b.setGraphicsEffect(fx)
             else:
                 b.setGraphicsEffect(None)
+
+    def click_value(self, value: str) -> None:
+        """Act as if the user clicked `value` (tests, keyboard shortcuts)."""
+        if value in self.buttons:
+            self.buttons[value].click()
 
     def _clicked(self, value: str) -> None:
         self.set_value(value)
@@ -159,55 +170,120 @@ def hairline() -> QFrame:
 
 
 class Row(QWidget):
-    """Label + description on the left, control(s) on the right, 16 pt
-    vertical padding (mockup `padding: 16px 0`)."""
+    """Setting row: label + description on the left (wraps, never squeezed
+    below TEXT_MIN), control(s) on the right. When the row is too narrow for
+    both, the controls drop under the description. `below=True` always puts
+    them there; `fill=True` lets an expanding control (a key field) take the
+    line's width."""
+
+    TEXT_MIN = 240      # narrowest the label column gets before controls drop
+    SPACING = 24
 
     def __init__(self, label: str, description: str = "", *controls: QWidget,
-                 pad: int = 16, label_size: float = 14.5, label_weight: int = 500) -> None:
+                 pad: int = 16, label_size: float = S.T_BODY, label_weight: int = 500,
+                 below: bool = False, fill: bool = False) -> None:
         super().__init__()
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, pad, 0, pad)
-        lay.setSpacing(24)
+        self._always_below = below
+        self._fill = fill
+        self._box = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self._box.setContentsMargins(0, pad, 0, pad)
+        self._box.setSpacing(self.SPACING)
         self.text_col = QVBoxLayout()
         self.text_col.setSpacing(3)
         self.text_col.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel(label)
         self.label.setFont(S.sans(label_size, label_weight))
-        self.label.setStyleSheet(f"color:{S.INK};")
+        self.label.setStyleSheet(f"color:{S.INK};background:transparent;")
+        self.label.setWordWrap(True)
+        self.label.setMinimumWidth(1)
         self.text_col.addWidget(self.label)
         self.description = None
         if description:
             self.description = QLabel(description)
-            self.description.setFont(S.sans(13))
+            self.description.setFont(S.sans(S.T_SMALL))
             self.description.setWordWrap(True)
-            self.description.setStyleSheet(f"color:{S.MUTED};")
+            self.description.setMinimumWidth(1)
+            self.description.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                           QSizePolicy.Policy.Preferred)
+            self.description.setStyleSheet(f"color:{S.MUTED};background:transparent;")
             self.text_col.addWidget(self.description)
-        lay.addLayout(self.text_col, 1)
+        self._box.addLayout(self.text_col, 1)
         self.controls = QHBoxLayout()
         self.controls.setSpacing(10)
         self.controls.setContentsMargins(0, 0, 0, 0)
         for c in controls:
             self.controls.addWidget(c, 0, Qt.AlignmentFlag.AlignVCenter)
-        lay.addLayout(self.controls, 0)
+        if fill:
+            for c in controls:
+                if isinstance(c, QLineEdit) or c.sizePolicy().horizontalPolicy() in (
+                        QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding):
+                    self.controls.setStretchFactor(c, 1)
+        self._tail = None
+        self._box.addLayout(self.controls, 0)
+        if below:
+            self._set_stacked(True)
+
+    @property
+    def stacked(self) -> bool:
+        return self._box.direction() == QBoxLayout.Direction.TopToBottom
+
+    def _needed(self) -> int:
+        return self.TEXT_MIN + self._box.spacing() + self.controls.sizeHint().width()
+
+    def _set_stacked(self, on: bool) -> None:
+        if on == self.stacked:
+            return
+        if on:
+            self._side_spacing = self._box.spacing()   # subclasses may tune it
+        self._box.setDirection(QBoxLayout.Direction.TopToBottom if on
+                               else QBoxLayout.Direction.LeftToRight)
+        self._box.setSpacing(10 if on else getattr(self, "_side_spacing", self.SPACING))
+        if on and not self._fill:
+            # Controls sit at the left edge under the text, at their own width.
+            self._tail = QWidget()
+            self._tail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            self._tail.setFixedHeight(0)
+            self.controls.addWidget(self._tail, 1)
+        elif not on and self._tail is not None:
+            self.controls.removeWidget(self._tail)
+            self._tail.deleteLater()
+            self._tail = None
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        if not self._always_below:
+            self._set_stacked(self.width() < self._needed())
 
 
 class Group(QWidget):
-    """Mono eyebrow, then rows each topped by a hairline."""
+    """Mono eyebrow over a soft card of rows divided by hairlines."""
 
     def __init__(self, title: str, rows: Iterable[QWidget] = ()) -> None:
         super().__init__()
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(0, 0, 0, 0)
-        self.lay.setSpacing(0)
-        eb = S.eyebrow(title)
-        eb.setContentsMargins(0, 0, 0, 4)
-        self.lay.addWidget(eb)
+        self.lay.setSpacing(10)
+        self.eyebrow = S.eyebrow(title)
+        self.eyebrow.setContentsMargins(2, 0, 0, 0)
+        self.lay.addWidget(self.eyebrow)
+        self.card = QFrame()
+        self.card.setObjectName("group")
+        self.card.setStyleSheet(f"QFrame#group{{background:{S.CARD};border:1px solid {S.HAIR};"
+                                f"border-radius:{S.RADIUS_CARD - 2}px;}}"
+                                "QFrame#group QLabel{background:transparent;}")
+        self.rows = QVBoxLayout(self.card)
+        self.rows.setContentsMargins(20, 2, 20, 2)
+        self.rows.setSpacing(0)
+        self.lay.addWidget(self.card)
+        self._n = 0
         for r in rows:
             self.add(r)
 
     def add(self, row: QWidget) -> QWidget:
-        self.lay.addWidget(hairline())
-        self.lay.addWidget(row)
+        if self._n:
+            self.rows.addWidget(hairline())
+        self.rows.addWidget(row)
+        self._n += 1
         return row
 
 
@@ -420,7 +496,7 @@ class KeyRecorder(QFrame):
     def _style(self, active: bool) -> None:
         border = S.ACCENT if active else S.HAIR
         self.setStyleSheet(f"QFrame#rec{{background:{S.PAPER};border:1px solid {border};"
-                           f"border-radius:9px;}}")
+                           f"border-radius:{S.RADIUS_FIELD}px;}}")
 
     def caps(self) -> list[str]:
         out = []
@@ -513,10 +589,13 @@ class Combo(QComboBox):
     def __init__(self, items: Iterable[str] = ()) -> None:
         super().__init__()
         self.addItems(list(items))
+        self.setFixedHeight(S.CONTROL_H)
+        self.setFont(S.sans(S.T_UI))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
             f"QComboBox{{background:{S.PAPER};color:{S.INK};border:1px solid {S.HAIR};"
-            f"border-radius:9px;padding:7px 28px 7px 10px;}}"
+            f"border-radius:{S.RADIUS_FIELD}px;padding:0 30px 0 12px;}}"
+            f"QComboBox:focus{{border-color:{S.ACCENT};}}"
             f"QComboBox::drop-down{{border:none;width:24px;}}"
             f"QComboBox::down-arrow{{image:none;width:0;height:0;}}")
 

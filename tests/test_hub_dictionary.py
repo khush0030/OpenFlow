@@ -262,3 +262,63 @@ def test_corrupt_suggestions_file_shows_nothing(dict_file):
     (dict_file.parent / "dictionary_suggestions.json").write_text("{nope")
     page = make_page(dict_file)
     assert page.suggested_words() == []
+
+
+# -- layout (2026-10-02 redesign: nothing clips at the narrowest window) -------
+
+def test_form_sits_beside_table_when_wide_and_below_when_narrow(dict_file):
+    page = make_page(dict_file)
+    page.resize(1100, 800)
+    page.show()
+    QApplication.processEvents()
+    assert page.form_beside
+    page.resize(735, 760)                          # content panel at a 985-wide window
+    QApplication.processEvents()
+    assert not page.form_beside
+    # the form now follows the table inside the scrolling column
+    assert page.form.parent() is page.table.parent()
+    page.resize(1100, 800)
+    QApplication.processEvents()
+    assert page.form_beside
+    page.hide()
+
+
+def test_columns_fit_the_table_and_never_clip(dict_file):
+    page = make_page(dict_file)
+    page.show()
+    for w in (735, 1000, 1300):
+        page.resize(w, 760)
+        QApplication.processEvents()
+        table_w = page.table.width()
+        for row in page._rows:
+            used = row.word.width() + row.chips.width() + row.edit.width()
+            if not row.lang_cell.isHidden():
+                used += row.lang_cell.width()
+            assert used <= table_w
+            assert row.edit.geometry().right() <= row.width()
+        assert page._h_hints.text() == "OFTEN HEARD AS"        # header not elided
+    page.hide()
+
+
+def test_narrow_table_drops_language_column_and_elides_words(dict_file):
+    page = make_page(dict_file)
+    page._fit_columns(300)
+    assert page._compact
+    assert all(r.lang_cell.isHidden() for r in page._rows)
+    assert page.language_label("Mutha") == "English"            # still known
+    page._fit_columns(800)
+    assert not page._compact
+    assert all(not r.lang_cell.isHidden() for r in page._rows)
+
+
+def test_edit_and_add_keep_working_when_form_is_below(dict_file):
+    page = make_page(dict_file)
+    page.show()
+    page.resize(735, 760)
+    QApplication.processEvents()
+    page.edit_word("Bhopal")
+    assert page.form_title.text() == "Edit word"
+    page.hints.setText("bhopaal")
+    QTest.mouseClick(page.save_button, Qt.MouseButton.LeftButton)
+    assert on_disk(dict_file)["Bhopal"]["phonetic_hints"] == ["bhopaal"]
+    page.hide()

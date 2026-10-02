@@ -16,7 +16,7 @@ from typing import Callable, Iterator
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QButtonGroup, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLayout,
+    QButtonGroup, QFrame, QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel, QLayout,
     QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -25,6 +25,7 @@ from autolearn import AutoLearner, read_suggestions
 from dictionary import Dictionary, Term
 from ui.hub import style as S
 from ui.hub.page import Page
+from ui.hub.pages import _controls as C
 
 log = logging.getLogger(__name__)
 
@@ -34,10 +35,22 @@ INTRO = ("Names and words OpenFlow should always spell your way. "
          "Add what it mishears, and how it tends to hear it.")
 MAX_CHIPS = 8
 
-# Table columns (the mockup's 220 / 1fr / 120 / 70 squeezed "Often heard as"
-# to three lines at this width; a narrower word column keeps it on one).
-W_WORD, W_LANG, W_EDIT, GAP = 170, 112, 56, 16
-FORM_W = 330
+# Table columns are proportional (see DictionaryPage._fit_columns): Language
+# and Edit size to their content, Word takes WORD_SHARE of the rest within
+# [WORD_MIN, WORD_MAX] and elides, "Often heard as" gets the remainder.
+GAP = 16                      # between columns
+ROW_PAD_X = 20                # row side padding
+WORD_SHARE, WORD_MIN, WORD_MAX = 0.36, 110, 240
+HINTS_MIN = 170               # below this the Language column steps aside
+EDIT_H = 28
+SCROLL_INSET = 12            # scroll column's right inset (scrollbar lane)
+BAR = 3                       # selected-row accent bar (always reserved)
+# The add/edit form sits beside the table when the content is at least
+# FORM_BESIDE wide; narrower, it moves under the table at full width.
+FORM_W = 320
+FORM_BESIDE = 860
+FORM_MAX_STACKED = 640
+FIELDS_TWO_UP = 480           # form width from which fields pair up
 
 
 @contextmanager
@@ -99,23 +112,29 @@ class FlowLayout(QLayout):
     def sizeHint(self) -> QSize:  # noqa: N802
         return self.minimumSize()
 
+    def _shown(self):
+        return [it for it in self._items if it.widget() is None or not it.widget().isHidden()]
+
     def minimumSize(self) -> QSize:  # noqa: N802
         size = QSize()
-        for it in self._items:
+        for it in self._shown():
             size = size.expandedTo(it.minimumSize())
-        return size
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
 
     def _place(self, rect: QRect, move: bool) -> int:
-        x, y, line_h = rect.x(), rect.y(), 0
-        for it in self._items:
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = r.x(), r.y(), 0
+        for it in self._shown():
             hint = it.sizeHint()
-            if x + hint.width() > rect.right() + 1 and line_h > 0:
-                x, y, line_h = rect.x(), y + line_h + self._gap, 0
+            if x + hint.width() > r.right() + 1 and line_h > 0:
+                x, y, line_h = r.x(), y + line_h + self._gap, 0
             if move:
                 it.setGeometry(QRect(QPoint(x, y), hint))
             x += hint.width() + self._gap
             line_h = max(line_h, hint.height())
-        return y + line_h - rect.y()
+        return y + line_h - r.y() + m.top() + m.bottom()
 
 
 class Segmented(QFrame):
@@ -128,8 +147,8 @@ class Segmented(QFrame):
         super().__init__()
         self.setObjectName("seg")
         self.setStyleSheet(
-            "QFrame#seg{background:#ECE6DC;border-radius:9px;}"
-            f"QPushButton{{border:none;border-radius:7px;padding:6px 12px;background:transparent;color:{S.MUTED};}}"
+            f"QFrame#seg{{background:{C.SEG_TRACK};border-radius:9px;}}"
+            f"QPushButton{{border:none;border-radius:7px;padding:0 12px;background:transparent;color:{S.MUTED};}}"
             f"QPushButton:checked{{background:{S.PAPER};color:{S.INK};}}")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(3, 3, 3, 3)
@@ -140,15 +159,17 @@ class Segmented(QFrame):
         for v, label in options:
             b = QPushButton(label)
             b.setCheckable(True)
-            b.setFont(S.sans(13))
+            b.setFont(S.sans(S.T_UI))
+            b.setFixedHeight(S.CONTROL_H - 6)          # track = one control high
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             self._group.addButton(b)
             self.buttons[v] = b
-            lay.addWidget(b)
+            if stretch:              # equal segments filling the track
+                b.setMinimumWidth(1)
+                b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            lay.addWidget(b, 1 if stretch else 0)
             b.clicked.connect(lambda _=False, v=v: self._clicked(v))
-        if stretch:
-            lay.addStretch(1)
-        else:
+        if not stretch:
             self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._default = options[0][0]
         self.set_value(value)
@@ -184,6 +205,13 @@ class Segmented(QFrame):
         self.buttons[v].click()
 
 
+SCROLLBAR_QSS = (
+    "QScrollBar:vertical{background:transparent;width:8px;margin:4px 0 4px 0;}"
+    f"QScrollBar::handle:vertical{{background:{S.DISABLED};border-radius:3px;min-height:30px;}}"
+    "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+    "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
+
+
 def transparent_scroll() -> tuple[QScrollArea, QWidget]:
     """Frameless vertical scroll area that lets the Paper panel show through."""
     scroll = QScrollArea()
@@ -195,7 +223,7 @@ def transparent_scroll() -> tuple[QScrollArea, QWidget]:
     content = QWidget()
     content.setObjectName("hubcontent")
     scroll.setStyleSheet("QScrollArea#hubscroll,QWidget#hubviewport,QWidget#hubcontent"
-                         "{background:transparent;border:none;}")
+                         "{background:transparent;border:none;}" + SCROLLBAR_QSS)
     scroll.setWidget(content)
     return scroll, content
 
@@ -218,29 +246,92 @@ def search_icon(color: str = S.MUTED, size: int = 15) -> QIcon:
 
 
 def _hint_chip(text: str) -> QLabel:
-    return S.tag(text, bg="#ECE6DC", fg=S.INK)
+    return S.neutral_tag(text)
+
+
+def _lang_tag(text: str) -> QLabel:
+    """Language: a small outlined tag, quieter than the hint chips."""
+    lbl = QLabel(text)
+    lbl.setFont(S.sans(11.5, 500))
+    lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    lbl.setStyleSheet(f"background:transparent;color:{S.INK_SOFT};border:1px solid {S.HAIR};"
+                      f"border-radius:10px;padding:2px 8px;")
+    return lbl
 
 
 def _field_label(text: str) -> QLabel:
     lbl = QLabel(text)
-    lbl.setFont(S.sans(13, 500))
-    lbl.setStyleSheet(f"color:{S.INK};")
+    lbl.setFont(S.sans(S.T_SMALL, 500))
+    lbl.setStyleSheet(f"color:{S.INK_SOFT};background:transparent;")
     return lbl
 
 
 def _line_edit(placeholder: str) -> QLineEdit:
-    e = QLineEdit()
-    e.setPlaceholderText(placeholder)
-    e.setFont(S.sans(14))
-    e.setStyleSheet(
-        f"QLineEdit{{border:1px solid {S.HAIR};border-radius:9px;padding:9px 11px;"
-        f"background:{S.PAPER};color:{S.INK};}}"
-        f"QLineEdit:focus{{border-color:{S.ACCENT};}}")
+    e = S.field(placeholder)
+    e.setMinimumWidth(1)
     return e
 
 
+def _elide(label: QLabel, text: str, width: int) -> None:
+    shown = label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, max(width, 1))
+    if label.text() != shown:
+        label.setText(shown)
+    label.setToolTip(text if shown != text else "")
+
+
+class _FieldGrid(QWidget):
+    """Form fields, two per row when the form is wide enough, else one."""
+
+    def __init__(self, fields: list[QWidget]) -> None:
+        super().__init__()
+        self.setStyleSheet("background:transparent;")
+        self._fields = fields
+        self._grid = QGridLayout(self)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(14)
+        self._grid.setVerticalSpacing(16)
+        self._cols = 0
+        self.apply(0)
+
+    @property
+    def columns(self) -> int:
+        return self._cols
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        self.apply(self.width())
+
+    def apply(self, width: int) -> None:
+        cols = 2 if width >= FIELDS_TWO_UP else 1
+        if cols == self._cols:
+            return
+        self._cols = cols
+        for f in self._fields:
+            self._grid.removeWidget(f)
+        for i, f in enumerate(self._fields):
+            self._grid.addWidget(f, i // cols, i % cols)
+        for c in range(2):
+            self._grid.setColumnStretch(c, 1 if c < cols else 0)
+
+
+class _Table(QFrame):
+    """The word table's frame; reports its width so columns can follow it."""
+
+    def __init__(self, on_resize: Callable[[int], None]) -> None:
+        super().__init__()
+        self._on_resize = on_resize
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        try:
+            self._on_resize(self.width())
+        except Exception:  # never let a slot raise into Qt
+            log.exception("dictionary column fit failed")
+
+
 class TermRow(QFrame):
-    """One table row: word | hint chips | language | Edit."""
+    """One table row: word | hint chips | language | Edit. Column widths are
+    set by the page (`set_columns`) so every row lines up with the header."""
 
     def __init__(self, term: Term, first: bool, on_edit: Callable[[str], None],
                  last: bool = False) -> None:
@@ -250,58 +341,76 @@ class TermRow(QFrame):
         self._first, self._last = first, last
         self.set_selected(False)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 14, 20, 14)
+        lay.setContentsMargins(ROW_PAD_X, 14, ROW_PAD_X - 8, 14)
         lay.setSpacing(GAP)
 
-        word = QLabel(term.canonical)
-        word.setFont(S.serif(18))
-        word.setStyleSheet(f"color:{S.INK};")
-        word.setFixedWidth(W_WORD)
-        word.setWordWrap(True)
-        lay.addWidget(word)
+        self.word = QLabel(term.canonical)
+        self.word.setFont(S.serif(S.T_H3))
+        self.word.setStyleSheet(f"color:{S.INK};background:transparent;")
+        self.word.setMinimumWidth(1)
+        lay.addWidget(self.word, 0, Qt.AlignmentFlag.AlignTop)
 
-        chips = QWidget()
-        flow = FlowLayout(chips, spacing=6)
+        self.chips = QWidget()
+        self.chips.setStyleSheet("background:transparent;")
+        flow = FlowLayout(self.chips, spacing=6)
+        flow.setContentsMargins(0, 2, 0, 0)
         hints = list(term.phonetic_hints)
         for h in hints[:MAX_CHIPS]:
             flow.addWidget(_hint_chip(h))
         if len(hints) > MAX_CHIPS:
             flow.addWidget(_hint_chip(f"+{len(hints) - MAX_CHIPS}"))
-        chips.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        lay.addWidget(chips, 1)
+        if not hints:
+            none = QLabel("—")
+            none.setFont(S.sans(S.T_SMALL))
+            none.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+            flow.addWidget(none)
+        sp = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        sp.setHeightForWidth(True)
+        self.chips.setSizePolicy(sp)
+        self.chips.setMinimumWidth(1)
+        lay.addWidget(self.chips, 1, Qt.AlignmentFlag.AlignTop)
 
-        self.lang = QLabel(LANG_LABELS.get(term.language, term.language))
-        self.lang.setFont(S.sans(13))
-        self.lang.setStyleSheet(f"color:{S.MUTED};")
-        self.lang.setFixedWidth(W_LANG)
-        lay.addWidget(self.lang)
+        self.lang = _lang_tag(LANG_LABELS.get(term.language, term.language))
+        self.lang_cell = QWidget()
+        self.lang_cell.setStyleSheet("background:transparent;")
+        lc = QHBoxLayout(self.lang_cell)
+        lc.setContentsMargins(0, 2, 0, 0)
+        lc.addWidget(self.lang, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        lc.addStretch(1)
+        lay.addWidget(self.lang_cell, 0, Qt.AlignmentFlag.AlignTop)
 
         self.edit = QPushButton("Edit")
-        self.edit.setFont(S.sans(13))
+        self.edit.setFont(S.sans(S.T_SMALL, 500))
         self.edit.setCursor(Qt.CursorShape.PointingHandCursor)
         self.edit.setAccessibleName(f"Edit {term.canonical}")
+        self.edit.setFixedHeight(EDIT_H)
+        self.edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.edit.setStyleSheet(
-            f"QPushButton{{border:1px solid {S.HAIR};background:{S.PAPER};border-radius:8px;"
-            f"padding:5px 10px;color:{S.INK};}}QPushButton:hover{{background:{S.ROW_HOVER};}}")
+            f"QPushButton{{border:none;background:transparent;border-radius:{EDIT_H // 2}px;"
+            f"padding:0 12px;color:{S.ACCENT_TEXT};}}"
+            f"QPushButton:hover{{background:{S.ACCENT_SOFT};}}")
         self.edit.clicked.connect(lambda: on_edit(term.canonical))
-        box = QHBoxLayout()
-        box.setContentsMargins(0, 0, 0, 0)
-        box.addStretch(1)
-        box.addWidget(self.edit)
-        holder = QWidget()
-        holder.setLayout(box)
-        holder.setFixedWidth(W_EDIT)
-        lay.addWidget(holder)
+        lay.addWidget(self.edit, 0, Qt.AlignmentFlag.AlignTop)
+
+    def set_columns(self, word_w: int, lang_w: int) -> None:
+        self.word.setFixedWidth(word_w)
+        _elide(self.word, self.term.canonical, word_w)
+        self.lang_cell.setVisible(lang_w > 0)
+        if lang_w > 0:
+            self.lang_cell.setFixedWidth(lang_w)
 
     def set_selected(self, on: bool) -> None:
+        # Selected (being edited): lifted to Paper with the widget-red bar on
+        # the leading edge, like the selected History row.
         top = "" if self._first else f"border-top:1px solid {S.HAIR};"
-        bg = S.ROW_HOVER if on else "transparent"
+        bg = S.PAPER if on else "transparent"
+        bar = S.ACCENT if on else "transparent"
         r = ""
-        if self._first:
-            r += "border-top-left-radius:13px;border-top-right-radius:13px;"
         if self._last:
-            r += "border-bottom-left-radius:13px;border-bottom-right-radius:13px;"
-        self.setStyleSheet(f"QFrame#termrow{{{top}{r}background:{bg};}}")
+            rad = S.RADIUS_CARD - 1
+            r += f"border-bottom-left-radius:{rad}px;border-bottom-right-radius:{rad}px;"
+        self.setStyleSheet(f"QFrame#termrow{{{top}{r}border-left:{BAR}px solid {bar};background:{bg};}}"
+                           f"QFrame#termrow:hover{{background:{S.PAPER if on else S.ROW_HOVER};}}")
 
 
 # ── the page ─────────────────────────────────────────────────────────────
@@ -316,165 +425,250 @@ class DictionaryPage(Page):
         self._confirm_delete = False
         self._rows: list[TermRow] = []
         self._suggestions_shown: list[str] = []
+        self._wide: bool | None = None
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(40, 34, 40, 28)
+        outer.setContentsMargins(*S.PAGE_MARGINS)
         outer.setSpacing(0)
+        self._outer = outer
 
-        # Header: title left; search + "Add a word" right, bottoms aligned.
+        # Header: title left; search (flexes) + "Add a word" right.
         head = QHBoxLayout()
-        head.setSpacing(20)
-        head.addWidget(S.page_title("Dictionary"), 0, Qt.AlignmentFlag.AlignBottom)
+        head.setSpacing(10)
+        title = S.page_title("Dictionary")
+        title.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        head.addWidget(title, 0, Qt.AlignmentFlag.AlignBottom)
+        head.addSpacing(S.GAP - 10)
         head.addStretch(1)
         self.search = _line_edit("Search words")
-        self.search.setFixedWidth(220)
         self.search.setClearButtonEnabled(True)
         self.search.addAction(search_icon(), QLineEdit.ActionPosition.LeadingPosition)
-        self.search.setStyleSheet(
-            f"QLineEdit{{border:1px solid {S.HAIR};border-radius:9px;padding:7px 10px 7px 4px;"
-            f"background:{S.PAPER};color:{S.INK};}}QLineEdit:focus{{border-color:{S.ACCENT};}}")
-        self.search.setFont(S.sans(13.5))
+        self.search.setStyleSheet(self.search.styleSheet().replace("padding:0 10px;", "padding:0 8px 0 2px;"))
+        self.search.setMinimumWidth(150)
+        self.search.setMaximumWidth(280)
+        self.search.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search.textChanged.connect(self._render)
-        self.add_button = S.button("Add a word", primary=True)
+        head.addWidget(self.search, 3, Qt.AlignmentFlag.AlignBottom)
+        self.add_button = S.button("Add a word", kind="primary")
+        self.add_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.add_button.clicked.connect(self._on_add_clicked)
-        right = QHBoxLayout()
-        right.setSpacing(10)
-        right.addWidget(self.search)
-        right.addWidget(self.add_button)
-        head.addLayout(right)
-        head.setAlignment(right, Qt.AlignmentFlag.AlignBottom)
+        head.addWidget(self.add_button, 0, Qt.AlignmentFlag.AlignBottom)
         outer.addLayout(head)
 
-        intro = S.muted(INTRO, 14.5)
-        intro.setMaximumWidth(640)
+        intro = S.muted(INTRO, S.T_BODY)
+        intro.setMaximumWidth(620)
         outer.addSpacing(10)
         outer.addWidget(intro)
-        outer.addSpacing(22)
-        self.suggested = self._build_suggested()
-        outer.addWidget(self.suggested)
+        outer.addSpacing(24)
 
-        body = QHBoxLayout()
-        body.setSpacing(22)
-        body.addLayout(self._build_table(), 1)
-        body.addWidget(self._build_form(), 0, Qt.AlignmentFlag.AlignTop)
-        outer.addLayout(body, 1)
+        # Body: [scrolling column: suggested, table, footer] [form].
+        # Wide: the form sits beside the table. Narrow (< FORM_BESIDE): the
+        # form moves into the scrolling column under the table.
+        self._body = QWidget()
+        self._body_lay = QHBoxLayout(self._body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0)
+        self._body_lay.setSpacing(S.GAP - SCROLL_INSET)
+        self._scroll, content = transparent_scroll()
+        self._col = QVBoxLayout(content)
+        # right inset: room for the slim scrollbar beside the cards
+        self._col.setContentsMargins(0, 0, SCROLL_INSET, 4)
+        self._col.setSpacing(14)
+        self.suggested = self._build_suggested()
+        self._col.addWidget(self.suggested)
+        self._build_table()
+        self._col.addStretch(1)
+        self._body_lay.addWidget(self._scroll, 1)
+        self.form = self._build_form()
+        outer.addWidget(self._body, 1)
+        self._place_form(True)
 
     # ── layout ───────────────────────────────────────────────────────────
-    def _build_table(self) -> QVBoxLayout:
-        col = QVBoxLayout()
-        col.setSpacing(14)
-        header = QHBoxLayout()
-        header.setContentsMargins(20, 0, 20, 0)
-        header.setSpacing(GAP)
-        for text, width in (("Word", W_WORD), ("Often heard as", 0), ("Language", W_LANG), ("", W_EDIT)):
-            lbl = S.eyebrow(text)
-            lbl.setWordWrap(False)
-            if width:
-                lbl.setFixedWidth(width)
-                header.addWidget(lbl)
-            else:
-                header.addWidget(lbl, 1)
-        col.addLayout(header)
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        try:
+            self._fit(self.width())
+        except Exception:
+            log.exception("dictionary layout failed")
 
-        scroll, content = transparent_scroll()
-        inner = QVBoxLayout(content)
-        inner.setContentsMargins(0, 0, 0, 0)
-        inner.setSpacing(14)
+    def _fit(self, width: int) -> None:
+        l, t, r, b = S.PAGE_MARGINS
+        extra = max(0, width - l - r - S.PAGE_MAX_W) // 2
+        self._outer.setContentsMargins(l + extra, t, r + extra, b)
+        self._place_form(min(width - l - r, S.PAGE_MAX_W) >= FORM_BESIDE)
 
-        self.table = QFrame()
+    @property
+    def form_beside(self) -> bool:
+        """True when the form sits beside the table (wide windows)."""
+        return bool(self._wide)
+
+    def _place_form(self, wide: bool) -> None:
+        if wide == self._wide:
+            return
+        self._wide = wide
+        if wide:
+            self._col.removeWidget(self.form)
+            self.form.setMinimumWidth(FORM_W)
+            self.form.setMaximumWidth(FORM_W)
+            self._body_lay.addWidget(self.form, 0, Qt.AlignmentFlag.AlignTop)
+        else:
+            self._body_lay.removeWidget(self.form)
+            self.form.setMinimumWidth(0)
+            self.form.setMaximumWidth(FORM_MAX_STACKED)
+            # after the footer, before the trailing stretch
+            self._col.insertWidget(self._col.indexOf(self.footer) + 1, self.form)
+        self._form_grid.apply(FORM_MAX_STACKED - 44 if not wide else FORM_W - 44)
+        self.form.show()
+
+    def _reveal_form(self) -> None:
+        if not self._wide:
+            self._scroll.ensureWidgetVisible(self.form, 0, 24)
+
+    def _build_table(self) -> None:
+        self.table = _Table(self._fit_columns)
         self.table.setObjectName("dicttable")
         self.table.setStyleSheet(
-            f"QFrame#dicttable{{border:1px solid {S.HAIR};border-radius:14px;background:{S.PAPER};}}")
+            f"QFrame#dicttable{{border:1px solid {S.HAIR};border-radius:{S.RADIUS_CARD}px;"
+            f"background:{S.CARD};}}")
         self._rows_lay = QVBoxLayout(self.table)
         self._rows_lay.setContentsMargins(1, 1, 1, 1)
         self._rows_lay.setSpacing(0)
+
+        # column header, inside the frame so it scrolls with the rows
+        self._header = QWidget()
+        self._header.setStyleSheet("background:transparent;")
+        hl = QHBoxLayout(self._header)
+        hl.setContentsMargins(ROW_PAD_X + BAR, 14, ROW_PAD_X - 8, 10)
+        hl.setSpacing(GAP)
+        self._h_word = S.eyebrow("Word")
+        self._h_hints = S.eyebrow("Often heard as")
+        self._h_lang = S.eyebrow("Language")
+        self._h_edit = QWidget()
+        for w in (self._h_word, self._h_hints, self._h_lang):
+            w.setMinimumWidth(1)
+        hl.addWidget(self._h_word)
+        hl.addWidget(self._h_hints, 1)
+        hl.addWidget(self._h_lang)
+        hl.addWidget(self._h_edit)
+        self._rows_lay.addWidget(self._header)
+
         self.empty_label = QLabel(EMPTY)
-        self.empty_label.setFont(S.sans(14))
+        self.empty_label.setFont(S.sans(S.T_BODY))
         self.empty_label.setWordWrap(True)
+        self.empty_label.setMinimumWidth(1)
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet(f"color:{S.MUTED};padding:36px 20px;")
+        self.empty_label.setStyleSheet(f"color:{S.MUTED};background:transparent;padding:32px 20px;"
+                                       f"border-top:1px solid {S.HAIR};")
         self._rows_lay.addWidget(self.empty_label)
-        inner.addWidget(self.table)
+        self._col.addWidget(self.table)
 
         self.footer = QLabel()
-        self.footer.setFont(S.sans(13))
+        self.footer.setFont(S.sans(S.T_SMALL))
         self.footer.setTextFormat(Qt.TextFormat.RichText)
         self.footer.setWordWrap(True)
-        self.footer.setStyleSheet(f"color:{S.MUTED};")
-        inner.addWidget(self.footer)
-        inner.addStretch(1)
-        col.addWidget(scroll, 1)
-        return col
+        self.footer.setMinimumWidth(1)
+        self.footer.setContentsMargins(4, 0, 4, 0)
+        self.footer.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+        self._col.addWidget(self.footer)
+
+    def _fit_columns(self, table_w: int | None = None) -> None:
+        """Proportional columns: Language and Edit take what their content
+        needs, Word a share of the rest (its text elides), hints the remainder.
+        When too narrow for all four, the Language column steps aside."""
+        if table_w is None:
+            table_w = self.table.width()
+        inner = table_w - 2 - BAR - ROW_PAD_X - (ROW_PAD_X - 8) - 3 * GAP
+        edit_w = max([r.edit.sizeHint().width() for r in self._rows] or [52])
+        lang_w = max([r.lang.sizeHint().width() for r in self._rows]
+                     + [self._h_lang.sizeHint().width()])
+        rest = inner - edit_w - lang_w
+        if rest < WORD_MIN + HINTS_MIN:                  # compact: drop Language
+            lang_w = 0
+            rest = inner - edit_w + GAP
+        word_w = int(max(WORD_MIN, min(WORD_MAX, rest * WORD_SHARE)))
+        self._h_word.setFixedWidth(word_w)
+        _elide(self._h_word, "WORD", word_w)
+        self._h_lang.setVisible(lang_w > 0)
+        if lang_w:
+            self._h_lang.setFixedWidth(lang_w)
+        self._h_edit.setFixedWidth(edit_w)
+        hints_w = max(1, rest - word_w)
+        _elide(self._h_hints, "OFTEN HEARD AS", hints_w)
+        for r in self._rows:
+            r.set_columns(word_w, lang_w)
+        self._compact = lang_w == 0
 
     def _build_form(self) -> QWidget:
         card = S.Card(padding=22)
-        card.setFixedWidth(FORM_W)
         card.body.setSpacing(16)
-        self.form_title = QLabel("Add a word")
-        self.form_title.setFont(S.serif(22))
-        self.form_title.setStyleSheet(f"color:{S.INK};")
+        self.form_title = S.heading("Add a word")
         card.body.addWidget(self.form_title)
 
-        def field(label: str, widget: QWidget) -> None:
-            box = QVBoxLayout()
-            box.setSpacing(6)
-            box.addWidget(_field_label(label))
-            box.addWidget(widget)
-            card.body.addLayout(box)
+        def field(label: str, widget: QWidget) -> QWidget:
+            box = QWidget()
+            box.setStyleSheet("background:transparent;")
+            v = QVBoxLayout(box)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(6)
+            v.addWidget(_field_label(label))
+            v.addWidget(widget)
+            return box
 
         self.spelled = _line_edit("e.g. Sarvam")
         self.spelled.returnPressed.connect(self._save)
         self.spelled.textEdited.connect(self._clear_error)
-        field("Spelled", self.spelled)
-        self.error = QLabel("")
-        self.error.setFont(S.sans(12.5))
-        self.error.setWordWrap(True)
-        self.error.setStyleSheet(f"color:{S.DANGER};")
-        self.error.hide()
-        card.body.addWidget(self.error)
         self.hints = _line_edit("sarvum, sar bum")
         self.hints.returnPressed.connect(self._save)
-        field("Often heard as", self.hints)
         self.language = Segmented([("en", "English"), ("hi", "Hindi"), ("both", "Both")], "both",
                                   stretch=True)
-        field("Language", self.language)
         self.context_field = _line_edit("a company, a city…")
         self.context_field.returnPressed.connect(self._save)
-        field("Context (optional)", self.context_field)
 
-        buttons = QHBoxLayout()
-        buttons.setSpacing(8)
-        self.delete_link = QPushButton("Delete")
-        self.delete_link.setFont(S.sans(13.5))
-        self.delete_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.delete_link.setStyleSheet(
-            f"QPushButton{{border:none;background:transparent;color:{S.DANGER};padding:8px 0;text-align:left;}}"
-            "QPushButton:hover{text-decoration:underline;}")
-        self.delete_link.clicked.connect(self._delete)
-        self.delete_link.hide()
-        buttons.addWidget(self.delete_link)
-        buttons.addStretch(1)
+        # two fields a row when the form is wide (stacked under the table),
+        # one a row in the side column
+        self._form_grid = _FieldGrid([
+            field("Spelled", self.spelled),
+            field("Often heard as", self.hints),
+            field("Language", self.language),
+            field("Context (optional)", self.context_field),
+        ])
+        card.body.addWidget(self._form_grid)
+        self.error = QLabel("")
+        self.error.setFont(S.sans(S.T_SMALL))
+        self.error.setWordWrap(True)
+        self.error.setMinimumWidth(1)
+        self.error.setStyleSheet(f"color:{S.DANGER};background:transparent;")
+        self.error.hide()
+        card.body.addWidget(self.error)
+
+        buttons = QWidget()
+        buttons.setStyleSheet("background:transparent;")
+        flow = FlowLayout(buttons, spacing=8)
+        flow.setContentsMargins(0, 4, 0, 0)
+        self.save_button = S.button("Save word", kind="primary")
+        self.save_button.clicked.connect(self._save)
         self.cancel_button = S.button("Cancel")
         self.cancel_button.clicked.connect(self._reset_form)
-        self.save_button = S.button("Save word", primary=True)
-        self.save_button.clicked.connect(self._save)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.save_button)
-        card.body.addLayout(buttons)
+        self.delete_link = S.button("Delete", kind="danger")
+        self.delete_link.clicked.connect(self._delete)
+        self.delete_link.hide()
+        for b in (self.save_button, self.cancel_button, self.delete_link):
+            flow.addWidget(b)
+        sp = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        sp.setHeightForWidth(True)
+        buttons.setSizePolicy(sp)
+        card.body.addWidget(buttons)
         return card
 
     # ── suggested (auto-learn, autolearn.py) ─────────────────────────────
     def _build_suggested(self) -> QWidget:
         """Words you corrected once after a paste. A second fix adds them on
         its own; Add / Dismiss decide now. Hidden when there are none."""
-        box = QWidget()
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 18)
-        lay.setSpacing(8)
-        lay.addWidget(S.eyebrow("Suggested"))
+        box = S.Card(padding=18)
+        box.body.setSpacing(10)
+        box.body.addWidget(S.eyebrow("Suggested"))
         self._suggested_rows = QVBoxLayout()
-        self._suggested_rows.setSpacing(6)
-        lay.addLayout(self._suggested_rows)
+        self._suggested_rows.setSpacing(8)
+        box.body.addLayout(self._suggested_rows)
         box.hide()
         return box
 
@@ -494,18 +688,17 @@ class DictionaryPage(Page):
         self._suggestions_shown = [r["term"] for r in rows]
         for r in rows:
             row = QWidget()
+            row.setStyleSheet("background:transparent;")
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
-            h.setSpacing(10)
+            h.setSpacing(12)
             word = QLabel(r["term"])
-            word.setFont(S.serif(17))
+            word.setFont(S.serif(S.T_H3))
             word.setStyleSheet(f"color:{S.INK};")
             h.addWidget(word)
             heard = ", ".join(r.get("heard") or [])
-            if heard:
-                h.addWidget(S.muted(f"heard as {heard}", 13))
-            h.addStretch(1)
-            add = S.button("Add", primary=True)
+            h.addWidget(S.muted(f"heard as {heard}" if heard else "", S.T_SMALL), 1)
+            add = S.button("Add", kind="primary")
             add.setAccessibleName(f"Add {r['term']}")
             add.clicked.connect(lambda _=False, t=r["term"]: self.accept_suggestion(t))
             no = S.button("Dismiss")
@@ -570,14 +763,16 @@ class DictionaryPage(Page):
     def _render(self, *_):
         for row in self._rows:
             self._rows_lay.removeWidget(row)
+            row.hide()
             row.deleteLater()
         self._rows = []
         terms = self._filtered()
         for i, t in enumerate(terms):
-            row = TermRow(t, first=(i == 0), on_edit=self.edit_word, last=(i == len(terms) - 1))
+            row = TermRow(t, first=False, on_edit=self.edit_word, last=(i == len(terms) - 1))
             row.set_selected(self._editing is not None and t.canonical.lower() == self._editing.lower())
-            self._rows_lay.insertWidget(i, row)
+            self._rows_lay.insertWidget(i + 1, row)          # after the column header
             self._rows.append(row)
+        self._fit_columns()
 
         q = self.search.text().strip()
         if self._load_error:
@@ -592,7 +787,7 @@ class DictionaryPage(Page):
         path = _tilde(Path(self.ctx.dictionary_path))
         self.footer.setText(
             f"{n} word{'' if n == 1 else 's'} · stored in "
-            f"<span style=\"font-family:'{S.MONO}','Menlo';color:{S.INK};\">{path}</span>")
+            f"<span style=\"font-family:'{S.MONO}','Menlo';color:{S.INK_SOFT};\">{path}</span>")
 
     # ── test / inspection helpers ────────────────────────────────────────
     def visible_words(self) -> list[str]:
@@ -614,6 +809,7 @@ class DictionaryPage(Page):
     def _on_add_clicked(self) -> None:
         if self._editing is not None:
             self._reset_form()
+        self._reveal_form()
         self.spelled.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def edit_word(self, canonical: str) -> None:
@@ -633,6 +829,7 @@ class DictionaryPage(Page):
             self._clear_error()
             for r in self._rows:
                 r.set_selected(r.term.canonical.lower() == t.canonical.lower())
+            self._reveal_form()
             self.spelled.setFocus(Qt.FocusReason.OtherFocusReason)
         except Exception:
             log.exception("edit failed")

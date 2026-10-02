@@ -251,11 +251,55 @@ def test_narrow_window_stacks_banner_button(db, monkeypatch):
     from PyQt6.QtWidgets import QBoxLayout
     page, _ = make(db, monkeypatch=monkeypatch)
     page.show()
-    page.resize(740, 600)
+    page.resize(740, 600)          # the hub's narrowest panel: banner stays one row
+    assert page._banner_layout.direction() == QBoxLayout.Direction.LeftToRight
+    page.resize(560, 600)
     assert page._banner_layout.direction() == QBoxLayout.Direction.TopToBottom
     page.resize(1044, 808)
     assert page._banner_layout.direction() == QBoxLayout.Direction.LeftToRight
     page.hide()
+
+
+def test_right_now_goes_under_the_list_when_narrow(db, monkeypatch):
+    page, _ = make(db, monkeypatch=monkeypatch)
+    page.show()
+    page.resize(740, 760)          # 985-wide window
+    QApplication.processEvents()
+    assert page.columns.stacked
+    assert page.right_now.y() > page.list_box.parentWidget().y()
+    assert page.right_now.width() == page.list_box.width()      # full width, not 262
+    text = page.rows[0].text
+    assert text.width() > 500                                    # dictation gets the room
+    page.resize(1300, 832)
+    QApplication.processEvents()
+    assert not page.columns.stacked
+    assert page.right_now.width() == home.SIDE_W
+    page.hide()
+
+
+def test_not_allowed_permission_is_red_not_a_ghost_tick(db, monkeypatch):
+    page, _ = make(db, monkeypatch=monkeypatch)       # microphone False
+    mic = page.permission_rows["microphone"]
+    img = mic.tick.pixmap().toImage()
+    reds = [img.pixelColor(x, y) for x in range(img.width()) for y in range(img.height())
+            if img.pixelColor(x, y).alpha() > 200]
+    assert reds and all(c.red() > 150 and c.green() < 90 for c in reds)
+    assert home.S.DANGER in mic.link.text()
+
+
+def test_status_pill_fill_follows_state(db, monkeypatch):
+    page, _ = make(db, control=FakeControl(status={**STATUS, "permissions": ALL_OK}),
+                   monkeypatch=monkeypatch)
+    assert home.S.SAGE_SOFT in page.status_pill.styleSheet()
+    page._apply_status({**STATUS, "state": "recording"})
+    assert home.S.ACCENT_SOFT in page.status_pill.styleSheet()
+
+
+def test_no_hard_coded_colours_in_page():
+    import inspect
+    import re
+    src = inspect.getsource(home)
+    assert re.findall(r'"#[0-9A-Fa-f]{6}"', src) == []
 
 
 # ── status off the UI thread ──────────────────────────────────────────────
@@ -339,3 +383,36 @@ def test_paste_again_runs_off_the_ui_thread(db, monkeypatch):
     assert deliver_queued(lambda: page.rows[0].note.text() == "Pasted")
     assert ("paste_text", "hub-worker") in ctl.threads
     assert ("paste_text", "MainThread") not in ctl.threads
+
+
+def test_long_today_shows_newest_and_links_to_history(tmp_path, monkeypatch):
+    path = tmp_path / "many.sqlite"
+    h = History(path)
+    for i in range(12):
+        h.add("x", f"Entry {i}.", "verbatim", "en", 1.0, ts=ts(2026, 10, 1, 9, i))
+    page, nav = make(path, monkeypatch=monkeypatch)
+    assert len(page.rows) == home.MAX_ROWS
+    assert page.rows[0].entry.final == "Entry 11."
+    assert "See all 12" in page.more_link.text()
+    page.more_link.linkActivated.emit("history")
+    assert nav[-1] == ("history", {})
+    page.search.setText("entry")              # a search shows every match
+    assert len(page.rows) == 12 and page.more_link is None
+
+
+def test_long_dictation_clamps_with_show_more(tmp_path, monkeypatch):
+    path = tmp_path / "long.sqlite"
+    long = " ".join(["word"] * 400)
+    History(path).add("x", long, "verbatim", "en", 60.0, ts=ts(2026, 10, 1, 9, 0))
+    page, _ = make(path, monkeypatch=monkeypatch)
+    page.show()
+    page.resize(740, 760)
+    QApplication.processEvents()
+    row = page.rows[0]
+    assert row.text.text().endswith("…") and len(row.text.text()) < len(long)
+    assert not row.more.isHidden() and "Show more" in row.more.text()
+    row.more.linkActivated.emit("more")
+    assert row.text.text() == long and "Show less" in row.more.text()
+    row.paste_btn.click()                     # paste/copy always use the full text
+    assert ("paste_text", {"text": long}) in page.ctx.control.calls
+    page.hide()
