@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import queue
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable
 
@@ -34,6 +35,11 @@ def _rescan_devices() -> None:
 TAIL_WAIT_S = 0.25
 # start() waits at most this long for the previous take's stream to close.
 CLOSE_WAIT_S = 2.0
+# A cancelled take whose stream lingers (cancel(linger_s=...)) keeps at most
+# this many of its newest blocks (~1 s), so a restart can start the new take
+# at its key-down even when the handler ran late.
+PARK_KEEP_BLOCKS = 16
+_PARKED = "parked"          # take marker of a lingering stream's callbacks
 
 
 class Recorder:
@@ -60,6 +66,14 @@ class Recorder:
         self._stopping = False      # stop() is waiting for the tail block
         self._tail = threading.Event()
         self._closer: threading.Thread | None = None
+        # The open stream's take cell: its callbacks report cell[0] as their
+        # take, so a lingering stream can be handed to the next take.
+        self._cell: list = [0]
+        # A cancelled take's stream kept running for a quick restart (a tap
+        # that may become a double-tap): (stream, cell, timer). It closes
+        # when the timer fires; start() adopts it instead of opening anew.
+        self._parked: tuple | None = None
+        self._park_buf: deque | None = None
 
     def _callback(self, indata: np.ndarray, frames: int, time, status,  # noqa: ARG002
                   take: int | None = None) -> None:
@@ -68,6 +82,10 @@ class Recorder:
             print(f"[audio] status: {status}", flush=True)
         block = indata.copy()
         with self._cb_lock:
+            if take == _PARKED:
+                if self._park_buf is not None:
+                    self._park_buf.append(block)
+                return
             if take is not None and take != self._take:
                 return                   # a stopped take's stream, closing
             self._q.put(block)
@@ -110,14 +128,40 @@ class Recorder:
             raise
         return stream
 
+    def attach(self, listener: Callable[[np.ndarray], None] | None) -> None:
+        """Set on_block, first handing it every block this take already has:
+        the mic opens before the stream it feeds, so no early word is lost.
+        Atomic against the audio callback (no block twice, none skipped)."""
+        with self._cb_lock:
+            if listener is not None:
+                for block in list(self._q.queue):
+                    try:
+                        listener(block.reshape(-1))
+                    except Exception:
+                        pass
+            self.on_block = listener
+
+    def resume(self, keep_s: float = 0.0) -> bool:
+        """Start the take on the stream a cancelled take left running
+        (cancel(linger_s)): no PortAudio open at all. Keeps up to `keep_s`
+        of its newest audio (the key-down came that long ago). False if no
+        stream lingers (it closed): call start()."""
+        with self._lock:
+            if self._recording:
+                return False
+            return self._adopt_parked(keep_s)
+
     def start(self) -> None:
         """Open the mic. PortAudio lists devices once, at import: after
         AirPods or a USB mic come or go, the default / named device it
         remembers can be gone and the open fails (or opens a dead input).
         On a failure, rescan the devices and try again, then fall back to
-        the system default. Raises only if no input will open at all."""
+        the system default. Raises only if no input will open at all.
+        A stream still lingering from a cancelled take is reused."""
         with self._lock:
             if self._recording:
+                return
+            if self._adopt_parked(0.0):
                 return
             # PortAudio isn't safe to open a stream while another closes.
             closer = self._closer
@@ -132,8 +176,10 @@ class Recorder:
                 self._tail = threading.Event()
                 self._q = queue.Queue()
 
-            def callback(indata, frames, time, status, _take=take):
-                self._callback(indata, frames, time, status, take=_take)
+            cell = [take]
+
+            def callback(indata, frames, time, status, _cell=cell):
+                self._callback(indata, frames, time, status, take=_cell[0])
 
             try:
                 stream = self._open(device, callback)
@@ -149,7 +195,85 @@ class Recorder:
                           flush=True)
                     stream = self._open(None, callback)
             self._stream = stream
+            self._cell = cell
             self._recording = True
+
+    def _adopt_parked(self, keep_s: float) -> bool:
+        """Under _lock: hand a lingering stream to a new take."""
+        parked, self._parked = self._parked, None
+        if parked is None:
+            return False
+        stream, cell, timer = parked
+        timer.cancel()
+        with self._cb_lock:
+            self._take += 1
+            self._stopping = False
+            self._tail = threading.Event()
+            held = list(self._park_buf or ())
+            self._park_buf = None
+            want = int(max(0.0, keep_s) * self.cfg.sample_rate)
+            kept: list[np.ndarray] = []
+            got = 0
+            while held and got < want:
+                kept.insert(0, held.pop())
+                got += len(kept[0])
+            q: queue.Queue[np.ndarray] = queue.Queue()
+            for block in kept:
+                q.put(block)
+            self._q = q
+            cell[0] = self._take
+        self._stream = stream
+        self._cell = cell
+        self._recording = True
+        return True
+
+    def cancel(self, linger_s: float = 0.0) -> None:
+        """Drop the take now: no tail wait, its audio is discarded. With
+        `linger_s`, the stream keeps running that long so a start() right
+        after (the second press of a double-tap) reuses it instead of
+        opening the mic again; then it closes. Never longer than asked:
+        the mic is only open around a dictation."""
+        with self._lock:
+            if not self._recording or self._stream is None:
+                return
+            stream, cell = self._stream, self._cell
+            self._stream = None
+            self._recording = False
+            self._rms = 0.0
+            with self._cb_lock:
+                self._take += 1
+                self._stopping = False
+                self._q = queue.Queue()
+                if linger_s > 0:
+                    self._park_buf = deque(maxlen=PARK_KEEP_BLOCKS)
+                    cell[0] = _PARKED
+            if linger_s > 0:
+                timer = threading.Timer(linger_s, self._expire_parked, args=(stream,))
+                timer.daemon = True
+                self._parked = (stream, cell, timer)
+                timer.start()
+                return
+            self._close_in_background(stream)
+
+    def _expire_parked(self, stream) -> None:
+        with self._lock:
+            if self._parked is None or self._parked[0] is not stream:
+                return                       # adopted by a new take
+            self._parked = None
+            with self._cb_lock:
+                self._park_buf = None
+            self._close_in_background(stream)
+
+    def _close_in_background(self, stream) -> None:
+        """Under _lock: Pa_StopStream + Pa_CloseStream off the caller's thread."""
+        self._closer = threading.Thread(target=self._close_stream, args=(stream,),
+                                        name="mic-close", daemon=True)
+        self._closer.start()
+
+    @property
+    def lingering(self) -> bool:
+        """A cancelled take's stream is still open (cancel(linger_s))."""
+        return self._parked is not None
 
     def stop(self) -> np.ndarray:
         with self._lock:
@@ -168,9 +292,7 @@ class Recorder:
                     self._stopping = False
                     self._take += 1
                 q = self._q
-            self._closer = threading.Thread(target=self._close_stream, args=(stream,),
-                                            name="mic-close", daemon=True)
-            self._closer.start()
+            self._close_in_background(stream)
 
         chunks: list[np.ndarray] = []
         while not q.empty():

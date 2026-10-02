@@ -252,6 +252,13 @@ class StartRecorder:
         was, self.is_recording = self.is_recording, False
         return np.full(4000 if was else 0, 0.05, dtype=np.float32)
 
+    def cancel(self, linger_s=0.0):
+        self.order.append(f"cancel {linger_s:g}")
+        self.is_recording = False
+
+    def attach(self, listener):
+        self.on_block = listener
+
 
 def _daemon(env, monkeypatch, order, error=None):
     d = make_daemon()
@@ -268,7 +275,9 @@ def test_widget_shows_recording_before_the_slow_key_down_work(env, monkeypatch):
     order: list[str] = []
     d = _daemon(env, monkeypatch, order)
     d.on_record_start()
-    assert order == ["widget", "target", "mic"]
+    # The mic opens before the AX read (perf/mic-open): the slow reads no
+    # longer clip the first word.
+    assert order == ["widget", "mic", "target"]
     assert d._flow.state == RECORDING and d.recorder.is_recording
 
 
