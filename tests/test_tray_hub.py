@@ -85,7 +85,7 @@ def test_source_spawn_uses_the_installed_app_for_its_dock_icon(popen, monkeypatc
     app.mkdir()
     monkeypatch.delattr(tray.sys, "frozen", raising=False)
     monkeypatch.setattr(tray, "INSTALLED_APP", app)
-    monkeypatch.delenv("OPENFLOW_HUB_FROM_SOURCE", raising=False)
+    monkeypatch.delenv("OPENFLOW_FROM_SOURCE", raising=False)
     tray._spawn_ui_subprocess("ui.hub", "history")
     assert popen[0]["cmd"] == ["/usr/bin/open", "-n", "-a", str(app), "--args", "hub", "history"]
     assert "__CFBundleIdentifier" not in popen[0]["env"]
@@ -107,7 +107,7 @@ def test_source_spawn_can_be_forced_for_development(popen, monkeypatch, tmp_path
     app.mkdir()
     monkeypatch.delattr(tray.sys, "frozen", raising=False)
     monkeypatch.setattr(tray, "INSTALLED_APP", app)
-    monkeypatch.setenv("OPENFLOW_HUB_FROM_SOURCE", "1")
+    monkeypatch.setenv("OPENFLOW_FROM_SOURCE", "1")
     tray._spawn_ui_subprocess("ui.hub", "home")
     assert popen[0]["cmd"][0] == sys.executable
 

@@ -31,15 +31,32 @@ def _default_log_dir() -> Path:
     return Path.home() / ".openflow"
 
 
+# The installed app. Run from source, OpenFlow still starts this when it
+# exists: a source daemon is a "Python" app in the Dock (quitting it took
+# the menu bar and the widget down) and opens windows as Python too.
+# OPENFLOW_FROM_SOURCE=1 keeps everything on the repo for development.
+INSTALLED_APP = Path("/Applications/OpenFlow.app")
+
+
+def use_installed_app() -> bool:
+    """From source, should OpenFlow hand off to the installed app?"""
+    return (not getattr(sys, "frozen", False)
+            and not os.environ.get("OPENFLOW_FROM_SOURCE")
+            and INSTALLED_APP.is_dir())
+
+
 def program_arguments() -> list[str]:
     """How launchd starts OpenFlow. Frozen: `open -a <the running bundle>`,
     as install_macos.sh does: LaunchServices puts the app in the user's
-    Aqua session (Cocoa refuses to start outside it). Dev: the repo's
-    entry point under the current interpreter."""
+    Aqua session (Cocoa refuses to start outside it). From source: the
+    installed app if there is one, else the repo's entry point under the
+    current interpreter."""
     if getattr(sys, "frozen", False):
         # sys.executable = .../OpenFlow.app/Contents/MacOS/openflow
         bundle = Path(sys.executable).resolve().parents[2]
         return ["/usr/bin/open", "-a", str(bundle)]
+    if use_installed_app():
+        return ["/usr/bin/open", "-a", str(INSTALLED_APP)]
     return [sys.executable, str(_REPO_ROOT / "openflow.py")]
 
 

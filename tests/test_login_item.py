@@ -38,8 +38,30 @@ def test_frozen_launches_the_running_bundle_through_open(monkeypatch):
         "/usr/bin/open", "-a", "/Applications/OpenFlow.app"]
 
 
-def test_dev_launches_the_repo(monkeypatch):
+def test_dev_launches_the_installed_app_when_there_is_one(monkeypatch, tmp_path):
+    # From source the daemon showed in the Dock as "Python"; quitting that
+    # killed the menu bar app and the widget. The installed app is a menu
+    # bar-only app with OpenFlow's name.
+    app = tmp_path / "OpenFlow.app"
+    app.mkdir()
     monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(login_item, "INSTALLED_APP", app)
+    monkeypatch.delenv("OPENFLOW_FROM_SOURCE", raising=False)
+    assert login_item.program_arguments() == ["/usr/bin/open", "-a", str(app)]
+
+
+def test_dev_can_force_the_repo(monkeypatch, tmp_path):
+    app = tmp_path / "OpenFlow.app"
+    app.mkdir()
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(login_item, "INSTALLED_APP", app)
+    monkeypatch.setenv("OPENFLOW_FROM_SOURCE", "1")
+    assert login_item.program_arguments()[0] == sys.executable
+
+
+def test_dev_launches_the_repo(monkeypatch, tmp_path):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(login_item, "INSTALLED_APP", tmp_path / "missing.app")
     args = login_item.program_arguments()
     assert args[0] == sys.executable
     assert args[1].endswith("openflow.py") and Path(args[1]).exists()
@@ -63,8 +85,9 @@ def test_enable_writes_the_install_script_plist(plist, tmp_path):
     assert sorted(p.name for p in plist.parent.iterdir()) == [plist.name]  # no temp left
 
 
-def test_enable_dev_sets_working_directory(plist, monkeypatch):
+def test_enable_dev_sets_working_directory(plist, monkeypatch, tmp_path):
     monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(login_item, "INSTALLED_APP", tmp_path / "missing.app")
     login_item.enable(plist)
     with open(plist, "rb") as f:
         data = plistlib.load(f)

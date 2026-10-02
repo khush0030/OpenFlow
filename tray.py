@@ -191,11 +191,11 @@ _BUNDLE_SUBCOMMAND = {
 }
 # Modules that, from source, run through cli.py rather than as a script.
 _SOURCE_VIA_CLI = {"ui.hub"}
-# From source (the LaunchAgent runs openflow.py) a hub started with
-# sys.executable shows in the Dock as "Python" with Python's icon. When the
-# app is installed, open the hub through it instead so the Dock shows
-# OpenFlow. OPENFLOW_HUB_FROM_SOURCE=1 keeps the source hub for development.
-INSTALLED_APP = Path("/Applications/OpenFlow.app")
+# From source a hub started with sys.executable shows in the Dock as
+# "Python" with Python's icon. When the app is installed, open the hub
+# through it instead (see login_item.INSTALLED_APP; OPENFLOW_FROM_SOURCE=1
+# keeps the source hub for development).
+from login_item import INSTALLED_APP  # noqa: E402
 
 
 def _spawn_ui_subprocess(module: str, *args: str) -> None:
@@ -213,7 +213,7 @@ def _spawn_ui_subprocess(module: str, *args: str) -> None:
         env.pop(_k, None)
     frozen = getattr(sys, "frozen", False)
     use_installed = (not frozen and module in _BUNDLE_SUBCOMMAND
-                     and not os.environ.get("OPENFLOW_HUB_FROM_SOURCE")
+                     and not os.environ.get("OPENFLOW_FROM_SOURCE")
                      and INSTALLED_APP.is_dir())
     if frozen or use_installed:
         # PyInstaller bundle: route through LaunchServices — a directly
