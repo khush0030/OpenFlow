@@ -374,6 +374,7 @@ class Daemon:
         self._paste_watch: PasteWatch | None = None
         self.snippets = Snippets.load()
         self.history = History()
+        self._prune_history()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
         self._chords: HotkeySet | None = None
@@ -413,6 +414,18 @@ class Daemon:
         self.state.language = lang
         self.state.notify()
         print(f"[daemon] lang -> {lang.value}", flush=True)
+
+    def _prune_history(self) -> None:
+        """Retention at start: [history] keep_days and size_cap (also
+        applied on every save). Never fatal."""
+        try:
+            hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
+            n = self.history.prune(keep_days=int(hist_cfg.get("keep_days") or 0),
+                                   cap=int(hist_cfg["size_cap"]))
+            if n:
+                print(f"[daemon] history: pruned {n} old dictations", flush=True)
+        except Exception as e:
+            log_exception("daemon.history", "history prune failed", e)
 
     def shutdown(self) -> None:
         self._stop_evt.set()
@@ -1524,6 +1537,7 @@ class Daemon:
                     app=getattr(target, "name", None) or None,
                     cap=int(hist_cfg["size_cap"]),
                     timings=timings,
+                    keep_days=int(hist_cfg.get("keep_days") or 0),
                 )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
