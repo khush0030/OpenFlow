@@ -39,6 +39,7 @@ class FakeAI:
         self.formats: list[tuple[str, list]] = []
         self.format_result = None
         self.format_error = None
+        self.starts_reply = "none"
 
     def cleanup(self, text, mode="verbatim", **kw):
         self.cleanups.append((text, mode, kw))
@@ -49,6 +50,12 @@ class FakeAI:
         if self.format_error:
             raise self.format_error
         return self.format_result if self.format_result is not None else text
+
+    def paragraph_starts(self, numbered):
+        self.formats.append((numbered, ["paragraphs"]))
+        if self.format_error:
+            raise self.format_error
+        return self.starts_reply
 
 
 class FakeDictionary:
@@ -110,20 +117,21 @@ def test_verbatim_run_on_list_is_local(daemon):
 
 
 def test_verbatim_long_dictation_gets_paragraphs(daemon):
-    split = LONG.replace(" Separately,", "\n\nSeparately,")
-    daemon.ai.format_result = split
-    assert daemon._post_process(LONG) == split
-    assert daemon.ai.formats == [(LONG, ["paragraphs"])]
+    # The model only names where paragraphs start; Python inserts the breaks.
+    daemon.ai.starts_reply = "4"
+    assert daemon._post_process(LONG) == LONG.replace(" Separately,", "\n\nSeparately,")
+    [(numbered, tasks)] = daemon.ai.formats
+    assert tasks == ["paragraphs"]
+    assert numbered.startswith("[1] So the main update") and "[4] Separately," in numbered
 
 
-@pytest.mark.parametrize("bad", [
-    LONG.replace("Separately,", "\n\nSeparately, and also,"),               # added words
-    LONG.replace(" Separately, I wanted", "\n\nI wanted"),                   # dropped one
-    LONG.replace("the client", "our client"),                                # reworded
-    "Here is the text with paragraphs:\n\n" + LONG,                         # preamble
+@pytest.mark.parametrize("reply", [
+    "none",                                   # one topic
+    "Here are the paragraph starts: ",        # chatter, no numbers
+    "1, 0, 99",                               # never before sentence 1, out of range
 ])
-def test_verbatim_model_changing_words_falls_back(daemon, bad):
-    daemon.ai.format_result = bad
+def test_verbatim_paragraph_reply_without_usable_numbers_keeps_one_paragraph(daemon, reply):
+    daemon.ai.starts_reply = reply
     assert daemon._post_process(LONG) == LONG
 
 
@@ -148,19 +156,10 @@ def test_snippets_still_restore_after_formatting(daemon):
 
 def test_snippets_restore_through_the_model_path(daemon):
     daemon.snippets.add("my email", "khush@example.com")
-    text = LONG + " Mail it to my email."
-    daemon.ai.format_result = (LONG.replace(" Separately,", "\n\nSeparately,")
-                               + " Mail it to {{snippet1}}.")
-    out = daemon._post_process(text)
-    assert daemon.ai.formats[0][0].endswith("Mail it to {{snippet1}}.")
-    assert out.endswith("Mail it to khush@example.com.") and "\n\nSeparately," in out
-
-
-def test_snippets_survive_a_lost_placeholder(daemon):
-    daemon.snippets.add("my email", "khush@example.com")
-    daemon.ai.format_result = LONG + " Mail it to me."
+    daemon.ai.starts_reply = "4"
     out = daemon._post_process(LONG + " Mail it to my email.")
-    assert out == LONG + " Mail it to khush@example.com."
+    assert daemon.ai.formats[0][0].endswith("[5] Mail it to {{snippet1}}.")
+    assert out.endswith("Mail it to khush@example.com.") and "\n\nSeparately," in out
 
 
 def test_whole_snippet_trigger_still_wins(daemon):
@@ -267,3 +266,10 @@ def test_toggle_applies_live(daemon):
     daemon._apply_config(new)
     assert daemon.cfg["formatting"]["auto"] is False
     assert daemon._post_process(ASHTON) == ASHTON
+
+
+def test_paragraph_starts_prompt(monkeypatch):
+    from prompts import PARAGRAPH_STARTS
+    ai, calls = _capture(monkeypatch)
+    ai.paragraph_starts("[1] a. [2] b.")
+    assert calls == [(PARAGRAPH_STARTS, "[1] a. [2] b.")]

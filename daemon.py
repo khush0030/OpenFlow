@@ -536,6 +536,8 @@ class Daemon:
         if not local.model_tasks:
             return local.text
         src = local.text
+        if local.model_tasks == ["paragraphs"]:
+            return self._paragraphs_verbatim(src)
         try:
             out = self.ai.format_only(src, local.model_tasks)
         except Exception as e:
@@ -546,6 +548,22 @@ class Daemon:
             return out.strip()
         print("[daemon] formatting changed words — pasting unformatted", flush=True)
         return src
+
+    def _paragraphs_verbatim(self, src: str) -> str:
+        """Paragraph breaks in a long verbatim dictation: the model names the
+        sentences that start a paragraph, Python inserts the breaks
+        (formatting.break_paragraphs), so the words can't change."""
+        numbered, count = formatting.numbered_sentences(src)
+        if count < 2:
+            return src
+        try:
+            reply = self.ai.paragraph_starts(numbered)
+        except Exception as e:
+            log_exception("daemon.pipeline", "formatting call failed — pasting unformatted", e)
+            return src
+        starts = formatting.parse_paragraph_starts(reply, count)
+        print(f"[daemon] formatted (paragraphs at {starts or 'none'})", flush=True)
+        return formatting.break_paragraphs(src, starts)
 
     def _post_process(self, raw: str, tone: ToneMode | None = None,
                       language: LanguageMode | None = None, target=None,
@@ -1429,8 +1447,12 @@ class Daemon:
             t3 = time.monotonic()
             timings["paste"] = t3 - t2
             timings["total"] = t3 - start
+            # Log only (not a history column): key-up handling between the
+            # recorder stopping and this worker starting on the transcript.
+            handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
+                       if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
-                f"{k}={v:.2f}s" for k, v in timings.items()), flush=True)
+                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff, flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
             if hist_cfg["enabled"]:
                 self.history.add(

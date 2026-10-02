@@ -9,10 +9,10 @@ is deterministic and free:
 - spoken numbered and bulleted lists are laid out (lists.py).
 
 Only paragraph breaks in a long dictation want a model (where the topic
-changes is a judgement call). Verbatim makes that call with a "formatting
-only" prompt and keeps the result only if same_words() agrees no word was
-added, dropped or changed (beyond spoken list cues); otherwise it pastes
-the deterministic result. (Lists used to go to the model when the last
+changes is a judgement call). Verbatim asks the model only for the numbers
+of the sentences that start a paragraph and inserts the breaks itself
+(break_paragraphs), so no word can change; a failed call pastes the
+deterministic result. (Lists used to go to the model when the last
 item ran on into more sentences; the live model kept inventing lead-ins,
 so lists.py now decides that itself.) The cleanup tones
 already make a model call, so they get prompt notes instead (notes()).
@@ -248,3 +248,51 @@ def removable_spans(text: str) -> list[tuple[int, int]]:
     """Spans a model may drop from `text`: its spoken list cues."""
     found = lists.find(text)
     return list(found.removable) if found else []
+
+
+# -- Paragraph breaks by sentence number ------------------------------------------
+# Verbatim's paragraph call asks the model only *where* paragraphs start, by
+# sentence number, and Python inserts the breaks: the reply is a few tokens
+# instead of the whole dictation again (measured ~2.1 s -> ~0.2 s on a
+# 150-word take with sarvam-105b), and no word can change.
+
+# The spaces after a sentence end: . ! ? optionally closed by a quote/bracket.
+_SENTENCE_GAP = re.compile(r"(?:(?<=[.!?])|(?<=[.!?][\"'”’)\]]))[ \t]+(?=\S)")
+
+
+def _sentence_parts(text: str) -> tuple[list[str], list[str]]:
+    """(sentences, gaps) with text == s1 + g1 + s2 + g2 + ... + s_last."""
+    sentences: list[str] = []
+    gaps: list[str] = []
+    pos = 0
+    for m in _SENTENCE_GAP.finditer(text):
+        sentences.append(text[pos:m.start()])
+        gaps.append(m.group())
+        pos = m.end()
+    sentences.append(text[pos:])
+    return sentences, gaps
+
+
+def numbered_sentences(text: str) -> tuple[str, int]:
+    """`text` with each sentence prefixed "[n] " (1-based), and the count."""
+    sentences, _ = _sentence_parts(text)
+    return " ".join(f"[{i}] {s}" for i, s in enumerate(sentences, 1)), len(sentences)
+
+
+def parse_paragraph_starts(reply: str, count: int) -> list[int]:
+    """Sentence numbers in 2..count from a reply like "4, 9". Anything else
+    is ignored, so "none" (or chatter without numbers) means no breaks."""
+    nums = {int(n) for n in re.findall(r"\d+", reply or "")}
+    return sorted(n for n in nums if 2 <= n <= count)
+
+
+def break_paragraphs(text: str, starts: list[int]) -> str:
+    """Start a new paragraph (blank line) at each 1-based sentence number in
+    `starts`. Only the spaces between sentences change, never a word."""
+    sentences, gaps = _sentence_parts(text)
+    want = set(starts)
+    out = [sentences[0]]
+    for i, (gap, sentence) in enumerate(zip(gaps, sentences[1:]), 2):
+        out.append("\n\n" if i in want else gap)
+        out.append(sentence)
+    return "".join(out)
