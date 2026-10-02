@@ -14,6 +14,7 @@ shell exports for other tools never silently starts receiving dictations:
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, Protocol
 
@@ -204,3 +205,146 @@ def make_cleanup_provider(cfg: dict[str, Any], *, find_key=find_api_key) -> Chat
     if choice != "auto":
         print(f"[llm] no {choice} API key found — cleanup uses Sarvam", flush=True)
     return sarvam
+
+
+# -- Failover (spec 2026-10-02-provider-failover) -------------------------------
+
+# Seconds a provider gets before the next one is tried: base + per 1000
+# characters of input (longer dictations take longer to rewrite). From
+# history: healthy sarvam-105b cleanup p99 1.3 s, max 2.3 s on a 1017-character
+# paragraph call; Groq / Haiku answer in a few hundred ms.
+CLEANUP_BUDGET_S: dict[str, tuple[float, float]] = {
+    "sarvam": (4.0, 2.0),
+    "groq": (2.5, 1.0),
+    "anthropic": (3.0, 1.0),
+}
+CLEANUP_BUDGET_MAX_S = 20.0
+FALLBACK_ORDER = ("groq", "anthropic", "sarvam")
+
+# Which provider answered the LLM calls of one dictation, per thread: the
+# daemon starts a trace before cleanup and reads it for the history row.
+_trace = threading.local()
+
+
+def trace_start() -> None:
+    _trace.names = []
+
+
+def trace_note(name: str) -> None:
+    names = getattr(_trace, "names", None)
+    if names is not None:
+        names.append(name)
+
+
+def trace_result() -> str:
+    """'skipped' (no LLM call), 'none' (a call no provider answered: the
+    text went out uncleaned), else the provider that answered last."""
+    names = getattr(_trace, "names", None) or []
+    _trace.names = None
+    if not names:
+        return "skipped"
+    if "none" in names:
+        return "none"
+    return names[-1]
+
+
+def budget_s(name: str, user: str) -> float:
+    base, per_k = CLEANUP_BUDGET_S.get(name, CLEANUP_BUDGET_S["sarvam"])
+    return min(CLEANUP_BUDGET_MAX_S, base + per_k * len(user or "") / 1000.0)
+
+
+def failover_enabled(cfg: dict[str, Any] | None) -> bool:
+    from config import DEFAULTS
+    f = {**DEFAULTS["failover"], **((cfg or {}).get("failover") or {})}
+    return str(f.get("cleanup", "auto")).strip().lower() not in ("off", "false", "no", "0")
+
+
+def fallback_providers(cfg: dict[str, Any], exclude: str, *,
+                       find_key=find_api_key) -> list[ChatProvider]:
+    """Every other provider with a key, in FALLBACK_ORDER."""
+    from config import DEFAULTS
+    c = {**DEFAULTS["cleanup"], **(cfg.get("cleanup") or {})}
+    s = {**DEFAULTS["sarvam"], **(cfg.get("sarvam") or {})}
+    out: list[ChatProvider] = []
+    for name in FALLBACK_ORDER:
+        if name == exclude:
+            continue
+        if name == "sarvam":
+            if find_key(s["api_key_env"], "sarvam_api_key"):
+                out.append(SarvamChat(model=s["chat_model"], api_key_env=s["api_key_env"]))
+            continue
+        spec = FAST_PROVIDERS[name]
+        key = find_key(c.get(f"{name}_api_key_env") or spec["env"], spec["keyring_user"])
+        if key:
+            out.append(_fast(name, str(c[spec["model_key"]]), key))
+    return out
+
+
+def _deadline_call(fn, limit: float, name: str):
+    from failover import call_with_deadline
+    return call_with_deadline(fn, limit, name=f"llm-{name}")
+
+
+class FailoverChat:
+    """The chosen provider with a time budget, then each other provider
+    with a key, each with its own budget. Raises LLMError when none
+    answered; callers then paste the transcript uncleaned. The fallbacks
+    are looked up (Keychain) only when the chosen provider fails."""
+    traces = True     # notes the answering provider itself (trace_note)
+
+    def __init__(self, primary: ChatProvider, cfg: dict[str, Any] | None = None, *,
+                 find_key=find_api_key, budget=budget_s, call=_deadline_call) -> None:
+        self.primary = primary
+        self._cfg = cfg if cfg is not None else {}
+        self._find_key = find_key
+        self._budget = budget
+        self._call = call
+
+    @property
+    def name(self) -> str:
+        return self.primary.name
+
+    @property
+    def model(self) -> str:
+        return self.primary.model
+
+    @property
+    def url(self) -> str | None:
+        return getattr(self.primary, "url", None)
+
+    def _chain(self):
+        yield self.primary
+        if not failover_enabled(self._cfg):
+            return
+        try:
+            yield from fallback_providers(self._cfg, self.primary.name,
+                                          find_key=self._find_key)
+        except Exception as e:
+            print(f"[llm] fallback lookup failed: {e}", flush=True)
+
+    def complete(self, system: str, user: str, *, max_tokens: int) -> str:
+        errors: list[str] = []
+        for p in self._chain():
+            limit = self._budget(p.name, user)
+            try:
+                out = self._call(lambda p=p: p.complete(system, user, max_tokens=max_tokens),
+                                 limit, p.name)
+            except Exception as e:
+                errors.append(f"{p.name}: {e}")
+                print(f"[llm] {p.name} failed (budget {limit:.1f}s; {str(e)[:120]}) "
+                      "— trying the next provider", flush=True)
+                continue
+            if errors:
+                print(f"[llm] answered by {p.name} (fallback)", flush=True)
+            trace_note(p.name)
+            return out
+        trace_note("none")
+        raise LLMError("no cleanup provider answered: " + "; ".join(errors))
+
+
+def with_failover(primary: ChatProvider, cfg: dict[str, Any] | None = None, *,
+                  find_key=find_api_key) -> ChatProvider:
+    """`primary` (make_cleanup_provider) wrapped in the failover chain."""
+    if isinstance(primary, FailoverChat):
+        return primary
+    return FailoverChat(primary, cfg, find_key=find_key)

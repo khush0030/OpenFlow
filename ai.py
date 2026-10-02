@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from llm import ChatProvider, SarvamChat
+from llm import ChatProvider, SarvamChat, trace_note
 from prompts import (FORMAT_ONLY, FORMAT_TASKS, PARAGRAPH_STARTS, PROMPTS, SELF_CORRECTION,
                      SELF_CORRECTION_TONES, SNIPPET_MARK, SNIPPET_NOTE, context_note)
 
@@ -27,8 +27,16 @@ class AIProcessor:
         self.provider: ChatProvider = provider or self.sarvam
 
     def _call(self, system: str, user: str, provider: ChatProvider | None = None) -> str:
-        return (provider or self.sarvam).complete(
-            system, user, max_tokens=self.cfg.max_tokens)
+        p = provider or self.sarvam
+        if getattr(p, "traces", False):     # llm.FailoverChat notes who answered
+            return p.complete(system, user, max_tokens=self.cfg.max_tokens)
+        try:
+            out = p.complete(system, user, max_tokens=self.cfg.max_tokens)
+        except Exception:
+            trace_note("none")
+            raise
+        trace_note(getattr(p, "name", "?"))
+        return out
 
     def cleanup(
         self,
