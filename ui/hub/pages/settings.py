@@ -7,9 +7,11 @@ never to config.toml.
 """
 from __future__ import annotations
 
+import html
 import importlib
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 import config as cfg_mod
+import data_controls
 from openflow_logger import log_exception
 from ui.hub import style as S
 from ui.hub import workers
@@ -50,6 +53,9 @@ STATUS_SAVED = "Saved"
 PRESS_KEYS = "Press new keys…"
 NOT_RUNNING = "OpenFlow isn't running. Start it to hear the cues."
 NO_KEY = "No key yet. Paste one above to start dictating."
+
+# Settings › Privacy › Keep history for: ([history] keep_days, 0 = forever)
+KEEP_CHOICES = (("0", "Forever"), ("90", "90 days"), ("30", "30 days"), ("7", "7 days"))
 
 NAV_SIDE_MIN = 860      # page width below which the sub-nav becomes a top tab row
 NAV_SIDE_W = 168
@@ -159,6 +165,20 @@ def check_sarvam_key(key: str, model: str) -> None:
 
 def run_open(args: list[str]) -> None:
     subprocess.run(args, check=False)
+
+
+def ask_save_path(parent, start: Path) -> tuple[str, str]:
+    """Save dialog for Export history: (path, "json" | "csv"), or ("", "")
+    when cancelled. The format follows the chosen filter / extension."""
+    from PyQt6.QtWidgets import QFileDialog
+    path, chosen = QFileDialog.getSaveFileName(
+        parent, "Export history", str(start), "JSON (*.json);;CSV (*.csv)")
+    if not path:
+        return "", ""
+    fmt = "csv" if path.lower().endswith(".csv") or chosen.startswith("CSV") else "json"
+    if not path.lower().endswith("." + fmt):
+        path += "." + fmt
+    return path, fmt
 
 
 # ── page ─────────────────────────────────────────────────────────────────
@@ -420,6 +440,8 @@ class SettingsPage(Page):
         self.history_size.blockSignals(True)
         self.history_size.setValue(self._history_cap())
         self.history_size.blockSignals(False)
+        if self._keep_pending is None:
+            self.keep.set_value(self._keep_value())
         self._show_shortcuts()
         self._key_placeholder(force=True)
 
@@ -756,6 +778,50 @@ class SettingsPage(Page):
         except (TypeError, ValueError):
             return 500
 
+    def _keep_days(self) -> int:
+        try:
+            return max(0, int(self._get("history", "keep_days", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _keep_value(self) -> str:
+        v = str(self._keep_days())
+        return v if v in dict(KEEP_CHOICES) else "0"
+
+    @staticmethod
+    def _note_label() -> QLabel:
+        n = QLabel("")
+        n.setFont(S.sans(S.T_SMALL))
+        n.setWordWrap(True)
+        n.setMinimumWidth(1)
+        n.hide()
+        return n
+
+    def _note(self, label: QLabel, text: str, ok: bool = True) -> None:
+        label.setText(text)
+        label.setStyleSheet(f"color:{S.SAGE_TEXT if ok else S.DANGER};")
+        label.show()
+
+    def _confirm_box(self, question: QLabel, yes: QPushButton, no: QPushButton) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 8, 0, 0)
+        lay.setSpacing(10)
+        question.setFont(S.sans(S.T_UI))
+        question.setWordWrap(True)
+        question.setMinimumWidth(1)
+        question.setTextFormat(Qt.TextFormat.RichText)
+        question.setStyleSheet(f"color:{S.INK};")
+        lay.addWidget(question)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(yes)
+        row.addWidget(no)
+        row.addStretch(1)
+        lay.addLayout(row)
+        box.hide()
+        return box
+
     def _build_privacy(self, lay: QVBoxLayout) -> None:
         self.history_toggle = C.Toggle(bool(self._get("history", "enabled", True)))
         self.history_toggle.toggled.connect(
@@ -774,6 +840,23 @@ class SettingsPage(Page):
                                         f"QSpinBox:focus{{border-color:{S.ACCENT};}}")
         self.history_size.valueChanged.connect(
             lambda v: self._safe(self._save, "history", "size_cap", int(v)))
+
+        # Retention: choosing a shorter period that would remove saved
+        # dictations asks first, then prunes right away.
+        self.keep = C.Segmented(KEEP_CHOICES, self._keep_value())
+        self.keep.changed.connect(lambda v: self._safe(self._on_keep, v))
+        self.keep_question = QLabel()
+        self.keep_yes = S.button("Remove them", kind="accent")
+        self.keep_cancel = S.button("Cancel")
+        self.keep_confirm = self._confirm_box(self.keep_question, self.keep_yes, self.keep_cancel)
+        self.keep_yes.clicked.connect(lambda: self._safe(self._confirm_keep))
+        self.keep_cancel.clicked.connect(lambda: self._safe(self._cancel_keep))
+        self._keep_pending: int | None = None
+        keep_row = C.Row("Keep history for", "Older dictations are removed, checked each "
+                         "time you dictate and when OpenFlow starts", self.keep, below=True)
+        keep_row.text_col.addWidget(self.keep_confirm)
+        self.keep_note = self._note_label()
+        keep_row.text_col.addWidget(self.keep_note)
 
         self.clear_btn = S.button("Clear history…", kind="danger")
         self.clear_btn.clicked.connect(self._ask_clear)
@@ -804,10 +887,37 @@ class SettingsPage(Page):
         lay.addWidget(C.Group("History", [
             C.Row("Keep history", "Save dictations on this Mac so you can find them again",
                   self.history_toggle),
+            keep_row,
             C.Row("History size", "Oldest dictations are removed past this many",
                   self.history_size),
             clear_row,
         ]))
+
+        # Your data: export, delete everything.
+        self.export_btn = S.button("Export history…")
+        self.export_btn.clicked.connect(lambda: self._safe(self._export))
+        export_row = C.Row("Export history", "Every dictation as JSON or CSV: what you said, "
+                           "what was pasted, tone, language, app, timings and time.",
+                           self.export_btn)
+        self.export_note = self._note_label()
+        export_row.text_col.addWidget(self.export_note)
+
+        self.wipe_btn = S.button("Delete everything…", kind="danger")
+        self.wipe_btn.clicked.connect(lambda: self._safe(self._ask_delete_all))
+        self.wipe_question = QLabel()
+        self.wipe_yes = S.button("Delete everything", kind="accent")
+        self.wipe_cancel = S.button("Cancel")
+        self.wipe_confirm = self._confirm_box(self.wipe_question, self.wipe_yes, self.wipe_cancel)
+        self.wipe_yes.clicked.connect(lambda: self._safe(self._delete_all))
+        self.wipe_cancel.clicked.connect(lambda: self._safe(self._cancel_delete_all))
+        wipe_row = C.Row("Delete everything", "History, your voice profile, saved recordings, "
+                         "learned-word suggestions and logs. " + data_controls.KEEPS,
+                         self.wipe_btn)
+        wipe_row.text_col.addWidget(self.wipe_confirm)
+        self.wipe_note = self._note_label()
+        wipe_row.text_col.addWidget(self.wipe_note)
+        self.wipe_items: list[data_controls.Item] = []
+        lay.addWidget(C.Group("Your data", [export_row, wipe_row]))
 
         self.reveal_btn = S.button("Show config in Finder")
         self.reveal_btn.clicked.connect(
@@ -815,6 +925,91 @@ class SettingsPage(Page):
         lay.addWidget(C.Group("Files", [
             C.Row("Config file", _home_short(str(cfg_mod.CONFIG_PATH)), self.reveal_btn),
         ]))
+
+    # retention
+    def _history(self):
+        from history import History
+        return History(self.ctx.history_path)
+
+    def _on_keep(self, value: str) -> None:
+        days = int(value)
+        self.keep_note.hide()
+        n = self._history().count_older_than(days) if days and self.ctx.history_path.exists() else 0
+        if n:
+            self._keep_pending = days
+            self.keep_question.setText(
+                f"Remove <b>{_charts.plural(n, 'dictation')}</b> older than {days} days now? "
+                "This can't be undone.")
+            self.keep_confirm.show()
+            return
+        self._apply_keep(days, 0)
+
+    def _apply_keep(self, days: int, expect: int) -> None:
+        self._keep_pending = None
+        self.keep_confirm.hide()
+        if not self._save("history", "keep_days", days):
+            self.keep.set_value(self._keep_value())
+            return
+        removed = self._history().prune(keep_days=days) if days and expect else 0
+        if removed:
+            self._note(self.keep_note, f"Removed {_charts.plural(removed, 'dictation')}.")
+
+    def _confirm_keep(self) -> None:
+        if self._keep_pending is not None:
+            self._apply_keep(self._keep_pending, 1)
+
+    def _cancel_keep(self) -> None:
+        self._keep_pending = None
+        self.keep_confirm.hide()
+        self.keep.set_value(self._keep_value())     # back to what's saved
+
+    # export
+    def _export(self) -> None:
+        from history import export
+        stamp = datetime.now().strftime("%Y-%m-%d")
+        start = Path.home() / "Downloads" / f"openflow-history-{stamp}.json"
+        path, fmt = ask_save_path(self, start)
+        if not path:
+            return
+        try:
+            n = export(self.ctx.history_path, Path(path), fmt)
+        except Exception as e:
+            log_exception("hub.settings", "export failed", e)
+            self._note(self.export_note, f"Couldn't export: {e}", ok=False)
+            return
+        self._note(self.export_note,
+                   f"Exported {_charts.plural(n, 'dictation')} to {_home_short(str(path))}.")
+
+    # delete everything
+    def data_paths(self) -> data_controls.Paths:
+        return data_controls.Paths.default(history=self.ctx.history_path)
+
+    def _ask_delete_all(self) -> None:
+        self.wipe_note.hide()
+        self.wipe_items = data_controls.inventory(self.data_paths())
+        if not self.wipe_items:
+            self._note(self.wipe_note, "Nothing to delete: OpenFlow has no saved data yet.")
+            return
+        items = "".join(f"<li>{html.escape(i.label)}</li>" for i in self.wipe_items)
+        self.wipe_question.setText(
+            f"This deletes, from this Mac:<ul style='margin:4px 0 4px -22px;'>{items}</ul>"
+            f"{html.escape(data_controls.KEEPS)} <b>This can't be undone.</b>")
+        self.wipe_btn.hide()
+        self.wipe_confirm.show()
+
+    def _cancel_delete_all(self) -> None:
+        self.wipe_confirm.hide()
+        self.wipe_btn.show()
+
+    def _delete_all(self) -> None:
+        self._cancel_delete_all()
+        errors = data_controls.delete_everything(self.data_paths())
+        self.wipe_items = []
+        if errors:
+            self._note(self.wipe_note, "Some things couldn't be deleted: " + "; ".join(errors),
+                       ok=False)
+        else:
+            self._note(self.wipe_note, "Deleted. Your settings, dictionary and key are untouched.")
 
     def _ask_clear(self) -> None:
         self.clear_note.hide()

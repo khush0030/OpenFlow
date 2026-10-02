@@ -118,8 +118,9 @@ def test_takes_symlink_is_not_followed(home, tmp_path):
 def test_default_paths_point_into_config_dir(monkeypatch, tmp_path):
     import config as cfg_mod
     monkeypatch.setattr(cfg_mod, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(cfg_mod, "SUGGESTIONS_PATH", tmp_path / "dictionary_suggestions.json")
     p = D.Paths.default()
+    assert p.suggestions == tmp_path / "dictionary_suggestions.json"
+    assert p.log_dir == tmp_path
     assert p.history == tmp_path / "history.sqlite"
     assert p.takes_dir == tmp_path / "takes"
     assert p.voice_profile == tmp_path / "voice_profile.json"

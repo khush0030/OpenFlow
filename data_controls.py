@@ -41,7 +41,9 @@ class Paths:
         return cls(history=Path(history) if history else d / "history.sqlite",
                    voice_profile=d / "voice_profile.json",
                    takes_dir=d / "takes",
-                   suggestions=cfg_mod.SUGGESTIONS_PATH,
+                   # By name under CONFIG_DIR, so a test that moves CONFIG_DIR
+                   # can never reach the real suggestions file.
+                   suggestions=d / cfg_mod.SUGGESTIONS_PATH.name,
                    log_dir=d)
 
 
