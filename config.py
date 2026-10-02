@@ -122,6 +122,9 @@ DEFAULTS: dict[str, Any] = {
         # pruned (the Settings spin box offers 50–5000).
         "enabled": True,
         "size_cap": 500,
+        # Days to keep dictations (0 = forever); older rows are pruned on
+        # every save and at daemon start (Settings › Privacy offers 90/30/7).
+        "keep_days": 0,
     },
     "apps": {
         # Tell cleanup which app the text is for (prompts.CONTEXT_HINTS):

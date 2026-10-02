@@ -260,19 +260,25 @@ class SplitBar(QWidget):
 class LineChart(QWidget):
     """A weekly series: red line and dots over faint gridlines, the last
     value labelled, x labels under the first, middle and last points.
-    Points are evenly spaced (they are the weeks that have data)."""
+    Points are evenly spaced (they are the weeks that have data). An
+    optional secondary series (same x labels) is drawn as a thin soft-red
+    dashed line with its last value labelled in muted text."""
 
     def __init__(self, height: int = 150, fmt=lambda v: f"{v:.0f}",
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.points: list[tuple[str, float]] = []
+        self.secondary: list[float] = []
         self.fmt = fmt
         self.setFixedHeight(height)
         self.setMinimumWidth(120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def set_points(self, points: Sequence[tuple[str, float]]) -> None:
+    def set_points(self, points: Sequence[tuple[str, float]],
+                   secondary: Sequence[float] | None = None) -> None:
         self.points = list(points)
+        sec = list(secondary or [])
+        self.secondary = sec if len(sec) == len(self.points) else []
         self.update()
 
     def paintEvent(self, _e) -> None:
@@ -286,10 +292,10 @@ class LineChart(QWidget):
         top, left, right = 22.0, 8.0, 8.0
         bottom = self.height() - label_h
         vals = [v for _l, v in self.points]
-        lo, hi = min(vals), max(vals)
+        lo, hi = min(vals + self.secondary), max(vals + self.secondary)
         span = hi - lo or max(1.0, abs(hi) * 0.2)
         lo, hi = lo - span * 0.25, hi + span * 0.25
-        if min(vals) >= 0:
+        if min(vals + self.secondary) >= 0:
             lo = max(0.0, lo)
         w = self.width() - left - right
         n = len(self.points)
@@ -303,6 +309,28 @@ class LineChart(QWidget):
             y = top + (bottom - top) * j / 2
             p.drawLine(QPointF(0, y), QPointF(self.width(), y))
         pts = [xy(i, v) for i, (_l, v) in enumerate(self.points)]
+        if self.secondary:
+            sp = [xy(i, v) for i, v in enumerate(self.secondary)]
+            spath = QPainterPath(sp[0])
+            for q in sp[1:]:
+                spath.lineTo(q)
+            p.setPen(QPen(QColor(SOFT), 1.6, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap,
+                          Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(spath)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(SOFT))
+            for q in sp:
+                p.drawEllipse(q, 2.2, 2.2)
+            p.setFont(S.sans(11.5))
+            st = self.fmt(self.secondary[-1])
+            sw = QFontMetricsF(p.font()).horizontalAdvance(st)
+            q = sp[-1]
+            box = QRectF(min(max(0.0, q.x() - sw / 2 - 3), self.width() - sw - 6), q.y() - 22,
+                         sw + 6, 16)
+            p.fillRect(box, QColor(S.CARD))      # keep the label off the dashed line
+            p.setPen(QColor(S.MUTED))
+            p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), st)
         path = QPainterPath(pts[0])
         for q in pts[1:]:
             path.lineTo(q)
@@ -387,4 +415,61 @@ class HourBars(QWidget):
             x = h * slot + (slot - bw) / 2
             p.drawText(QRectF(x, bottom + 8, 40, label_h - 8),
                        int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), lab)
+        p.end()
+
+
+# ── stacked bar (where the time goes) ───────────────────────────────────
+STACK_COLORS = ("#A82A1A", S.ACCENT, "#F09484", "#F8C4BA", "#C9BFAF", "#E2DACD")
+
+
+class StackBar(QWidget):
+    """One rounded bar split into segments (shares 0–1, in order), each a
+    shade of the accent, ending in neutrals. Labels live in the legend
+    rows beside it, so nothing is drawn on the segments."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.shares: list[float] = []
+        self.setFixedHeight(18)
+        self.setMinimumWidth(60)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_shares(self, shares: Sequence[float]) -> None:
+        self.shares = [max(0.0, float(x)) for x in shares]
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect())
+        clip = QPainterPath()
+        clip.addRoundedRect(r, 6, 6)
+        p.setClipPath(clip)
+        p.fillRect(r, QColor(TRACK))
+        total = sum(self.shares) or 1.0
+        x = 0.0
+        for i, share in enumerate(self.shares):
+            w = r.width() * share / total
+            if w > 0:
+                p.fillRect(QRectF(x, 0, w, r.height()), QColor(STACK_COLORS[i % len(STACK_COLORS)]))
+                if x > 0:   # hairline gap between segments
+                    p.fillRect(QRectF(x, 0, 1.5, r.height()), QColor(S.CARD))
+            x += w
+        p.end()
+
+
+class Swatch(QWidget):
+    """Small rounded colour square for a legend row."""
+
+    def __init__(self, color: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.color = color
+        self.setFixedSize(10, 10)
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(self.color))
+        p.drawRoundedRect(QRectF(self.rect()), 3, 3)
         p.end()
