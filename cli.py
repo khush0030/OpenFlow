@@ -20,12 +20,50 @@ import argparse
 import os
 import sys
 
-from config import CONFIG_PATH, DICT_PATH, HISTORY_PATH
+from config import CONFIG_DIR, CONFIG_PATH, DICT_PATH, HISTORY_PATH
+
+# Held for the daemon's whole life. The LaunchAgent runs the daemon from
+# source while the Dock / Finder launch OpenFlow.app; without this a Dock
+# click started a second daemon (second menu bar icon, second set of hotkey
+# listeners) whose sockets all failed with "already running".
+DAEMON_LOCK = CONFIG_DIR / "daemon.lock"
+
+
+def acquire_daemon_lock(path) -> int | None:
+    """Exclusive non-blocking flock on `path`; the fd, or None when another
+    process holds it. The OS drops the lock if the process dies."""
+    import errno
+    import fcntl
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+            return None
+        raise
+    return fd
+
+
+def release_daemon_lock(fd: int) -> None:
+    os.close(fd)  # closing drops the flock
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    from daemon import main
-    main()
+    fd = acquire_daemon_lock(DAEMON_LOCK)
+    if fd is None:
+        # A daemon is already running: this launch is the user opening the
+        # app (Dock, Finder, Spotlight), so show the main window instead.
+        print("[cli] OpenFlow is already running; opening the main window.", flush=True)
+        return _open_hub("home")
+    try:
+        from daemon import main
+        main()
+    finally:
+        release_daemon_lock(fd)
     return 0
 
 
