@@ -109,10 +109,13 @@ class HoldOrToggle:
     DOUBLE_TAP_GAP_MS = 600    # second tap must press within this window
 
     def __init__(self, key: HoldKey, on_press: Callable[[], None], on_release: Callable[[], None],
-                 is_active: Callable[[], bool] | None = None) -> None:
+                 is_active: Callable[[], bool] | None = None,
+                 on_cancel: Callable[[], None] | None = None) -> None:
         self.key = self._parse(key)
         self.on_press_cb = on_press
         self.on_release_cb = on_release
+        # A tap is not a dictation: drop its take (None: on_release, as before).
+        self.on_cancel_cb = on_cancel
         # Is a recording live? Something else (widget ✓/✕, Esc) may have
         # stopped a toggle session; the next press is then a fresh hold.
         self.is_active = is_active
@@ -233,13 +236,14 @@ class HoldOrToggle:
             return
 
         if self._mode == "hold":
+            duration = now - self._press_ms
+            tap = duration < self.SHORT_TAP_MS
             try:
-                self.on_release_cb()
+                (self.on_cancel_cb if tap and self.on_cancel_cb else self.on_release_cb)()
             except Exception as e:
                 print(f"[hotkey] release handler error: {e}", flush=True)
-            duration = now - self._press_ms
             self._mode = "idle"
-            if duration < self.SHORT_TAP_MS:
+            if tap:
                 # Short press — remember it as the first tap of a possible double-tap.
                 print(f"[hotkey] release: tap (held {duration:.0f}ms) -> arming double-tap window", flush=True)
                 self._last_tap_release_ms = now

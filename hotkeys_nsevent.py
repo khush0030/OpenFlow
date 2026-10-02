@@ -117,6 +117,36 @@ _VK_TO_FLAG = {
 }
 
 
+# Device-dependent modifier bits (IOKit NX_DEVICE*KEYMASK): which SIDE of a
+# modifier is down. The generic _FLAG_OPTION stays set while either Option
+# is held, so with right Option down, letting go of left Option looked like
+# no change: the release was missed and the key stuck "down", swallowing
+# the next press.
+_VK_TO_SIDE_BIT = {
+    _VK["ctrl_l"]:  0x0001,
+    _VK["shift_l"]: 0x0002,
+    _VK["shift_r"]: 0x0004,
+    _VK["cmd_l"]:   0x0008,
+    _VK["cmd_r"]:   0x0010,
+    _VK["alt_l"]:   0x0020,
+    _VK["alt_r"]:   0x0040,
+    _VK["ctrl_r"]:  0x2000,
+}
+_SIDE_BITS = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040 | 0x2000
+
+
+def _event_ms(ev) -> Optional[float]:
+    """When the key actually moved (ms since boot), not when we got to it.
+    The monitor runs on the main thread, behind the key-down's own work
+    (mic open, AX reads: ~0.3 s cold), so handler time made taps look like
+    holds and broke double-taps."""
+    try:
+        ts = float(ev.timestamp())
+    except Exception:
+        return None
+    return ts * 1000.0 if ts > 0 else None
+
+
 def accessibility_trusted() -> Optional[bool]:
     try:
         from HIServices import AXIsProcessTrusted
@@ -137,14 +167,22 @@ class HoldOrToggle:
     # 350 ms limit; 450 leaves room without catching short holds.
     SHORT_TAP_MS = 450
     DOUBLE_TAP_GAP_MS = 600
+    # Another key pressed this soon into a hold means the hold key is being
+    # used as a modifier (⌥← in an editor), not to dictate: drop the take.
+    CHORD_CANCEL_MS = 1500
 
     def __init__(self, key: str, on_press: Callable[[], None], on_release: Callable[[], None],
-                 is_active: Optional[Callable[[], bool]] = None) -> None:
+                 is_active: Optional[Callable[[], bool]] = None,
+                 on_cancel: Optional[Callable[[], None]] = None) -> None:
         self.key_name = key
         self.target_vk = _parse_keycode(key)
         self.target_flag = _VK_TO_FLAG.get(self.target_vk)
+        self.target_side_bit = _VK_TO_SIDE_BIT.get(self.target_vk)
         self.on_press_cb = on_press
         self.on_release_cb = on_release
+        # A press that was not a dictation (a tap, or a chord): drop the take
+        # without transcribing it. None: on_release handles it, as before.
+        self.on_cancel_cb = on_cancel
         # Is a recording live? Something else (widget ✓/✕, Esc) may have
         # stopped a toggle session; the next press is then a fresh hold.
         self.is_active = is_active
@@ -170,11 +208,11 @@ class HoldOrToggle:
         """True while the key is held down in an ordinary hold (not hands-free)."""
         return self._mode == "hold" and self._down
 
-    def _on_press(self) -> None:
+    def _on_press(self, at_ms: Optional[float] = None) -> None:
         if self._down:
             return
         self._down = True
-        now = self._now_ms()
+        now = self._now_ms() if at_ms is None else at_ms
         if self._mode == "toggle" and self.is_active is not None and not self.is_active():
             print("[hotkey] press: toggle session already stopped elsewhere", flush=True)
             self._mode = "idle"
@@ -204,13 +242,18 @@ class HoldOrToggle:
         except Exception as e:
             print(f"[hotkey] press handler error: {e}", flush=True)
 
-    def _on_release(self) -> None:
+    def _on_release(self, at_ms: Optional[float] = None) -> None:
         if not self._down:
             return
         self._down = False
-        now = self._now_ms()
+        now = self._now_ms() if at_ms is None else at_ms
         if self._mode == "toggle":
             # In toggle mode releases are no-ops; press toggles.
+            return
+        if self._mode != "hold":
+            # The press already did its job (stopped a hands-free session,
+            # or a chord dropped the take): nothing to stop.
+            self._mode = "idle"
             return
         duration = now - self._press_ms
         if duration < self.SHORT_TAP_MS:
@@ -218,10 +261,10 @@ class HoldOrToggle:
             self._last_tap_release_ms = now
             print(f"[hotkey] release: SHORT tap ({duration:.0f}ms) — pending double-tap", flush=True)
             try:
-                # Cancel any in-flight hold recording started on press.
-                self.on_release_cb()
-            except Exception:
-                pass
+                # Drop the take the press started: a tap is not a dictation.
+                (self.on_cancel_cb or self.on_release_cb)()
+            except Exception as e:
+                print(f"[hotkey] tap handler error: {e}", flush=True)
             self._mode = "idle"
             return
         print("[hotkey] release: hold stop", flush=True)
@@ -231,6 +274,29 @@ class HoldOrToggle:
             print(f"[hotkey] release handler error: {e}", flush=True)
         self._mode = "idle"
 
+    def _on_other_key(self, at_ms: Optional[float] = None) -> None:
+        """Another key went down. Early in a hold, the hold key is being used
+        as a modifier (⌥+key): drop the take instead of transcribing it."""
+        if self._mode != "hold" or not self._down:
+            return
+        now = self._now_ms() if at_ms is None else at_ms
+        if now - self._press_ms > self.CHORD_CANCEL_MS:
+            return
+        print("[hotkey] chord: hold key used as a modifier — take dropped", flush=True)
+        self._mode = "chord"
+        self._last_tap_release_ms = 0.0
+        try:
+            (self.on_cancel_cb or self.on_release_cb)()
+        except Exception as e:
+            print(f"[hotkey] chord handler error: {e}", flush=True)
+
+    def _key_is_down(self, flags: int) -> bool:
+        """Is the hold key down after this flagsChanged event?"""
+        if self.target_side_bit is not None and flags & _SIDE_BITS:
+            return bool(flags & self.target_side_bit)
+        # No side bits (some remote / virtual keyboards): generic flag.
+        return bool(flags & self.target_flag)
+
     def _handler(self, ev) -> None:
         try:
             et = ev.type()
@@ -238,20 +304,28 @@ class HoldOrToggle:
             # Trace until match observed.
             if not self._match_seen and os.environ.get("OPENFLOW_LOG_ALL_KEYS", "1") != "0":
                 print(f"[hotkey][trace] event type={et} keyCode={kc}", flush=True)
+            at = _event_ms(ev)
             if kc != self.target_vk:
+                if et == _NSEventTypeKeyDown and not ev.isARepeat():
+                    self._on_other_key(at)
                 return
             self._match_seen = True
             if et == _NSEventTypeFlagsChanged and self.target_flag is not None:
-                flag_now = bool(ev.modifierFlags() & self.target_flag)
-                if flag_now:
-                    self._on_press()
+                if self._key_is_down(int(ev.modifierFlags())):
+                    if self._down:
+                        # A press while we think the key is down: its last
+                        # release never reached us. Close that press out so
+                        # this one isn't swallowed.
+                        print("[hotkey] press while marked down — release was missed", flush=True)
+                        self._on_release(at)
+                    self._on_press(at)
                 else:
-                    self._on_release()
+                    self._on_release(at)
             elif et == _NSEventTypeKeyDown:
                 if not ev.isARepeat():
-                    self._on_press()
+                    self._on_press(at)
             elif et == _NSEventTypeKeyUp:
-                self._on_release()
+                self._on_release(at)
         except Exception as e:
             print(f"[hotkey] handler error: {e}", flush=True)
 

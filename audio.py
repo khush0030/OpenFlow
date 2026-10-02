@@ -18,6 +18,16 @@ class RecorderConfig:
     blocksize: int = 1024
 
 
+def _rescan_devices() -> None:
+    """Make PortAudio re-read the device list (sounddevice has no public
+    call for it). Only between takes: no stream may be open."""
+    try:
+        sd._terminate()
+        sd._initialize()
+    except Exception as e:
+        print(f"[audio] device rescan failed: {e}", flush=True)
+
+
 class Recorder:
     def __init__(self, cfg: RecorderConfig | None = None) -> None:
         self.cfg = cfg or RecorderConfig()
@@ -55,21 +65,47 @@ class Recorder:
         """Latest RMS level in [0, 1]. Zero when not recording."""
         return self._rms if self._recording else 0.0
 
+    def _open(self, device) -> sd.InputStream:
+        stream = sd.InputStream(
+            samplerate=self.cfg.sample_rate,
+            channels=self.cfg.channels,
+            dtype="float32",
+            blocksize=self.cfg.blocksize,
+            device=device,
+            callback=self._callback,
+        )
+        try:
+            stream.start()
+        except Exception:
+            stream.close()
+            raise
+        return stream
+
     def start(self) -> None:
+        """Open the mic. PortAudio lists devices once, at import: after
+        AirPods or a USB mic come or go, the default / named device it
+        remembers can be gone and the open fails (or opens a dead input).
+        On a failure, rescan the devices and try again, then fall back to
+        the system default. Raises only if no input will open at all."""
         with self._lock:
             if self._recording:
                 return
             device = self.cfg.device if self.cfg.device not in (None, "default") else None
             self._q = queue.Queue()
-            self._stream = sd.InputStream(
-                samplerate=self.cfg.sample_rate,
-                channels=self.cfg.channels,
-                dtype="float32",
-                blocksize=self.cfg.blocksize,
-                device=device,
-                callback=self._callback,
-            )
-            self._stream.start()
+            try:
+                stream = self._open(device)
+            except Exception as first:
+                print(f"[audio] mic failed to open ({first}); rescanning devices", flush=True)
+                _rescan_devices()
+                try:
+                    stream = self._open(device)
+                except Exception:
+                    if device is None:
+                        raise
+                    print(f"[audio] mic {device!r} unavailable; using the system default",
+                          flush=True)
+                    stream = self._open(None)
+            self._stream = stream
             self._recording = True
 
     def stop(self) -> np.ndarray:

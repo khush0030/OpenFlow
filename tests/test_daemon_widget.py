@@ -442,7 +442,7 @@ def test_hold_key_knows_when_a_recording_is_live(env, monkeypatch):
     made = {}
 
     class FakeHold:
-        def __init__(self, key, on_press, on_release, is_active=None):
+        def __init__(self, key, on_press, on_release, is_active=None, on_cancel=None):
             made.update(key=key, is_active=is_active)
 
     monkeypatch.setattr(dm, "HoldToTalk", FakeHold)
