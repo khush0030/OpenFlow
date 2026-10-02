@@ -823,3 +823,26 @@ def test_write_failed_error_says_so_and_offers_retry(fa):
     assert fa.popup.button.text() == "Retry"
     labels = [w.text() for w in fa.popup.findChildren(fw.QLabel)]
     assert "Couldn't write that" in labels
+
+
+def test_saved_error_offers_retry_calmly(fa):
+    # Never lose a word: the take is on disk; no "Couldn't transcribe".
+    for reason, title in (("saved", "Saved"), ("offline", "Offline · saved")):
+        fa._on_message({"type": "state", "state": "error", "text": "", "reason": reason})
+        assert isinstance(fa.popup, fw.Toast)
+        labels = [w.text() for w in fa.popup.findChildren(fw.QLabel)]
+        assert title in labels and "Couldn't transcribe" not in labels
+        assert fa.popup.button.text() == "Retry"
+        fa.popup.button.click()
+        assert fa.client.sent[-1] == {"action": "retry"}
+
+
+def test_queued_card_names_an_earlier_dictation(fa):
+    from ui import widget_copy as copy
+    from PyQt6.QtWidgets import QLabel
+    fa._on_message({"type": "state", "state": "card", "text": "older", "reason": "queued"})
+    labels = [l.text() for l in fa.popup.findChildren(QLabel)]
+    assert copy.CARD_QUEUED_HEADING in labels and copy.CARD_QUEUED_HINT in labels
+    assert copy.CARD_NOT_PASTED_HINT not in labels   # the clipboard may hold a newer take
+    fa.popup.copy_button.click()
+    assert fa.client.sent[-1] == {"action": "copy"}

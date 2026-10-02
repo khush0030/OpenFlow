@@ -27,6 +27,14 @@ NO_AUDIO = "no_audio"   # ERROR reason: the mic gave nothing at all
 # pastes itself into a focused text box. "" = no text box focused.
 NOT_PASTED = "not_pasted"
 WRITE_FAILED = "write_failed"  # ERROR reason: the edit/command LLM call failed
+# Never lose a word (Phase 4). ERROR reasons when transcription failed but the
+# take's audio is saved on disk (takes.py): "Saved · Retry", and the same
+# when the network was down ("Offline · saved").
+SAVED = "saved"
+OFFLINE = "offline"
+# CARD reason: the text of an earlier take that lost the widget to a newer
+# one, shown once the widget is free. Copy only; never pastes itself.
+QUEUED = "queued"
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
@@ -35,6 +43,10 @@ RETRY_WINDOW_S = 15.0
 # on hover) normally dismisses it first. Without this, a stale transcript
 # could be click-pasted into some other field minutes later.
 CARD_WINDOW_S = 60.0
+# Results that arrive while a newer take owns the widget wait their turn
+# (oldest first), at most QUEUE_MAX of them, each for QUEUE_WINDOW_S.
+QUEUE_MAX = 3
+QUEUE_WINDOW_S = 120.0
 
 _SETTINGS = {
     "set_position": ("position", ("left", "bottom", "right")),
@@ -62,6 +74,18 @@ class _Retained:
     audio: Any
     target: Any
     expires_at: float
+
+
+@dataclass
+class _Queued:
+    """A card (text) or a failed take (audio, target, reason) waiting for
+    the widget."""
+    expires_at: float
+    text: str = ""
+    audio: Any = None
+    target: Any = None
+    reason: str = ""
+    failed: bool = False
 
 
 class FlowController:
@@ -97,6 +121,8 @@ class FlowController:
         self._cancelled_runs: set[int] = set()
         # The run that passed commit(): it is pasting, too late to cancel.
         self._committed_run = 0
+        # Results of runs that lost the widget, shown by tick() when idle.
+        self._queue: list[_Queued] = []
 
     @property
     def lock(self) -> threading.RLock:
@@ -215,9 +241,24 @@ class FlowController:
             self.done()
             return True
 
+    def _enqueue(self, run: Optional[int], item: _Queued) -> None:
+        """A run that lost the widget to a newer take: keep its result until
+        the widget is free, unless the user cancelled that run."""
+        if run is None or run in self._cancelled_runs:
+            return
+        self._queue.append(item)
+        del self._queue[:-QUEUE_MAX]
+
+    @property
+    def queued(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
     def show_card(self, text: str, run: Optional[int] = None, reason: str = "") -> bool:
         with self._lock:
             if not self._owns(run):
+                self._enqueue(run, _Queued(self._clock() + QUEUE_WINDOW_S, text=text,
+                                           reason=QUEUED))
                 return False
             self._card_expires_at = self._clock() + CARD_WINDOW_S
             self._set(CARD, text, reason=reason)
@@ -232,6 +273,8 @@ class FlowController:
                reason: str = "") -> bool:
         with self._lock:
             if not self._owns(run):
+                self._enqueue(run, _Queued(self._clock() + QUEUE_WINDOW_S, audio=audio,
+                                           target=target, reason=reason, failed=True))
                 return False
             self._retained = _Retained(audio, target, self._clock() + RETRY_WINDOW_S)
             self._set(ERROR, reason=reason)
@@ -260,6 +303,21 @@ class FlowController:
                     self.done()
             elif self.state == CARD and self._clock() > self._card_expires_at:
                 self.done()
+            if self.state == IDLE and self._queue:
+                self._show_next_queued()
+
+    def _show_next_queued(self) -> None:
+        now = self._clock()
+        self._queue = [q for q in self._queue if q.expires_at >= now]
+        if not self._queue:
+            return
+        q = self._queue.pop(0)
+        if q.failed:
+            self._retained = _Retained(q.audio, q.target, now + RETRY_WINDOW_S)
+            self._set(ERROR, reason=q.reason)
+        else:
+            self._card_expires_at = now + CARD_WINDOW_S
+            self._set(CARD, q.text, reason=q.reason)
 
     def _take_retained(self) -> Optional[_Retained]:
         r, self._retained = self._retained, None
@@ -289,6 +347,7 @@ class FlowController:
                 self.cancel_processing()
             elif (action == "undo" and self.state == CANCELLED) or \
                     (action == "retry" and self.state == ERROR):
+                was = self.reason
                 kept = self._take_retained()
                 if kept is None:
                     self.done()
@@ -299,7 +358,7 @@ class FlowController:
                     except Exception as e:
                         log_exception("flow_state", "rerun hook failed — offering Retry", e)
                         # Keep the audio so Retry works again.
-                        self.failed(kept.audio, kept.target)
+                        self.failed(kept.audio, kept.target, reason=was)
             elif action == "copy" and self.state == CARD:
                 text = self.text
                 self._hooks.copy_text(text)
