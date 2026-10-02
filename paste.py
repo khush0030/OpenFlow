@@ -443,9 +443,11 @@ def _osascript_paste() -> bool:
 PASTE_MODIFIER_WAIT_S = 1.0
 # Bringing the target app back to the front can take a moment.
 ACTIVATE_WAIT_S = 0.5
-# After Cmd+V, watch the field this long for the text to show up.
-CONFIRM_TIMEOUT_S = 0.6
+# After Cmd+V, look at the field for at most this long to see the text land.
+CONFIRM_TIMEOUT_S = 0.3
 CONFIRM_POLL_S = 0.05
+# Stop looking once the value is still unchanged after this many polls.
+UNCHANGED_SETTLE_POLLS = 2
 
 
 def _read_field(pid: int) -> Optional["FieldText"]:
@@ -457,47 +459,69 @@ def _read_field(pid: int) -> Optional["FieldText"]:
         return None
 
 
+def _front_is_not(pid: int) -> bool:
+    """True only when we know another app is frontmost."""
+    front = _front_pid()
+    return front is not None and front != pid
+
+
 def _bring_to_front(target: PasteTarget) -> bool:
     """Make `target` the frontmost app again. False only when we know it
     isn't: Cmd+V would then go to some other app (or nowhere)."""
-    if _front_pid() in (None, target.pid):
+    if not _front_is_not(target.pid):
         return True
     if not activate_front_app(target):
         print(f"[paste] could not restore {target.name}", flush=True)
         return False
     for _ in range(max(1, int(ACTIVATE_WAIT_S / 0.04))):
         time.sleep(0.04)
-        front = _front_pid()
-        if front in (None, target.pid):
+        if not _front_is_not(target.pid):
             print(f"[paste] restored {target.name} ({target.pid})", flush=True)
             return True
     print(f"[paste] {target.name} did not come to the front", flush=True)
     return False
 
 
+def _shows_placeholder(f: "FieldText") -> bool:
+    """Chromium webviews (VS Code's Claude Code input) report their
+    placeholder as the value, so it says nothing about what's typed."""
+    return bool(f.placeholder) and f.value == f.placeholder
+
+
 def paste_landed(before: Optional["FieldText"], after: Optional["FieldText"],
                  text: str) -> bool:
     """Did the paste show up: the field changed and our text now sits right
     before the caret (tolerating reflowed whitespace and smart quotes)."""
-    if after is None:
+    if after is None or _shows_placeholder(after):
         return False
     if before is not None and after.value == before.value:
         return False
     return paste_still_at_caret(after.value[: after.caret], text)
 
 
-def _confirm_paste(pid: int, before: Optional["FieldText"], text: str) -> bool:
-    """Watch the focused field until the pasted text shows up. False means
-    "not confirmed": it didn't show up, or the app doesn't expose its
-    field's text over AX (e.g. some editors and canvas views)."""
+def _confirm_paste(pid: int, before: Optional["FieldText"], text: str) -> Optional[str]:
+    """Look at the field briefly after Cmd+V. None = the text was seen
+    there (verified); otherwise why it couldn't be verified. Unverifiable
+    is NOT failure: many fields don't expose what's typed over AX."""
+    if before is None:
+        return "field not readable over AX"
+    why = "text not seen in the field"
+    unchanged = 0
     for _ in range(max(1, int(CONFIRM_TIMEOUT_S / CONFIRM_POLL_S))):
         time.sleep(CONFIRM_POLL_S)
         after = _read_field(pid)
         if paste_landed(before, after, text):
-            return True
-        if after is None and before is None:
-            return False   # this app's field text isn't readable: can't tell
-    return False
+            return None
+        if after is None:
+            return "field not readable over AX"
+        if _shows_placeholder(after):
+            return "field reports its placeholder"
+        if after.value == before.value:
+            unchanged += 1
+            why = "field value unchanged"
+            if unchanged >= UNCHANGED_SETTLE_POLLS:
+                break
+    return why
 
 
 def paste(text: str, target: PasteTarget | None = None) -> str:
@@ -507,12 +531,14 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
     AXSelectedText write and report success while inserting nothing, so AX
     insert is only a last resort when synthetic keystrokes are unavailable.
 
-    Returns "pasted" only when the text was seen in the field afterwards.
-    "unconfirmed": Cmd+V went out but the text wasn't seen (it may have
-    landed: the app may not expose its field over AX). "clipboard": nothing
-    was sent (no Accessibility, or the target app couldn't be brought back).
-    "failed": the clipboard couldn't be written. In every case but "failed"
-    the text is left on the clipboard."""
+    "pasted": Cmd+V went to the target app. Verified over AX when the
+    field's text shows it; when the field can't tell us (unreadable, shows
+    its placeholder, value unchanged) it's still "pasted" (logged as
+    unverified): such fields are the norm in Electron apps.
+    "clipboard": we know it could not have landed (no Accessibility, the
+    target app isn't in front, Cmd+V couldn't be sent). "failed": the
+    clipboard couldn't be written. Except for "failed" the text is left
+    on the clipboard."""
     global _LAST_CLIPBOARD, _LAST_PASTE
     _LAST_PASTE = None
     if not text:
@@ -534,11 +560,15 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
 
     # The hotkey may still be down (⌥ pressed to stop a hands-free take, or
     # to start the next one while this one finishes): an app sees Cmd+⌥V
-    # and pastes nothing. Give it a moment to come up.
+    # and pastes nothing. Give it a moment to come up; the event source
+    # (_event_source) keeps a key still held out of Cmd+V either way.
     if _wait_modifiers_released(PASTE_MODIFIER_WAIT_S) is False:
         print("[paste] modifier keys still held — sending Cmd+V anyway", flush=True)
     else:
         time.sleep(0.04)
+    if target is not None and _front_is_not(target.pid):
+        print(f"[paste] {target.name} lost the front while waiting — not pasting", flush=True)
+        return "clipboard"
     pid = target.pid if target is not None else (_front_pid() or 0)
     before = _read_field(pid)
     sent = _cgevent_paste()
@@ -552,17 +582,15 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
                                   app=target.name if target is not None else "",
                                   at=time.monotonic(), clip_before=_LAST_CLIPBOARD,
                                   clip_change=clip_change)
-        if _confirm_paste(pid, before, text):
-            print("[paste] sent Cmd+V — landed", flush=True)
-            return "pasted"
-        print("[paste] sent Cmd+V — not confirmed "
-              f"({'field not readable over AX' if before is None else 'text not seen in the field'})",
-              flush=True)
-        return "unconfirmed"
+        why = _confirm_paste(pid, before, text)
+        print("[paste] sent Cmd+V — pasted "
+              + ("(verified)" if why is None else f"(unverified: {why})"), flush=True)
+        return "pasted"
     ax_el = target.ax_element if target is not None else None
     if _ax_insert(text, ax_el):
         print("[paste] inserted via AXSelectedText", flush=True)
-        return "pasted" if _confirm_paste(pid, before, text) else "unconfirmed"
+        return "pasted"
+    print("[paste] could not send Cmd+V — text left on clipboard", flush=True)
     return "clipboard"
 
 
@@ -623,6 +651,7 @@ class FieldText:
     element: Any
     value: str
     caret: int        # in code points (Python string index)
+    placeholder: Optional[str] = None   # AXPlaceholderValue, if any
 
 
 # Fields longer than this aren't read for auto-learn (a whole document).
@@ -665,7 +694,9 @@ def ax_field_text(pid: int, max_chars: Optional[int] = None) -> Optional[FieldTe
     # AX ranges count UTF-16 units; Python strings count code points.
     units = value.encode("utf-16-le")
     caret = len(units[: loc * 2].decode("utf-16-le", errors="ignore"))
-    return FieldText(element=el, value=str(value), caret=caret)
+    ph = _ax_copy(el, "AXPlaceholderValue")
+    return FieldText(element=el, value=str(value), caret=caret,
+                     placeholder=str(ph) if isinstance(ph, str) else None)
 
 
 def ax_same_element(a, b) -> bool:

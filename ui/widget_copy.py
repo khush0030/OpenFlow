@@ -11,9 +11,9 @@ ERROR = "Couldn't transcribe"
 RETRY = "Retry"
 CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"
-# Card after a paste that couldn't be confirmed (state 6, reason "unconfirmed").
-CARD_UNCONFIRMED_HEADING = "Couldn't confirm it pasted"
-CARD_UNCONFIRMED_HINT = "On your clipboard · ⌘V to paste"
+# Card after a paste that couldn't land (state 6, reason "not_pasted").
+CARD_NOT_PASTED_HEADING = "Couldn't paste"
+CARD_NOT_PASTED_HINT = "On your clipboard · ⌘V to paste"
 COPY = "Copy"
 MENU_APPEARANCE = "Appearance"
 MENU_HIDE = "Hide for 1 hour"

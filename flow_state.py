@@ -22,10 +22,10 @@ CARD = "card"
 CANCELLED = "cancelled"
 ERROR = "error"
 NO_AUDIO = "no_audio"   # ERROR reason: the mic gave nothing at all
-# CARD reason: a paste went out but couldn't be confirmed (or couldn't be
-# sent). The text may already be in the field, so the card never pastes
-# itself into a focused text box; it offers Copy. "" = no text box focused.
-UNCONFIRMED = "unconfirmed"
+# CARD reason: the paste could not have landed (no Accessibility, the app
+# wasn't in front, Cmd+V couldn't be sent). The card offers Copy and never
+# pastes itself into a focused text box. "" = no text box focused.
+NOT_PASTED = "not_pasted"
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0

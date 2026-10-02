@@ -80,8 +80,8 @@ def fake_os(monkeypatch):
 
 
 def test_paste_records_the_cmd_v_paste(fake_os):
-    # Field unreadable over AX: sent but unconfirmed, still undoable.
-    assert paste.paste("hi there", target=PasteTarget(pid=42, name="Notes")) == "unconfirmed"
+    # Field unreadable over AX: pasted (unverified), still undoable.
+    assert paste.paste("hi there", target=PasteTarget(pid=42, name="Notes")) == "pasted"
     r = paste._LAST_PASTE
     assert (r.text, r.pid, r.app, r.clip_before, r.clip_change) == \
         ("hi there", 42, "Notes", "old", 7)
@@ -155,7 +155,7 @@ def test_text_before_caret_counts_utf16_units(monkeypatch):
     monkeypatch.setattr(paste, "_ax_app_focus", lambda pid: ("focused", "el"))
     monkeypatch.setattr(paste, "_ax_set_timeout", lambda el: None)
     monkeypatch.setattr(paste, "_ax_copy",
-                        lambda el, attr: {"AXValue": value, "AXSelectedTextRange": rng}[attr])
+                        lambda el, attr: {"AXValue": value, "AXSelectedTextRange": rng}.get(attr))
     assert paste._ax_text_before_caret(42) == "\U0001F600 hi there"
 
 

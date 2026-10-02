@@ -287,16 +287,16 @@ def test_failed_paste_shows_card(env, monkeypatch):
     assert d._flow.state == CARD and d._flow.text == "hello world"
 
 
-@pytest.mark.parametrize("status", ["unconfirmed", "clipboard", "failed"])
-def test_paste_not_seen_in_the_field_shows_the_unconfirmed_card(env, monkeypatch, status):
+@pytest.mark.parametrize("status", ["clipboard", "failed"])
+def test_paste_that_could_not_land_shows_the_not_pasted_card(env, monkeypatch, status):
     played = []
     monkeypatch.setattr(dm.sounds, "play", played.append)
     monkeypatch.setattr(dm, "paste", lambda text, target=None: status)
     d = make_daemon()
     work(d, d._flow.processing())
     assert d._flow.state == CARD and d._flow.text == "hello world"
-    assert d._flow.reason == flow_state.UNCONFIRMED
-    assert d._flow.message()["reason"] == "unconfirmed"     # widget picks its copy
+    assert d._flow.reason == flow_state.NOT_PASTED
+    assert d._flow.message()["reason"] == "not_pasted"      # widget picks its copy
     assert "paste" not in played                             # no success cue
 
 
@@ -518,12 +518,12 @@ def test_pump_pastes_card_into_clicked_text_box(env, monkeypatch):
     assert d._flow.state == IDLE
 
 
-def test_pump_never_repastes_an_unconfirmed_card(env, monkeypatch):
-    # The text may already be in the focused field: pasting it again on
-    # focus would duplicate it. The card offers Copy instead.
+def test_pump_never_repastes_a_not_pasted_card(env, monkeypatch):
+    # Only the no-text-box card pastes itself on focus; after a failed
+    # paste the focus is usually still in the field, so it offers Copy.
     asked = focus_probe(monkeypatch)
     d = make_daemon()
-    d._flow.show_card("hello", run=d._flow.processing(), reason=flow_state.UNCONFIRMED)
+    d._flow.show_card("hello", run=d._flow.processing(), reason=flow_state.NOT_PASTED)
     pump_once(d)
     assert not any(c[0] == "paste" for c in env["calls"])
     assert asked == []
