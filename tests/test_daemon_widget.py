@@ -60,6 +60,12 @@ class FakeRecorder:
         self.is_recording = False
         return self.audio
 
+    def cancel(self, linger_s=0.0):
+        self.is_recording = False
+
+    def attach(self, listener):
+        self.on_block = listener
+
 
 class FakeTranscriber:
     def __init__(self, result="hello world", error=None):

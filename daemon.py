@@ -126,6 +126,9 @@ _LANG_CYCLE: list[LanguageMode] = [
 # two thirds of real taps (log, 2026-10-01: 105–313 ms, median ~190). A longer
 # tap's tick is cut off when the hands-free cue plays (sounds._SUPERSEDES).
 HOLD_CUE_DELAY_S = 0.2
+# A tap's mic stays open this much past the double-tap window, so a second
+# press whose handler runs a little late still reuses it (audio.cancel).
+TAP_LINGER_SLACK_S = 0.15
 
 
 def _after(delay_s: float, fn) -> None:
@@ -670,9 +673,11 @@ class Daemon:
     def _on_hold_press(self) -> None:
         # Only the hold key starts hands-free sessions; a widget click after
         # a session ✓ ended must not inherit the key's stale toggle mode.
-        self.on_record_start(hands_free=bool(getattr(self._hold, "hands_free", False)))
+        self.on_record_start(hands_free=bool(getattr(self._hold, "hands_free", False)),
+                             pressed_at_ms=getattr(self._hold, "last_press_ms", None))
 
-    def on_record_start(self, hands_free: bool = False) -> None:
+    def on_record_start(self, hands_free: bool = False,
+                        pressed_at_ms: float | None = None) -> None:
         if self.state.paused:
             print("[daemon] paused — key press ignored", flush=True)
             return
@@ -680,25 +685,26 @@ class Daemon:
             return
         print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
         t0 = time.monotonic()
+        # Key-down timing from the key event itself when the hotkey gave it
+        # (the handler can run late, behind the main thread's other work).
+        t_key = t0
+        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < 5.0:
+            t_key = pressed_at_ms / 1000.0
         # Feedback first: the widget (and cue) answer the key now, not after
-        # the AX read and the mic open below (~0.3 s cold), which used to
-        # leave a press looking ignored.
+        # the mic open below (~0.15 s), which used to leave a press looking
+        # ignored.
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
         self._flow.recording_started(hands_free=hands_free)
-        remembered = capture_paste_target()
-        if remembered is not None:
-            self._paste_target = remembered
-            print(
-                f"[daemon] paste target → {remembered.name} "
-                f"ax={'yes' if remembered.ax_element is not None else 'no'}",
-                flush=True,
-            )
-        t_target = time.monotonic()
-        self._open_stream()
-        self._start_screen_capture(remembered)
+        # Then the mic, before every other key-down read: the paste target
+        # (AX), the screen names and the STT stream all finish while the
+        # user talks; the stream gets the blocks it missed (attach).
+        t_open = time.monotonic()
         try:
-            self.recorder.start()
+            reused = (bool(getattr(self.recorder, "lingering", False))
+                      and self.recorder.resume(keep_s=t_open - t_key))
+            if not reused:
+                self.recorder.start()
         except Exception as e:
             # No input would open (device busy / gone). Say so on screen
             # instead of leaving the widget recording nothing.
@@ -710,9 +716,27 @@ class Daemon:
             self._flow.no_audio(None, None)
             return
         t_mic = time.monotonic()
+        remembered = capture_paste_target()
+        if remembered is not None:
+            self._paste_target = remembered
+            print(
+                f"[daemon] paste target → {remembered.name} "
+                f"ax={'yes' if remembered.ax_element is not None else 'no'}",
+                flush=True,
+            )
+        t_target = time.monotonic()
+        self._open_stream()
+        self._start_screen_capture(remembered)
         self._warm_up()
-        print(f"[daemon] mic open {1000 * (t_mic - t0):.0f}ms after key-down "
-              f"(paste target {1000 * (t_target - t0):.0f}ms)", flush=True)
+        if reused:
+            how = f"reused the tap's stream, kept {1000 * (t_open - t_key):.0f}ms"
+            mic_ms = 0.0
+        else:
+            how = (f"queued {1000 * (t0 - t_key):.0f}ms, "
+                   f"open {1000 * (t_mic - t_open):.0f}ms")
+            mic_ms = 1000 * (t_mic - t_key)
+        print(f"[daemon] mic open {mic_ms:.0f}ms after key-down ({how}; "
+              f"paste target +{1000 * (t_target - t_mic):.0f}ms)", flush=True)
 
     def _on_hold_cancel(self) -> None:
         """The hold key was tapped (first half of a double-tap) or used as a
@@ -720,7 +744,16 @@ class Daemon:
         no transcription, no "too short", no paste."""
         if not self.recorder.is_recording:
             return
-        self.recorder.stop()
+        # A tap may be the first half of a double-tap: keep the mic running
+        # for what is left of the double-tap window (plus a little for a
+        # late handler), so the second press reuses it instead of opening
+        # it again. Otherwise (a chord) it closes now. No tail wait: this
+        # audio is discarded either way.
+        hold = getattr(self, "_hold", None)
+        linger = 0.0
+        if getattr(hold, "double_tap_armed", False):
+            linger = hold.double_tap_window_s() + TAP_LINGER_SLACK_S
+        self.recorder.cancel(linger_s=linger)
         self._drop_stream()
         self._screen = None
         self.state.recording = RecordingState.IDLE
@@ -743,7 +776,7 @@ class Daemon:
             return
         if stream is not None:
             self._stream = stream
-            self.recorder.on_block = stream.feed
+            self.recorder.attach(stream.feed)   # with the blocks it missed
 
     def _take_stream(self):
         """Detach the take's stream from the recorder; None if not streaming."""
