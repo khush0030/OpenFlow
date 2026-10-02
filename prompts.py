@@ -124,6 +124,15 @@ Filler words and slang stay. You may only change punctuation,
 capitalization and line breaks. Keep the line breaks already in the text.
 Return ONLY the formatted text, no preamble."""
 
+# Verbatim's paragraph call (formatting.break_paragraphs): the model names
+# where paragraphs start and Python inserts the breaks, so the reply is a few
+# tokens instead of the whole dictation again, and no word can change.
+PARAGRAPH_STARTS = """You split a voice transcription (often Indian English or
+Hinglish) into paragraphs. Its sentences are numbered [1], [2], [3], ...
+Reply with ONLY the numbers of the sentences that should START a new
+paragraph because the topic changes, comma-separated, e.g. "4, 9". Never
+include 1. Text that stays on one topic is one paragraph: reply "none"."""
+
 FORMAT_TASKS = {
     "paragraphs": """Split the text into paragraphs where the topic changes,
 with a blank line between paragraphs. Keep sentences whole. Text that stays

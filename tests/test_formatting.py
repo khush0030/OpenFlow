@@ -163,3 +163,42 @@ def test_same_words_keeps_snippet_placeholders():
     src = "Send it to {{snippet1}}, new paragraph, thanks."
     assert f.same_words(src, "Send it to {{snippet1}}\n\nthanks", [(src.index("new"), src.index("new") + 13)])
     assert not f.same_words(src, "Send it to me. Thanks.")
+
+
+# -- Paragraph breaks by sentence number -----------------------------------------------
+
+def test_numbered_sentences():
+    text = 'He said "go." Then we left! Did it work? Yes (mostly). Done'
+    numbered, n = f.numbered_sentences(text)
+    assert n == 5
+    assert numbered == '[1] He said "go." [2] Then we left! [3] Did it work? [4] Yes (mostly). [5] Done'
+
+
+def test_numbered_sentences_keep_numbers_and_abbreviated_decimals_whole():
+    numbered, n = f.numbered_sentences("Version 3.5 shipped on time. Next is 4.0")
+    assert n == 2 and numbered == "[1] Version 3.5 shipped on time. [2] Next is 4.0"
+
+
+@pytest.mark.parametrize("reply,count,want", [
+    ("4, 9", 10, [4, 9]),
+    ("9,4,4", 10, [4, 9]),
+    ("none", 10, []),
+    ("1, 0, 11", 10, []),          # never before sentence 1; out of range
+    ("Sentences 3 and 5.", 6, [3, 5]),
+    ("", 3, []),
+])
+def test_parse_paragraph_starts(reply, count, want):
+    assert f.parse_paragraph_starts(reply, count) == want
+
+
+def test_break_paragraphs_only_changes_the_gaps():
+    out = f.break_paragraphs(LONG, [4])
+    assert out == LONG.replace(" Separately,", "\n\nSeparately,")
+    assert f.same_words(LONG, out)
+    assert f.break_paragraphs(LONG, []) == LONG
+
+
+def test_break_paragraphs_keeps_existing_line_breaks():
+    text = "Hi Rahul,\n\nThe deck is ready. It has ten slides.  Pricing is next. Thanks."
+    out = f.break_paragraphs(text, [3])
+    assert out == "Hi Rahul,\n\nThe deck is ready. It has ten slides.\n\nPricing is next. Thanks."
