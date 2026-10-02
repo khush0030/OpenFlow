@@ -94,12 +94,13 @@ from paste import MAX_FIELD_CHARS, ax_field_text, ax_same_element
 from snippets import Snippets
 import formatting
 import screen_context
+import command_mode
 from prompts import app_kind as prompts_app_kind
 from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
-from flow_state import CARD, NOT_PASTED, FlowController, FlowHooks
+from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
 from flow_state import PROCESSING as FLOW_PROCESSING
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
@@ -231,6 +232,8 @@ class RunContext:
     stream: object = None          # the take's StreamingSession, if streamed
     # Names on screen at key-down (screen_context.py); in memory only.
     screen_terms: tuple[str, ...] = ()
+    # Command mode (edit hotkey, nothing selected): its command_mode.Pending.
+    command: object = None
 
 
 class _WidgetWatchdog:
@@ -375,6 +378,7 @@ class Daemon:
         self._hold: HoldToTalk | None = None
         self._chords: HotkeySet | None = None
         self._edit_pending = False  # for edit-mode
+        self._command = None        # armed command_mode.Pending (edit hotkey, no selection)
         self._tray: TrayApp | None = None
         self._stop_evt = threading.Event()
         self._cancel_pending = False
@@ -1156,6 +1160,7 @@ class Daemon:
         edit_mode = self._edit_pending
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
                          selection=getattr(self, "_edit_selection", "") if edit_mode else "",
+                         command=getattr(self, "_command", None) if edit_mode else None,
                          keyup_at=keyup_at, record_s=record_s, stream=stream,
                          screen_terms=self._screen_terms())
         if self._cancel_pending:
@@ -1266,30 +1271,66 @@ class Daemon:
         print(f"[daemon] dictionary reloaded ({len(self.dictionary.terms)} words)", flush=True)
 
     def on_edit_mode(self) -> None:
-        # Capture currently selected text (Cmd+C), then start recording.
+        # Text selected: rewrite it by voice. Nothing selected: command
+        # mode, write new text at the cursor (command_mode.py).
         try:
-            import pyperclip
-            import subprocess
-            prev = pyperclip.paste()
-            pyperclip.copy("")  # marker so we can detect copy success
-            time.sleep(0.05)
-            subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to keystroke "c" using command down'],
-                check=False,
-            )
-            time.sleep(0.15)
-            sel = pyperclip.paste()
-            pyperclip.copy(prev)
+            target = capture_paste_target()
+            sel = self._copy_selection(target)
             if not sel:
-                print("[daemon] edit mode: no selection", flush=True)
+                self._arm_command(target)
                 return
             self._edit_selection = sel
+            self._command = None
             self._edit_pending = True
             print(f"[daemon] edit mode armed; selection ({len(sel)} chars). Hold record key and speak instruction.", flush=True)
             self._show_edit_overlay(sel)
         except Exception as e:
             log_exception("daemon.edit_mode", "edit-mode trigger failed", e)
+
+    def _copy_selection(self, target) -> str:
+        """The selected text, via Cmd+C. "" when nothing is selected. A
+        caret with an empty selection skips the copy: VS Code and JetBrains
+        copy the whole line on Cmd+C, which would read as a selection."""
+        pid = getattr(target, "pid", 0) or 0
+        field = ax_field_text(pid, max_chars=MAX_FIELD_CHARS) if pid > 0 else None
+        if field is not None and field.sel_len == 0:
+            return ""
+        import pyperclip
+        import subprocess
+        prev = pyperclip.paste()
+        pyperclip.copy("")  # marker so we can detect copy success
+        time.sleep(0.05)
+        subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to keystroke "c" using command down'],
+            check=False,
+        )
+        time.sleep(0.15)
+        sel = pyperclip.paste()
+        pyperclip.copy(prev)
+        return sel
+
+    def _arm_command(self, target) -> None:
+        if target is None:
+            print("[daemon] edit mode: nothing selected and no app to write into", flush=True)
+            return
+        ctx_cfg = self.cfg.get("context") or {}
+        pending = command_mode.Pending(
+            target, include_screen=bool(ctx_cfg.get("command_screen", True)))
+        pending.on_ready = lambda c: self._on_command_context(pending, c)
+        self._edit_selection = ""
+        self._command = pending
+        self._edit_pending = True
+        print(f"[daemon] command mode armed (nothing selected) in {target.name or '?'}. "
+              "Hold record key and say what to write.", flush=True)
+        self._show_edit_overlay()
+        pending.start()
+
+    def _on_command_context(self, pending, c) -> None:
+        # Sizes only: the context itself is never logged.
+        print(f"[daemon] command context: {c.describe()}", flush=True)
+        if self._edit_pending and self._command is pending:
+            self._show_edit_overlay()   # swap "Reading…" for what was found
 
     # -- Edit overlay link (~/.openflow/edit-overlay.sock) ----------------
     # Same channel as the flow widget: the overlay process lives exactly as
@@ -1307,13 +1348,20 @@ class Daemon:
             log_exception("daemon.edit_overlay", "edit overlay socket unavailable", e)
             self._edit_overlay = None
 
-    def _show_edit_overlay(self, selection: str) -> None:
+    def _edit_overlay_msg(self, selection: str | None = None) -> dict:
+        cmd = getattr(self, "_command", None)
+        if cmd is not None:
+            return command_mode.overlay_message(cmd)
+        return {"type": "show",
+                "selection": self._edit_selection if selection is None else selection}
+
+    def _show_edit_overlay(self, selection: str | None = None) -> None:
         server = getattr(self, "_edit_overlay", None)
         if server is None:
             return
         # Already up: swap the text in place. Otherwise spawn it; it gets
         # the selection when it connects.
-        if not server.send({"type": "show", "selection": selection}):
+        if not server.send(self._edit_overlay_msg(selection)):
             _spawn_edit_overlay()
 
     def _close_edit_overlay(self) -> None:
@@ -1323,7 +1371,7 @@ class Daemon:
 
     def _on_edit_overlay_connect(self) -> None:
         if self._edit_pending:
-            self._edit_overlay.send({"type": "show", "selection": self._edit_selection})
+            self._edit_overlay.send(self._edit_overlay_msg())
         else:
             self._edit_overlay.send({"type": "close"})  # the edit ended before it came up
 
@@ -1408,7 +1456,18 @@ class Daemon:
 
             if ctx.edit_mode:
                 instruction = raw.strip()
-                final = self.ai.edit_selection(ctx.selection, instruction)
+                try:
+                    if ctx.command is not None:
+                        cc = ctx.command.result()
+                        print(f"[daemon] command in {cc.app or '?'}: {cc.describe()}", flush=True)
+                        final = command_mode.write(self.ai, cc, instruction)
+                    else:
+                        final = self.ai.edit_selection(ctx.selection, instruction)
+                except Exception as e:
+                    # The field is untouched; keep the take for Retry.
+                    log_exception("daemon.pipeline", "edit/command LLM call failed — offering Retry", e)
+                    self._flow.failed(audio, ctx, run=run, reason=WRITE_FAILED) or self._stale(run)
+                    return
             else:
                 final = self._post_process(raw, tone=tone, target=target,
                                            screen_terms=ctx.screen_terms)
@@ -1426,7 +1485,8 @@ class Daemon:
                 return
 
             self.state.last_pasted = final
-            if not ctx.edit_mode and focused_editable(target) is False:
+            if (not ctx.edit_mode or ctx.command is not None) \
+                    and focused_editable(target) is False:
                 set_clipboard(final)   # even if the card can't be shown
                 print("[daemon] no text box focused — showing card", flush=True)
                 self._flow.show_card(final, run=run) or self._stale(run)

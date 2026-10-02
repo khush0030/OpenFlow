@@ -8,6 +8,10 @@ Subprocess design:
   ~/.openflow/edit-overlay.sock (widget_channel, JSON lines)
 - Daemon sends {"type": "show", "selection": ...}; a later edit arm
   sends another show, which swaps the text in place
+- Command mode (nothing selected, command_mode.py) sends
+  {"type": "show", "mode": "command", "selection": <context preview>,
+  "note": <one line on what will be used>}; the preview card hides when
+  there is no context
 - {"type": "close"} (edit finished) or a dropped connection quits it
 - Esc or the 30s timeout just hangs up: the daemon reads the closed
   connection as "edit cancelled" and disarms edit mode
@@ -38,6 +42,9 @@ from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetClient
 
 TIMEOUT_SECONDS = 30
 
+EDIT_CAPTION = "Hold record key and speak your edit instruction."
+COMMAND_CAPTION = "Hold record key and say what to write."
+
 
 class _PulsingDot(QLabel):
     def __init__(self, parent=None):
@@ -67,7 +74,8 @@ class EditOverlay(QWidget):
     """Frameless selected-text overlay. The link owns its lifetime."""
 
     def __init__(self, selection: str,
-                 on_escape: Optional[Callable[[], None]] = None):
+                 on_escape: Optional[Callable[[], None]] = None,
+                 mode: str = "edit", note: str = ""):
         super().__init__(None)
         self._on_escape = on_escape
 
@@ -83,6 +91,13 @@ class EditOverlay(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(Space.LG, Space.LG, Space.LG, Space.LG)
         outer.setSpacing(Space.MD)
+
+        # Command mode: one line on what the model will see.
+        self._note = QLabel(self)
+        self._note.setFont(QFont(Font.BODY, Font.SIZE_BODY_SM))
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet(f"color: {Color.INK_MUTED};")
+        outer.addWidget(self._note)
 
         # Selected text card — terracotta-bordered, 8% terracotta fill
         sel = self._sel = QLabel(self)
@@ -113,13 +128,14 @@ class EditOverlay(QWidget):
         ic_lay.setSpacing(Space.MD)
         ic_lay.addWidget(_PulsingDot(input_card))
 
-        caption = QLabel("Hold record key and speak your edit instruction.", input_card)
+        caption = self._caption = QLabel(EDIT_CAPTION, input_card)
         cf = QFont(Font.DISPLAY, Font.SIZE_BODY)
         cf.setItalic(True)
         caption.setFont(cf)
         caption.setStyleSheet(f"color: {Color.INK_MUTED};")
         ic_lay.addWidget(caption, 1)
         outer.addWidget(input_card)
+        self.set_content(selection, mode, note)
 
         # Drop shadow
         shadow = QGraphicsDropShadowEffect(self)
@@ -138,6 +154,18 @@ class EditOverlay(QWidget):
     def set_selection(self, selection: str) -> None:
         self._sel.setText(self._truncate(selection))
         self._sel.setToolTip(selection)
+
+    def set_content(self, selection: str, mode: str = "edit", note: str = "") -> None:
+        """Edit: the selection. Command: the context preview (hidden when
+        there is none) under a note on what will be used."""
+        self.mode = "command" if mode == "command" else "edit"
+        self.set_selection(selection)
+        command = self.mode == "command"
+        self._note.setText(note if command else "")
+        self._note.setVisible(command and bool(note))
+        self._sel.setVisible(not command or bool(selection.strip()))
+        self._caption.setText(COMMAND_CAPTION if command else EDIT_CAPTION)
+        self.adjustSize()
 
     def selection_text(self) -> str:
         return self._sel.toolTip()
@@ -203,11 +231,14 @@ class OverlayLink(QObject):
         kind = msg.get("type")
         if kind == "show":
             selection = str(msg.get("selection") or "")
+            mode = str(msg.get("mode") or "edit")
+            note = str(msg.get("note") or "")
             if self.overlay is None:
-                self.overlay = EditOverlay(selection, on_escape=self.finish)
+                self.overlay = EditOverlay(selection, on_escape=self.finish,
+                                           mode=mode, note=note)
                 self.overlay.show()
             else:
-                self.overlay.set_selection(selection)
+                self.overlay.set_content(selection, mode, note)
             self._timeout.start()  # a re-arm gets a fresh 30s
         elif kind in ("close", "exit", "_disconnected"):
             self.finish()

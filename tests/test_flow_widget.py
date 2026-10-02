@@ -814,3 +814,12 @@ def test_no_audio_error_shows_cant_hear_with_mic_settings(fa):
     # A transcription failure right after swaps the toast back to Retry.
     fa._on_message({"type": "state", "state": "error", "text": ""})
     assert fa.popup.button.text() == "Retry"
+
+
+def test_write_failed_error_says_so_and_offers_retry(fa):
+    # Edit / command mode: heard the instruction, the LLM call failed.
+    fa._on_message({"type": "state", "state": "error", "text": "", "reason": "write_failed"})
+    assert isinstance(fa.popup, fw.Toast)
+    assert fa.popup.button.text() == "Retry"
+    labels = [w.text() for w in fa.popup.findChildren(fw.QLabel)]
+    assert "Couldn't write that" in labels

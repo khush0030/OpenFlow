@@ -8,6 +8,7 @@ MIC_SETTINGS = "Mic settings"
 CANCELLED = "Transcript cancelled"
 UNDO = "Undo"
 ERROR = "Couldn't transcribe"
+WRITE_ERROR = "Couldn't write that"   # edit / command: the LLM call failed
 RETRY = "Retry"
 CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"

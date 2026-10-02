@@ -652,6 +652,7 @@ class FieldText:
     value: str
     caret: int        # in code points (Python string index)
     placeholder: Optional[str] = None   # AXPlaceholderValue, if any
+    sel_len: int = 0  # selected characters from the caret (code points)
 
 
 # Fields longer than this aren't read for auto-learn (a whole document).
@@ -687,6 +688,7 @@ def ax_field_text(pid: int, max_chars: Optional[int] = None) -> Optional[FieldTe
         ok, r = AXValueGetValue(rng, _RANGE, None)
         # A CFRange struct or, from some pyobjc versions, a (location, length) tuple.
         loc = int(r.location if hasattr(r, "location") else r[0]) if ok else -1
+        length = int(r.length if hasattr(r, "length") else r[1]) if ok else 0
     except Exception:
         return None
     if loc < 0:
@@ -695,7 +697,8 @@ def ax_field_text(pid: int, max_chars: Optional[int] = None) -> Optional[FieldTe
     units = value.encode("utf-16-le")
     caret = len(units[: loc * 2].decode("utf-16-le", errors="ignore"))
     ph = _ax_copy(el, "AXPlaceholderValue")
-    return FieldText(element=el, value=str(value), caret=caret,
+    end = len(units[: (loc + max(length, 0)) * 2].decode("utf-16-le", errors="ignore"))
+    return FieldText(element=el, value=str(value), caret=caret, sel_len=end - caret,
                      placeholder=str(ph) if isinstance(ph, str) else None)
 
 
