@@ -144,7 +144,7 @@ def test_other_hold_key_in_status(db, monkeypatch):
 
 @pytest.mark.parametrize("state,word,color", [
     ("recording", "Recording", home.S.ACCENT),
-    ("processing", "Processing", home.AMBER),
+    ("processing", "Processing", home.S.AMBER),
 ])
 def test_status_live_states(db, monkeypatch, state, word, color):
     ctl = FakeControl(status={**STATUS, "state": state})

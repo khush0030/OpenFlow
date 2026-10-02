@@ -201,14 +201,13 @@ class ToneGrid(QWidget):
         self._place(self.columns_for(self.width()))
 
 
-_RADIO_CSS = (
-    "QRadioButton{background:transparent;spacing:0;}"
-    "QRadioButton::indicator{width:16px;height:16px;border-radius:9px;"
-    f"border:1.5px solid {S.MUTED};background:{S.PAPER};}}"
-    "QRadioButton::indicator:checked{border:1.5px solid " + S.ACCENT + ";"
-    "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,"
-    f"stop:0 {S.ACCENT},stop:0.48 {S.ACCENT},stop:0.56 {S.PAPER},stop:1 {S.PAPER});}}"
-)
+def _radio_css() -> str:
+    return ("QRadioButton{background:transparent;spacing:0;}"
+            "QRadioButton::indicator{width:16px;height:16px;border-radius:9px;"
+            f"border:1.5px solid {S.MUTED};background:{S.PAPER};}}"
+            "QRadioButton::indicator:checked{border:1.5px solid " + S.ACCENT + ";"
+            "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,"
+            f"stop:0 {S.ACCENT},stop:0.48 {S.ACCENT},stop:0.56 {S.PAPER},stop:1 {S.PAPER});}}")
 
 
 class LanguageRow(QFrame):
@@ -227,7 +226,7 @@ class LanguageRow(QFrame):
         lay.setContentsMargins(14, 10, 14, 10)
         lay.setSpacing(12)
         self.radio = QRadioButton()
-        self.radio.setStyleSheet(_RADIO_CSS)
+        self.radio.setStyleSheet(_radio_css())
         self.radio.setAccessibleName(label)
         self.radio.clicked.connect(lambda: self.clicked.emit(self.value))
         lay.addWidget(self.radio, 0, Qt.AlignmentFlag.AlignVCenter)

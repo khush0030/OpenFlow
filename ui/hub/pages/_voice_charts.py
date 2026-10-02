@@ -16,10 +16,6 @@ from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QLayout, QPushButton, QSizePol
 from ui.hub import style as S
 from ui.hub.pages import _charts as C
 
-TRACK = C.BAR_TRACK
-SOFT = C.BAR_SOFT
-GRID = S.HAIR
-
 
 # ── tabs ─────────────────────────────────────────────────────────────────
 class Tabs(QWidget):
@@ -198,7 +194,7 @@ class RatioGauge(QWidget):
         sw, r = 10 * k, 50 * k
         cx, cy = 60 * k, 60 * k
         rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
-        pen = QPen(QColor(C.GAUGE_TRACK), sw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        pen = QPen(QColor(S.GAUGE_TRACK), sw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.drawArc(rect, 180 * 16, -180 * 16)
         if self.fraction > 0:
@@ -237,13 +233,13 @@ class SplitBar(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(r, 7, 7)
         p.setClipPath(clip)
-        p.fillRect(r, QColor(S.ACCENT_SOFT if self.label else TRACK))
+        p.fillRect(r, QColor(S.ACCENT_SOFT if self.label else S.BAR_TRACK))
         if self.label:
             w = r.width() * self.pct / 100.0
             p.fillRect(QRectF(0, 0, w, r.height()), QColor(S.ACCENT))
             p.setFont(S.sans(S.T_SMALL, 500))
             fm = QFontMetricsF(p.font())
-            p.setPen(QColor("#FFFFFF"))
+            p.setPen(QColor(S.ON_ACCENT))
             p.drawText(QRectF(10, 0, max(0.0, w - 14), r.height()),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                        fm.elidedText(f"{self.label} · {self.pct}%", Qt.TextElideMode.ElideRight,
@@ -304,7 +300,7 @@ class LineChart(QWidget):
             x = left + (w * i / (n - 1) if n > 1 else w / 2)
             return QPointF(x, bottom - (v - lo) / (hi - lo) * (bottom - top))
 
-        p.setPen(QPen(QColor(GRID), 1))
+        p.setPen(QPen(QColor(S.HAIR), 1))
         for j in range(3):
             y = top + (bottom - top) * j / 2
             p.drawLine(QPointF(0, y), QPointF(self.width(), y))
@@ -314,12 +310,12 @@ class LineChart(QWidget):
             spath = QPainterPath(sp[0])
             for q in sp[1:]:
                 spath.lineTo(q)
-            p.setPen(QPen(QColor(SOFT), 1.6, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap,
+            p.setPen(QPen(QColor(S.BAR_SOFT), 1.6, Qt.PenStyle.DashLine, Qt.PenCapStyle.RoundCap,
                           Qt.PenJoinStyle.RoundJoin))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(spath)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(SOFT))
+            p.setBrush(QColor(S.BAR_SOFT))
             for q in sp:
                 p.drawEllipse(q, 2.2, 2.2)
             p.setFont(S.sans(11.5))
@@ -403,11 +399,11 @@ class HourBars(QWidget):
         for h, c in enumerate(self.counts):
             x = h * slot + (slot - bw) / 2
             if c <= 0:
-                p.setBrush(QColor(TRACK))
+                p.setBrush(QColor(S.BAR_TRACK))
                 p.drawRoundedRect(QRectF(x, bottom - 3, bw, 3), 1.5, 1.5)
                 continue
             bh = max(4.0, (bottom - top) * c / peak)
-            p.setBrush(QColor(S.ACCENT if c == peak else SOFT))
+            p.setBrush(QColor(S.ACCENT if c == peak else S.BAR_SOFT))
             p.drawRoundedRect(QRectF(x, bottom - bh, bw, bh), min(3.0, bw / 2), min(3.0, bw / 2))
         p.setFont(small)
         p.setPen(QColor(S.MUTED))
@@ -419,9 +415,6 @@ class HourBars(QWidget):
 
 
 # ── stacked bar (where the time goes) ───────────────────────────────────
-STACK_COLORS = ("#A82A1A", S.ACCENT, "#F09484", "#F8C4BA", "#C9BFAF", "#E2DACD")
-
-
 class StackBar(QWidget):
     """One rounded bar split into segments (shares 0–1, in order), each a
     shade of the accent, ending in neutrals. Labels live in the legend
@@ -445,13 +438,13 @@ class StackBar(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(r, 6, 6)
         p.setClipPath(clip)
-        p.fillRect(r, QColor(TRACK))
+        p.fillRect(r, QColor(S.BAR_TRACK))
         total = sum(self.shares) or 1.0
         x = 0.0
         for i, share in enumerate(self.shares):
             w = r.width() * share / total
             if w > 0:
-                p.fillRect(QRectF(x, 0, w, r.height()), QColor(STACK_COLORS[i % len(STACK_COLORS)]))
+                p.fillRect(QRectF(x, 0, w, r.height()), QColor(S.STACK[i % len(S.STACK)]))
                 if x > 0:   # hairline gap between segments
                     p.fillRect(QRectF(x, 0, 1.5, r.height()), QColor(S.CARD))
             x += w

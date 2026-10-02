@@ -346,12 +346,12 @@ class SettingsPage(Page):
             self.stack.setMaximumWidth(16777215)
             r = (S.CONTROL_H - 6) // 2
             self.nav_box.setStyleSheet(
-                f"QFrame#subnav{{background:{C.SEG_TRACK};border-radius:{S.CONTROL_H // 2}px;}}"
+                f"QFrame#subnav{{background:{S.SEG_TRACK};border-radius:{S.CONTROL_H // 2}px;}}"
                 f"QFrame#subnav QPushButton{{border:none;border-radius:{r}px;padding:0 14px;"
                 f"min-height:{S.CONTROL_H - 6}px;max-height:{S.CONTROL_H - 6}px;"
                 f"background:transparent;color:{S.MUTED};}}"
                 f"QFrame#subnav QPushButton:hover{{color:{S.INK};}}"
-                f"QFrame#subnav QPushButton:checked{{background:{S.PAPER};color:{S.ACCENT_TEXT};}}")
+                f"QFrame#subnav QPushButton:checked{{background:{S.SEG_ON};color:{S.ACCENT_TEXT};}}")
         else:
             self._body.setDirection(QBoxLayout.Direction.LeftToRight)
             self._body.setSpacing(32)
@@ -380,7 +380,7 @@ class SettingsPage(Page):
                 fx = QGraphicsDropShadowEffect(b)
                 fx.setBlurRadius(6)
                 fx.setOffset(0, 1)
-                fx.setColor(QColor(26, 24, 20, 38))
+                fx.setColor(QColor(S.SHADOW))
                 b.setGraphicsEffect(fx)
             else:
                 b.setGraphicsEffect(None)
@@ -397,6 +397,14 @@ class SettingsPage(Page):
         self._refresh()
         if section:
             self.select(section)
+
+    def view_state(self) -> dict:
+        current = self.stack.currentWidget()
+        return {"section": next((k for k, w in self.sections.items() if w is current), None)}
+
+    def restore_view(self, state: dict) -> None:
+        if state.get("section"):
+            self.select(state["section"])
 
     # ── persistence + header status ──────────────────────────────────────
     def _read_config(self) -> dict:
@@ -593,7 +601,8 @@ class SettingsPage(Page):
                 self._set_hint(a, "")
         self._set_hint(action, PRESS_KEYS, S.ACCENT_TEXT)
 
-    def _set_hint(self, action: str, text: str, color: str = S.ACCENT_TEXT) -> None:
+    def _set_hint(self, action: str, text: str, color: str | None = None) -> None:
+        color = color or S.ACCENT_TEXT
         hint = self.hints[action]
         hint.setStyleSheet(f"color:{color};")
         hint.setText(text)
@@ -638,9 +647,9 @@ class SettingsPage(Page):
         self.volume.setCursor(Qt.CursorShape.PointingHandCursor)
         self.volume.setStyleSheet(
             f"QSlider{{background:transparent;}}"
-            f"QSlider::groove:horizontal{{height:4px;background:{C.SLIDER_TRACK};border-radius:2px;}}"
+            f"QSlider::groove:horizontal{{height:4px;background:{S.SLIDER_TRACK};border-radius:2px;}}"
             f"QSlider::sub-page:horizontal{{background:{S.ACCENT};border-radius:2px;}}"
-            f"QSlider::handle:horizontal{{background:#FFFFFF;border:1px solid {C.KEYCAP_BORDER};"
+            f"QSlider::handle:horizontal{{background:{S.TOGGLE_THUMB};border:1px solid {S.KEYCAP_BORDER};"
             f"width:14px;height:14px;margin:-6px 0;border-radius:8px;}}")
         self.volume.setFixedHeight(22)
         self.volume_label = QLabel(f"{self.volume.value()}%")
@@ -711,12 +720,17 @@ class SettingsPage(Page):
             lambda v: self._safe(self._save, "widget", "position", v))
         self.appearance = C.Segmented((("paper", "Paper"), ("ink", "Ink"), ("auto", "Match system")),
                                       self._get("widget", "appearance", "paper"))
-        self.appearance.changed.connect(
-            lambda v: self._safe(self._save, "widget", "appearance", v))
+        self.appearance.changed.connect(lambda v: self._safe(self._set_appearance, v))
         lay.addWidget(C.Group("Widget", [
             C.Row("Position", "Where the widget sits on screen", self.position),
-            C.Row("Appearance", "Paper, Ink, or follow macOS", self.appearance),
+            C.Row("Appearance", "Widget and this window: Paper, Ink, or follow macOS",
+                  self.appearance),
         ]))
+
+    def _set_appearance(self, value: str) -> None:
+        """Save, then let the window follow (it rebuilds, deferred)."""
+        if self._save("widget", "appearance", value):
+            self.ctx.apply_theme()
 
     # ── speech & AI ──────────────────────────────────────────────────────
     @staticmethod

@@ -48,6 +48,19 @@ def _never_touch_real_launch_agents(monkeypatch, tmp_path):
     monkeypatch.setattr(login_item, "LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
 
 
+@pytest.fixture(autouse=True)
+def _hub_theme_back_to_paper():
+    # The hub's palette is module state (ui.hub.style.apply_theme); a test
+    # that switches to Ink must not leave later tests drawing in Ink.
+    yield
+    style = sys.modules.get("ui.hub.style")
+    if style is not None and style.THEME != "paper":
+        style.apply_theme("paper")
+        app_mod = sys.modules.get("ui.hub.app")
+        if app_mod is not None:
+            app_mod.apply_app_theme()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "real_workers: hub worker calls run on real threads (see tests/hub_async.py)")

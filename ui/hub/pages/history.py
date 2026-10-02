@@ -332,10 +332,11 @@ class _Flow(QLayout):
         return y + row_h - r.y() + m.top() + m.bottom()
 
 
-_SCROLLBAR = ("QScrollBar:vertical{background:transparent;width:8px;margin:4px 2px 4px 0;}"
-              f"QScrollBar::handle:vertical{{background:{S.DISABLED};border-radius:3px;min-height:30px;}}"
-              "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-              "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
+def _scrollbar() -> str:
+    return ("QScrollBar:vertical{background:transparent;width:8px;margin:4px 2px 4px 0;}"
+            f"QScrollBar::handle:vertical{{background:{S.SCROLL_HANDLE_LIST};border-radius:3px;min-height:30px;}}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+            "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
 
 
 def _clear(layout: QLayout) -> None:
@@ -474,7 +475,7 @@ class _Detail(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + _SCROLLBAR)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + _scrollbar())
         body = QWidget()
         body.setObjectName("hbody")
         body.setStyleSheet("QWidget#hbody{background:transparent;}")
@@ -779,7 +780,7 @@ class HistoryPage(Page):
         self._list_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._list_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._list_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + _SCROLLBAR)
+        self._list_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + _scrollbar())
         self._list_host = QWidget()
         self._list_host.setObjectName("hlist")
         self._list_host.setStyleSheet("QWidget#hlist{background:transparent;}")
@@ -1062,7 +1063,7 @@ class HistoryPage(Page):
             if tone == e.tone:
                 continue
             c = S.chip(tone_label(tone))
-            c.setStyleSheet(c.styleSheet() + f"QPushButton:disabled{{color:{S.DISABLED};border-color:{S.HAIR};}}"
+            c.setStyleSheet(c.styleSheet() + f"QPushButton:disabled{{color:{S.FAINT};border-color:{S.HAIR};}}"
                             f"QPushButton:checked:disabled{{background:{S.INK_SOFT};color:{S.PAPER};"
                             f"border-color:{S.INK_SOFT};}}")
             c.clicked.connect(lambda _=False, t=tone: self._guard(lambda: self._rerun(t)))

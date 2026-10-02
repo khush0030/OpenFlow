@@ -15,7 +15,8 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterable
 
-from PyQt6.QtCore import QByteArray, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6 import sip
+from PyQt6.QtCore import QByteArray, QEvent, QFileSystemWatcher, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QPainter, QPixmap, QShortcut
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtSvg import QSvgRenderer
@@ -51,15 +52,21 @@ _ICON_PATHS = {
             '<path d="M12 16.5v.01"/>',
 }
 
-MARK_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">'
-    f'<circle cx="13" cy="13" r="11" fill="none" stroke="{style.INK}" stroke-width="1.6" stroke-dasharray="52 17"/>'
-    f'<circle cx="13" cy="13" r="6.5" fill="none" stroke="{style.INK}" stroke-width="1.6" stroke-dasharray="30 11"/>'
-    f'<circle cx="13" cy="13" r="2.6" fill="{style.ACCENT}"/></svg>'
-)
+def mark_svg() -> str:
+    """The OpenFlow mark: Ink arcs (Paper on the Ink theme), accent dot."""
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">'
+        f'<circle cx="13" cy="13" r="11" fill="none" stroke="{style.INK}" stroke-width="1.6" stroke-dasharray="52 17"/>'
+        f'<circle cx="13" cy="13" r="6.5" fill="none" stroke="{style.INK}" stroke-width="1.6" stroke-dasharray="30 11"/>'
+        f'<circle cx="13" cy="13" r="2.6" fill="{style.ACCENT}"/></svg>'
+    )
 
 
-def icon_svg(name: str, color: str = style.INK, stroke: float = 1.7) -> str:
+MARK_SVG = mark_svg()   # Paper; the first-run window uses it
+
+
+def icon_svg(name: str, color: str | None = None, stroke: float = 1.7) -> str:
+    color = color or style.INK
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
             f'fill="none" stroke="{color}" stroke-width="{stroke}" stroke-linecap="round" '
             f'stroke-linejoin="round">{_ICON_PATHS.get(name, "")}</svg>')
@@ -81,6 +88,35 @@ def svg_pixmap(svg: str, size: int, dpr: float = 2.0) -> QPixmap:
 def _dpr() -> float:
     screen = QGuiApplication.primaryScreen()
     return max(2.0, screen.devicePixelRatio() if screen else 2.0)
+
+
+# ── theme sources ─────────────────────────────────────────────────────────
+def configured_appearance() -> str:
+    """[widget] appearance from config.toml (read-only: never rewrites it)."""
+    return str(cfg_mod.read().get("widget", {}).get("appearance", "paper"))
+
+
+def system_is_dark() -> bool:
+    try:
+        return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    except Exception:
+        return False
+
+
+def apply_app_theme() -> None:
+    """Tooltips, menus, combo popups and natively drawn bits follow the
+    theme too (they aren't children of any page)."""
+    app = QApplication.instance()
+    if app is None:
+        return
+    try:
+        # Re-theming re-polishes every live widget: only when it changes.
+        qss = style.app_qss()
+        if app.styleSheet() != qss:
+            app.setPalette(style.palette())
+            app.setStyleSheet(qss)
+    except Exception as e:
+        log_exception("hub", "could not theme the application", e)
 
 
 # ── sidebar ───────────────────────────────────────────────────────────────
@@ -155,7 +191,7 @@ def _brand_row() -> QWidget:
     row.setSpacing(10)
     mark = QLabel()
     mark.setFixedSize(26, 26)
-    mark.setPixmap(svg_pixmap(MARK_SVG, 26, _dpr()))
+    mark.setPixmap(svg_pixmap(mark_svg(), 26, _dpr()))
     word = QLabel("OpenFlow")
     f = style.serif(22)
     f.setWeight(QFont.Weight(500))
@@ -192,22 +228,45 @@ class PlaceholderPage(Page):
 class HubWindow(QMainWindow):
     def __init__(self, ctx: HubContext | None = None, *,
                  pages: Iterable[tuple] = PAGES, footer_pages: Iterable[tuple] = FOOTER_PAGES,
-                 geometry_path: Path | None = None, dock=None) -> None:
+                 geometry_path: Path | None = None, dock=None,
+                 appearance: Callable[[], str] | None = None,
+                 system_dark: Callable[[], bool] | None = None,
+                 watch_config: bool = True) -> None:
         super().__init__()
         self.ctx = ctx or HubContext()
         self.ctx.navigate = self.navigate
+        self.ctx.apply_theme = self._sync_theme_later
         self.dock = dock
         self.geometry_path = Path(geometry_path) if geometry_path else HUB_GEOMETRY
+        self._page_entries = (tuple(pages), tuple(footer_pages))
         self._registry: dict[str, tuple[str, str, str]] = {}
         self._pages: dict[str, QWidget] = {}
         self.nav_rows: dict[str, NavRow] = {}
         self.current_key: str | None = None
+        self._last_kwargs: dict = {}
+        # Theme (spec 2026-10-02-dark-hub): follows [widget] appearance —
+        # paper, ink, or auto = macOS. Resolved before anything is built.
+        self._appearance = appearance or configured_appearance
+        self._system_dark = system_dark or system_is_dark
+        self.theme = style.apply_theme(self.wanted_theme())
+        apply_app_theme()
 
         self.setWindowTitle("OpenFlow")
         self.setMinimumSize(*MIN_SIZE)
         self.resize(*DEFAULT_SIZE)
         self.setUnifiedTitleAndToolBarOnMac(True)
+        self._build()
 
+        QShortcut(QKeySequence(QKeySequence.StandardKey.Close), self, activated=self.close)
+        self._restore_geometry()
+        self._watch_theme(watch_config)
+
+    def _build(self) -> None:
+        """Sidebar + panel + an empty page stack, in the current theme."""
+        pages, footer_pages = self._page_entries
+        self._registry.clear()
+        self._pages.clear()
+        self.nav_rows.clear()
         root = QWidget()
         root.setObjectName("hubroot")
         root.setStyleSheet(f"QWidget#hubroot{{background:{style.DEEP};}}")
@@ -251,10 +310,97 @@ class HubWindow(QMainWindow):
         pl.addWidget(self.stack)
         cl.addWidget(self.panel)
         body.addWidget(content, 1)
-        self.setCentralWidget(root)
+        self.setCentralWidget(root)   # deletes the previous one (and its pages)
 
-        QShortcut(QKeySequence(QKeySequence.StandardKey.Close), self, activated=self.close)
-        self._restore_geometry()
+    # theme
+    def wanted_theme(self) -> str:
+        try:
+            return style.theme_for(self._appearance(), bool(self._system_dark()))
+        except Exception as e:
+            log_exception("hub", "could not resolve the appearance", e)
+            return style.THEME
+
+    def sync_theme(self) -> bool:
+        """Switch to the theme the setting / macOS ask for, rebuilding the
+        window and its pages (the current page is shown again). True when
+        the theme changed. Safe to call any time; never raises."""
+        try:
+            want = self.wanted_theme()
+            if want == self.theme:
+                return False
+            key, kwargs = self.current_key, self._last_kwargs
+            view: dict = {}
+            page = self._pages.get(key) if key else None
+            if page is not None and hasattr(page, "view_state"):
+                try:
+                    view = page.view_state() or {}
+                except Exception as e:
+                    log_exception("hub", f"page {key!r} view_state() failed", e)
+            self.theme = style.apply_theme(want)
+            # Drop the old pages first: re-theming the application re-polishes
+            # every live widget, and the old ones are about to go anyway.
+            # (Always reached from a timer or a direct call, never from a
+            # signal of a widget inside the window, so deleting now is safe.)
+            old = self.takeCentralWidget()
+            self._pages.clear()
+            if old is not None:
+                old.hide()
+                sip.delete(old)
+            apply_app_theme()
+            self.current_key = None
+            self._build()
+            if key:
+                self.navigate(key, **kwargs)
+                page = self._pages.get(key)
+                if view and page is not None and hasattr(page, "restore_view"):
+                    try:
+                        page.restore_view(view)
+                    except Exception as e:
+                        log_exception("hub", f"page {key!r} restore_view() failed", e)
+            return True
+        except Exception as e:
+            log_exception("hub", "theme switch failed", e)
+            return False
+
+    def _sync_theme_later(self, *_a) -> None:
+        # Deferred: the signal may come from a widget the rebuild deletes
+        # (Settings › Appearance), and file events arrive in bursts.
+        self._theme_timer.start()
+
+    def _watch_theme(self, watch_config: bool) -> None:
+        self._theme_timer = QTimer(self)
+        self._theme_timer.setSingleShot(True)
+        self._theme_timer.setInterval(150)
+        self._theme_timer.timeout.connect(self.sync_theme)
+        try:
+            QGuiApplication.styleHints().colorSchemeChanged.connect(self._sync_theme_later)
+        except Exception as e:  # Qt < 6.5
+            log_exception("hub", "no colour-scheme signal", e)
+        self._watcher = None
+        if watch_config:
+            # The widget's menu changes [widget] appearance via the daemon;
+            # config.toml is replaced atomically, so watch its folder too.
+            self._watcher = QFileSystemWatcher(self)
+            path = cfg_mod.CONFIG_PATH
+            self._watcher.addPaths([str(p) for p in (path, path.parent) if p.exists()])
+            self._watcher.fileChanged.connect(self._config_touched)
+            self._watcher.directoryChanged.connect(self._config_touched)
+
+    def _config_touched(self, *_a) -> None:
+        try:
+            path = str(cfg_mod.CONFIG_PATH)
+            if self._watcher is not None and path not in self._watcher.files() \
+                    and os.path.exists(path):
+                self._watcher.addPath(path)
+        except Exception as e:
+            log_exception("hub", "config watch failed", e)
+        self._sync_theme_later()
+
+    def changeEvent(self, e) -> None:  # noqa: N802
+        super().changeEvent(e)
+        # Belt and braces: re-check when the window comes forward.
+        if e.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._sync_theme_later()
 
     def _add_row(self, entry: tuple) -> NavRow:
         key, label, module, cls = entry
@@ -287,6 +433,7 @@ class HubWindow(QMainWindow):
         page = self._page(key)
         self.stack.setCurrentWidget(page)
         self.current_key = key
+        self._last_kwargs = dict(kwargs)
         for k, row in self.nav_rows.items():
             row.set_on(k == key)
         try:
