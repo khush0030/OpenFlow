@@ -95,7 +95,7 @@ Everything needed to stop opening Wispr.
   - per-stage timing in the log and history table
 - Self-correction ("…no wait, make it 3pm") in cleanup tones
 - Snippets: spoken trigger → expanded text
-- Smoke test writes into the real `~/.openflow/openflow.log` — isolate it
+- ✅ Tests never write into the real `~/.openflow/openflow.log` (conftest isolates logging)
 - Dev loop: run from source; signed build (~15 min) only per milestone
 - ✅ "Can't hear you" detection (mic muted / wrong device): the widget shows it
   when the level stays under `silence_threshold`, with a Mic settings button
