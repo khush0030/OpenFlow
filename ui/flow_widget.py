@@ -318,9 +318,14 @@ class Surface(QWidget):
 class Tooltip(Surface):
     """'Dictate' (Fraunces) + the key in a chip, white on the widget's red."""
 
-    def __init__(self, theme: Theme, title: str, hint: str) -> None:
+    def __init__(self, theme: Theme, title: str, hint: str,
+                 chip: str | None = None, on_chip=None) -> None:
         super().__init__(theme)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.chip: PillButton | None = None
+        if chip is None:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        else:
+            self.setMouseTracking(True)
         self.enter_delay_ms = TOOLTIP_DELAY_MS  # the mic grows in first
         # Not scaled with the widget: at 86% "Dictate" was too small to read
         # (user decision 2026-10-01), so it's larger than the original 15.5.
@@ -339,6 +344,20 @@ class Tooltip(Surface):
         self.hint_label.setStyleSheet("color:#FFFFFF;background:rgba(255,255,255,0.2);"
                                       "border-radius:12px;padding:3px 10px;")
         lay.addWidget(self.hint_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        if chip is not None:
+            # Widget 2.0: the tone chip; click to pick a tone / language.
+            self.chip = PillButton(chip, theme, on_chip, style="on_red", chevron=True,
+                                   size=14, weight=500, pad=(3, 10))
+            lay.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def mouseMoveEvent(self, e) -> None:
+        if self.chip is not None:
+            pos = self.chip.parentWidget().mapFrom(self, e.position().toPoint())
+            self.chip.set_hot(self.chip.geometry().contains(pos))
+
+    def leaveEvent(self, _e) -> None:
+        if self.chip is not None:
+            self.chip.set_hot(False)
 
 
 def chip_button(text: str, on_click) -> QPushButton:
@@ -504,7 +523,7 @@ class Card(Surface):
 
     def __init__(self, theme: Theme, text: str, on_copy, on_dismiss,
                  max_height: float | None = None, not_pasted: bool = False,
-                 queued: bool = False) -> None:
+                 queued: bool = False, not_replaced: bool = False) -> None:
         super().__init__(theme, radius=18)
         self.setFixedWidth(self.W + 2 * M)
         muted = f"color:{css(theme.muted)};background:transparent;"
@@ -516,6 +535,7 @@ class Card(Surface):
         head.setSpacing(9)
         head.addWidget(MarkIcon(theme))
         heading = QLabel(copy.CARD_QUEUED_HEADING if queued else
+                         copy.CARD_NOT_REPLACED_HEADING if not_replaced else
                          copy.CARD_NOT_PASTED_HEADING if not_pasted else copy.CARD_HEADING)
         heading.setFont(ui_font(12, 500))
         heading.setStyleSheet(muted)
@@ -559,6 +579,7 @@ class Card(Surface):
         foot.setSpacing(7)
         foot.addWidget(PulseDot(theme))
         hint = QLabel(copy.CARD_QUEUED_HINT if queued else
+                      copy.CARD_NOT_REPLACED_HINT if not_replaced else
                       copy.CARD_NOT_PASTED_HINT if not_pasted else copy.CARD_HINT)
         hint.setFont(ui_font(12))
         hint.setStyleSheet(muted)
@@ -588,6 +609,385 @@ class Card(Surface):
 
     def leaveEvent(self, _e) -> None:
         self.close_button.paused = False
+
+
+# ── Widget 2.0: chip, live text, done actions, picker ─────────────────────
+# Spec: docs/superpowers/specs/2026-10-02-widget-2.md
+CHIP_FLASH_MS = 600     # a chip on screen pulses red when F6 changes the tone
+FLASH_SHOW_MS = 1400    # ...or a chip pop-up shows this long
+HOVER_GRACE_MS = 220    # pointer may cross the 10 pt gap to an interactive pop-up
+COPIED_MS = 1200
+LIVE_W = 340            # live-text panel (full size, as wide as the card)
+LIVE_LINES = 2
+LIVE_SCROLL_MS = 180
+LIVE_FADE_FROM = 0.28   # opacity at the start of the oldest visible line
+PICKER_W = 276
+
+
+def _mix(a: QColor, b: QColor, t: float) -> QColor:
+    t = max(0.0, min(1.0, t))
+    return QColor(round(a.red() + (b.red() - a.red()) * t),
+                  round(a.green() + (b.green() - a.green()) * t),
+                  round(a.blue() + (b.blue() - a.blue()) * t),
+                  round(a.alpha() + (b.alpha() - a.alpha()) * t))
+
+
+class PillButton(QWidget):
+    """A small pill button painted by hand. Hover works through HoverRelay
+    (which only reaches top-level windows): the pop-up sets `hot` from its
+    own mouse moves. Styles: 'soft' (secondary fill), 'on_red' (white 20%
+    on the accent), 'picked' (accent fill), 'ghost' (no fill until hot)."""
+
+    def __init__(self, text: str, theme: Theme, on_click, style: str = "soft",
+                 chevron: bool = False, size: float = 13, weight: int = 600,
+                 pad: tuple[float, float] = (4, 11)) -> None:
+        super().__init__()
+        self.theme = theme
+        self.style = style
+        self.chevron = chevron
+        self._on_click = on_click
+        self._text = text
+        self._font = ui_font(size, weight)
+        self._pad = pad
+        self.hot = False
+        self.flash_level = 0.0
+        self._flash = QVariantAnimation(self)
+        self._flash.setDuration(CHIP_FLASH_MS)
+        self._flash.setKeyValueAt(0.0, 0.0)
+        self._flash.setKeyValueAt(0.25, 1.0)
+        self._flash.setKeyValueAt(1.0, 0.0)
+        self._flash.valueChanged.connect(self._on_flash)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(self.sizeHint())
+
+    def text(self) -> str:
+        return self._text
+
+    def set_text(self, text: str) -> None:
+        if text != self._text:
+            self._text = text
+            self.setFixedSize(self.sizeHint())
+            self.update()
+
+    def sizeHint(self):
+        from PyQt6.QtCore import QSize
+        from PyQt6.QtGui import QFontMetricsF
+        fm = QFontMetricsF(self._font)
+        w = fm.horizontalAdvance(self._text) + 2 * self._pad[1] + (11 if self.chevron else 0)
+        h = fm.capHeight() + 2 * self._pad[0] + 9
+        return QSize(math.ceil(w), math.ceil(h))
+
+    def flash(self) -> None:
+        self._flash.stop()
+        self._flash.start()
+
+    def _on_flash(self, v) -> None:
+        self.flash_level = float(v)
+        self.update()
+
+    def set_hot(self, hot: bool) -> None:
+        if hot != self.hot:
+            self.hot = hot
+            self.update()
+
+    def enterEvent(self, _e) -> None:
+        self.set_hot(True)
+
+    def leaveEvent(self, _e) -> None:
+        self.set_hot(False)
+
+    def click(self) -> None:
+        try:
+            self._on_click()
+        except Exception as e:  # a Qt slot must never raise
+            log_exception("flow_widget", "pop-up button failed", e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.click()
+
+    def colors(self) -> tuple[QColor, QColor]:
+        th = self.theme
+        white = QColor(255, 255, 255)
+        if self.style == "on_red":
+            # A control, not a label like the key hint beside it: outlined,
+            # filled only under the pointer.
+            bg, fg = QColor(255, 255, 255, 51 if self.hot else 0), white
+        elif self.style == "picked":
+            bg, fg = qc(th.accent), white
+        elif self.style == "ghost":
+            bg = qc(th.secondary_bg) if self.hot else QColor(0, 0, 0, 0)
+            fg = qc(th.text)
+        else:
+            bg = qc(th.secondary_bg)
+            if self.hot:
+                bg = _mix(bg, qc(th.text), 0.08)
+            fg = qc(th.secondary_text)
+        if self.flash_level > 0:
+            bg = _mix(bg, qc(th.accent), self.flash_level)
+            fg = _mix(fg, white, self.flash_level)
+        return bg, fg
+
+    def paintEvent(self, _e) -> None:
+        from PyQt6.QtGui import QFontMetricsF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        bg, fg = self.colors()
+        r = QRectF(self.rect())
+        p.setPen(Qt.PenStyle.NoPen)
+        if self.style == "on_red":
+            p.setPen(QPen(QColor(255, 255, 255, 150), 1.2))
+            r = r.adjusted(0.6, 0.6, -0.6, -0.6)
+        p.setBrush(bg)
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        r = QRectF(self.rect())
+        p.setFont(self._font)
+        p.setPen(fg)
+        fm = QFontMetricsF(self._font)
+        # centred on the letters (cap height), not the line box (spec §2)
+        baseline = r.center().y() + fm.capHeight() / 2
+        p.drawText(QPointF(self._pad[1], baseline), self._text)
+        if self.chevron:
+            cx = r.right() - self._pad[1] - 3.5
+            cy = r.center().y() + 0.5
+            pen = QPen(fg, 1.4)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            chev = QPainterPath(QPointF(cx - 3, cy - 1.5))
+            chev.lineTo(QPointF(cx, cy + 1.5))
+            chev.lineTo(QPointF(cx + 3, cy - 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(chev)
+
+
+class ActiveSurface(Surface):
+    """A pop-up you can point at and click. HoverRelay delivers mouse moves
+    to the window only, so this lights the PillButton under the pointer."""
+
+    def __init__(self, theme: Theme, radius: float | None = None) -> None:
+        super().__init__(theme, radius)
+        self.setMouseTracking(True)
+
+    def buttons(self) -> list[PillButton]:
+        return self.findChildren(PillButton)
+
+    def mouseMoveEvent(self, e) -> None:
+        pos = e.position().toPoint()
+        for b in self.buttons():
+            b.set_hot(b.isVisible() and b.geometry().contains(b.parentWidget().mapFrom(self, pos)))
+
+    def leaveEvent(self, _e) -> None:
+        for b in self.buttons():
+            b.set_hot(False)
+
+
+def _muted_label(text: str, theme: Theme, size: float = 12, weight: int = 500) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setFont(ui_font(size, weight))
+    lbl.setStyleSheet(f"color:{css(theme.muted)};background:transparent;")
+    return lbl
+
+
+class ChipPopup(ActiveSurface):
+    """The tone chip on its own: on hover over the recording pill, and as
+    the F6 flash beside the widget."""
+
+    def __init__(self, theme: Theme, label: str, on_chip) -> None:
+        super().__init__(theme)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(M + 14, M + 5, M + 5, M + 5)
+        lay.setSpacing(8)
+        lay.addWidget(_muted_label(copy.PICK_TONE, theme), 0, Qt.AlignmentFlag.AlignVCenter)
+        self.chip = PillButton(label, theme, on_chip, chevron=True, weight=500)
+        lay.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignVCenter)
+
+
+class LiveTextView(QWidget):
+    """The last LIVE_LINES lines of the take so far, Fraunces, at a fixed
+    size: older words fade, a new line slides the text up."""
+
+    def __init__(self, theme: Theme, width: int) -> None:
+        super().__init__()
+        from PyQt6.QtGui import QFontMetricsF
+        self.theme = theme
+        self.font_ = serif_font(15.5)
+        fm = QFontMetricsF(self.font_)
+        self.line_h = math.ceil(max(fm.lineSpacing(), 15.5 * 1.42))
+        self._ascent, self._descent = fm.ascent(), fm.descent()
+        self.setFixedSize(width, self.line_h * LIVE_LINES)
+        self.lines: list[str] = []
+        self.offset = 0.0
+        self._scroll = QVariantAnimation(self)
+        self._scroll.setDuration(LIVE_SCROLL_MS)
+        self._scroll.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._scroll.valueChanged.connect(self._on_scroll)
+
+    def wrap(self, text: str) -> list[str]:
+        from PyQt6.QtGui import QTextLayout, QTextOption
+        layout = QTextLayout(text, self.font_)
+        opt = QTextOption()
+        opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(opt)
+        layout.beginLayout()
+        out = []
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(self.width())
+            out.append(text[line.textStart():line.textStart() + line.textLength()].rstrip())
+        layout.endLayout()
+        return out
+
+    def set_text(self, text: str) -> None:
+        lines = self.wrap(" ".join(text.split()))
+        grew = len(lines) > len(self.lines) and len(lines) > LIVE_LINES
+        self.lines = lines
+        if grew:
+            self._scroll.stop()
+            self._scroll.setStartValue(float(self.line_h))
+            self._scroll.setEndValue(0.0)
+            self._scroll.start()
+        self.update()
+
+    def _on_scroll(self, v) -> None:
+        self.offset = float(v)
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        if not self.lines:
+            return
+        from PyQt6.QtGui import QLinearGradient, QBrush
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setClipRect(self.rect())
+        p.setFont(self.font_)
+        text = qc(self.theme.text)
+        overflow = len(self.lines) > LIVE_LINES
+        # During the slide, the line leaving at the top is drawn too.
+        extra = 1 if overflow and self.offset > 0.5 else 0
+        shown = self.lines[-(LIVE_LINES + extra):]
+        top = self.offset - extra * self.line_h
+        for i, line in enumerate(shown):
+            y = top + i * self.line_h
+            baseline = y + (self.line_h + self._ascent - self._descent) / 2
+            oldest = overflow and i <= extra   # the oldest visible line(s) fade
+            if oldest:
+                g = QLinearGradient(0, 0, self.width(), 0)
+                faint = QColor(text)
+                faint.setAlphaF(LIVE_FADE_FROM * (0.5 if i < extra else 1.0))
+                g.setColorAt(0.0, faint)
+                g.setColorAt(1.0, text if i == extra else faint)
+                p.setPen(QPen(QBrush(g), 1))
+            else:
+                p.setPen(text)
+            p.drawText(QPointF(0, baseline), line)
+
+
+class LivePanel(ActiveSurface):
+    """Recording with live text: the tone chip, then the words so far."""
+
+    def __init__(self, theme: Theme, chip_label: str, on_chip, text: str = "") -> None:
+        super().__init__(theme, radius=16)
+        self.setFixedWidth(LIVE_W + 2 * M)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(M + 16, M + 11, M + 16, M + 12)
+        v.setSpacing(6)
+        self.chip = PillButton(chip_label, theme, on_chip, chevron=True, size=12, weight=500,
+                               pad=(3, 9))
+        v.addWidget(self.chip, 0, Qt.AlignmentFlag.AlignLeft)
+        self.view = LiveTextView(theme, LIVE_W - 32)
+        v.addWidget(self.view)
+        if text:
+            self.view.set_text(text)
+
+    def set_text(self, text: str) -> None:
+        self.view.set_text(text)
+
+    def shape_size(self) -> tuple[float, float]:
+        h = self.layout().sizeHint().height()
+        return (LIVE_W, h - 2 * M)
+
+
+class DonePanel(ActiveSurface):
+    """After a paste, on hover: Pasted · tone chip (rewrite) · Copy · Undo."""
+
+    def __init__(self, theme: Theme, tone: str, note: str, on_rewrite, on_copy,
+                 on_undo) -> None:
+        super().__init__(theme)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(M + 16, M + 6, M + 6, M + 6)
+        lay.setSpacing(6)
+        cant = note == "cant_undo"
+        self.title = headline(copy.CANT_UNDO if cant else copy.PASTED, theme)
+        self.title.setFont(serif_font(17))
+        colour = theme.muted if cant else theme.text
+        self.title.setStyleSheet(f"color:{css(colour)};background:transparent;")
+        lay.addWidget(self.title, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addSpacing(6)
+        # The tone chip is a choice (filled, ▾); Copy and Undo are plain actions.
+        self.chip = PillButton(copy.tone_label(tone), theme, on_rewrite, chevron=True,
+                               weight=500)
+        self.copy_button = PillButton(copy.COPY, theme, self._copy, style="ghost", weight=500)
+        self.undo_button = PillButton(copy.UNDO, theme, on_undo, style="ghost", weight=500)
+        for b in (self.chip, self.copy_button, self.undo_button):
+            lay.addWidget(b, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._on_copy = on_copy
+        self._copied = QTimer(self)
+        self._copied.setSingleShot(True)
+        self._copied.timeout.connect(lambda: self.copy_button.set_text(copy.COPY))
+
+    def _copy(self) -> None:
+        self._on_copy()
+        self.copy_button.set_text(copy.COPIED)
+        self._copied.start(COPIED_MS)
+
+
+class Picker(ActiveSurface):
+    """Pick a tone (and language), inside the widget's own non-activating
+    pop-up: a QMenu could make OpenFlow the active app, and then the paste
+    target is no longer in front (undo and paste would refuse)."""
+
+    def __init__(self, theme: Theme, sections: list[tuple[str, list[tuple[str, str]], str, object]]
+                 ) -> None:
+        super().__init__(theme, radius=16)
+        self.setFixedWidth(PICKER_W + 2 * M)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(M + 12, M + 11, M + 12, M + 12)
+        v.setSpacing(0)
+        self.options: dict[tuple[int, str], PillButton] = {}
+        inner = PICKER_W - 24
+        for n, (title, options, current, on_pick) in enumerate(sections):
+            if n:
+                v.addSpacing(10)
+            label = _muted_label(title, theme, 11.5)
+            v.addWidget(label)
+            v.addSpacing(6)
+            row, used = None, inner + 1
+            for value, text in options:
+                b = PillButton(text, theme, lambda v_=value, f=on_pick: f(v_),
+                               style="picked" if value == current else "soft",
+                               size=12.5, weight=500, pad=(4, 10))
+                self.options[(n, value)] = b
+                w = b.sizeHint().width()
+                if used + 6 + w > inner:
+                    if row is not None:
+                        row.addStretch(1)
+                        v.addSpacing(6)
+                    row = QHBoxLayout()
+                    row.setSpacing(6)
+                    v.addLayout(row)
+                    used = -6
+                row.addWidget(b)
+                used += 6 + w
+            if row is not None:
+                row.addStretch(1)
+
+    def shape_size(self) -> tuple[float, float]:
+        h = self.layout().sizeHint().height()
+        return (PICKER_W, h - 2 * M)
 
 
 class DockZone(QWidget):
@@ -703,7 +1103,7 @@ class FlowWidget(QWidget):
         # keep their soft shadow so they lift off the content beneath.
         eff = self.graphicsEffect()
         if eff is not None:
-            eff.setEnabled(self.view != "idle")
+            eff.setEnabled(self.view not in ("idle", "done"))
 
     def _sync_frames(self) -> None:
         want = self.isVisible() and (self.view in ANIMATED_VIEWS or self._ring_on())
@@ -950,8 +1350,11 @@ class FlowWidget(QWidget):
             self.app.send("confirm")
 
     def enterEvent(self, _e) -> None:
-        if self.view == "idle":
+        self.app.pointer_entered()
+        if self.view in ("idle", "done"):
             self.app.set_hover(True)
+        elif self.view == "recording":
+            self.app.set_rec_hover(True)
 
     def leaveEvent(self, _e) -> None:
         if self.dragging:
@@ -959,8 +1362,8 @@ class FlowWidget(QWidget):
         if self._hot is not None:
             self._hot = None
             self.update()
-        if self.view == "hover":
-            self.app.set_hover(False)
+        # Widget 2.0: a short grace, so the pointer can reach the pop-up.
+        self.app.pointer_left()
 
     def contextMenuEvent(self, e) -> None:
         self.app.show_menu(e.globalPos())
@@ -979,7 +1382,22 @@ class FlowApp(QObject):
         self.appearance = "paper"
         self.hold_key = "cmd_r"
         self.tone = "verbatim"   # ticks in the right-click menu
+        self.language = "auto"
         self.mic = "default"
+        # Widget 2.0 (spec 2026-10-02-widget-2.md)
+        self.live_text = ""       # the take so far, while recording
+        self.done_tone = ""       # done: the pasted take's tone
+        self.note = ""            # done: "cant_undo"
+        self._picker: str | None = None   # "modes" | "rewrite" while picking
+        self._rec_hover = False   # pointer on the recording pill: show the chip
+        self._flashing = False    # F6: chip pop-up beside the widget
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._end_flash)
+        self._grace = QTimer(self)
+        self._grace.setSingleShot(True)
+        self._grace.setInterval(HOVER_GRACE_MS)
+        self._grace.timeout.connect(self._check_hover_end)
         self._hidden = False      # "Hide for 1 hour"
         self._unhide_timer = QTimer(self)
         self._unhide_timer.setSingleShot(True)
@@ -1064,6 +1482,10 @@ class FlowApp(QObject):
             QApplication.quit()
         elif kind == "level":
             self.widget.set_level(float(m.get("rms", 0.0)))
+        elif kind == "live":
+            self._on_live(str(m.get("text") or ""))
+        elif kind == "flash":
+            self._flash()
         elif kind == "config":
             if self.widget.dragging:
                 # don't yank the widget mid-drag; replayed at the drop
@@ -1074,23 +1496,31 @@ class FlowApp(QObject):
             self._apply_config(m)
             self.relayout(animate=False)
             self._show_widget()
+            self._refresh_chip()
         elif kind == "state":
+            prev = self.state
             self.state = m.get("state", "idle")
             self.text = m.get("text", "")
             self.reason = m.get("reason", "")
+            self.done_tone = m.get("tone", "") if self.state == "done" else ""
+            self.note = m.get("note", "") if self.state == "done" else ""
             self._set_hands_free(bool(m.get("hands_free")))
+            self._on_state_change(prev)
             if self.widget.dragging:
                 return  # don't yank the widget mid-drag; end_drag applies it
             self._apply_state_view()
             self.relayout()
             self._show_widget()
+            if self.state == "done" and prev != "done" and self._pointer_over_us():
+                self.set_hover(True)   # e.g. after a rewrite: show the new tone
 
     def _config_unchanged(self, m: dict) -> bool:
         pos = m["position"] if m.get("position") in POSITIONS else self.position
         look = m["appearance"] if m.get("appearance") in APPEARANCES else self.appearance
         return (pos, look, m.get("hold_key") or self.hold_key,
-                m.get("tone") or self.tone, m.get("mic") or self.mic) == \
-            (self.position, self.appearance, self.hold_key, self.tone, self.mic)
+                m.get("tone") or self.tone, m.get("mic") or self.mic,
+                m.get("language") or self.language) == \
+            (self.position, self.appearance, self.hold_key, self.tone, self.mic, self.language)
 
     def _apply_config(self, m: dict) -> None:
         if m.get("position") in POSITIONS:
@@ -1099,6 +1529,7 @@ class FlowApp(QObject):
             self.appearance = m["appearance"]
         self.hold_key = m.get("hold_key") or self.hold_key
         self.tone = m.get("tone") or self.tone
+        self.language = m.get("language") or self.language
         self.mic = m.get("mic") or self.mic
         self.theme = resolve(self.appearance, self._system_dark())
         add_shadow(self.widget, self.theme)
@@ -1113,7 +1544,7 @@ class FlowApp(QObject):
 
     def _apply_state_view(self) -> None:
         self.widget.set_hands_free(self.hands_free)
-        if not (self.widget.view == "hover" and self.state == "idle"):
+        if not (self.widget.view == "hover" and self.state in ("idle", "done")):
             self.widget.set_view(self.state)
 
     def _set_hands_free(self, on: bool) -> None:
@@ -1165,13 +1596,154 @@ class FlowApp(QObject):
             self.relayout(animate=False)
 
     def set_hover(self, on: bool) -> None:
-        if on and self.state == "idle":
+        if on and self.state in ("idle", "done") and self.widget.view != "hover":
             self.widget.set_view("hover", hot="dictate")
+            if self.state == "done":
+                self.send("hover", "on")   # hold the done window while hovered
         elif not on and self.widget.view == "hover":
+            self._picker = None
             self.widget.set_view(self.state)
+            if self.state == "done":
+                self.send("hover", "off")
         else:
             return
         self.relayout()
+
+    # ── Widget 2.0: hover bridge, chip, picker, live text, flash ──────────
+    def chip_text(self) -> str:
+        return copy.chip_label(self.tone, self.language)
+
+    def _on_state_change(self, prev: str) -> None:
+        recording = ("recording", "silent", "processing")
+        if self.state in ("recording", "silent") and prev not in recording:
+            self.live_text = ""           # a new take
+        elif self.state not in recording:
+            self.live_text = ""
+        if self.state != "recording":
+            self._rec_hover = False
+        if self.state != prev:
+            self._picker = None
+
+    def _on_live(self, text: str) -> None:
+        if self.state not in ("recording", "silent"):
+            return
+        self.live_text = text
+        if isinstance(self.popup, LivePanel):
+            self.popup.set_text(text)
+        elif self.widget.target_rect is not None and not self.widget.dragging:
+            self._sync_popup(self.widget.target_rect)
+
+    def _refresh_chip(self) -> None:
+        """The tone or language changed: relabel the chip on screen."""
+        chip = getattr(self.popup, "chip", None)
+        if isinstance(chip, PillButton) and self._popup_key is not None \
+                and self._popup_key[0] in ("tooltip", "live", "chip"):
+            chip.set_text(self.chip_text())
+            if self.widget.target_rect is not None and not self.widget.dragging:
+                self._sync_popup(self.widget.target_rect)
+
+    def _flash(self) -> None:
+        """F6 changed the tone: pulse the chip on screen, or show one."""
+        if self.widget.dragging or (self._hidden and self.state in ("idle", "done")):
+            return
+        chip = getattr(self.popup, "chip", None)
+        if isinstance(chip, PillButton) and self._popup_key is not None \
+                and self._popup_key[0] in ("tooltip", "live", "chip"):
+            chip.flash()
+            if self._flashing:
+                self._flash_timer.start(FLASH_SHOW_MS)
+            return
+        if self.widget.view not in ("idle", "done", "recording") \
+                or self.widget.target_rect is None:
+            return
+        self._flashing = True
+        self._flash_timer.start(FLASH_SHOW_MS)
+        self._sync_popup(self.widget.target_rect)
+        chip = getattr(self.popup, "chip", None)
+        if isinstance(chip, PillButton):
+            chip.flash()
+
+    def _end_flash(self) -> None:
+        if self._pointer_over_us():
+            self._flash_timer.start(FLASH_SHOW_MS // 2)   # the user is reaching for it
+            return
+        self._flashing = False
+        if self.widget.target_rect is not None and not self.widget.dragging:
+            self._sync_popup(self.widget.target_rect)
+
+    def set_rec_hover(self, on: bool) -> None:
+        if on and self.state == "recording" and not self._rec_hover:
+            self._rec_hover = True
+            if self.widget.target_rect is not None:
+                self._sync_popup(self.widget.target_rect)
+
+    def open_picker(self, kind: str) -> None:
+        self._picker = kind
+        self._grace.stop()
+        if self.widget.target_rect is not None:
+            self._sync_popup(self.widget.target_rect)
+
+    def _close_picker(self) -> None:
+        self._picker = None
+        if self.widget.target_rect is not None:
+            self._sync_popup(self.widget.target_rect)
+
+    def pick_tone(self, tone: str) -> None:
+        self.tone = tone                  # the daemon echoes it in config
+        self.send("set_tone", tone)
+        self._close_picker()
+
+    def pick_language(self, language: str) -> None:
+        self.language = language
+        self.send("set_language", language)
+        self._close_picker()
+
+    def pick_rewrite(self, tone: str) -> None:
+        self._picker = None
+        self.send("redo", tone)
+
+    def pointer_entered(self) -> None:
+        self._grace.stop()
+
+    def pointer_left(self) -> None:
+        if self.widget.view == "hover" or self._rec_hover or self._picker is not None:
+            self._grace.start()
+
+    def _pointer_over_us(self) -> bool:
+        try:
+            pos = QCursor.pos()
+            return any(w is not None and w.isVisible() and w.frameGeometry().contains(pos)
+                       for w in (self.widget, self.popup))
+        except Exception:
+            return False
+
+    def _check_hover_end(self) -> None:
+        try:
+            if not self._pointer_over_us():
+                self.end_hover()
+        except Exception as e:
+            log_exception("flow_widget", "hover end failed", e)
+
+    def end_hover(self) -> None:
+        """The pointer left the widget and its pop-up."""
+        self._picker = None
+        self._rec_hover = False
+        if self.widget.view == "hover":
+            self.set_hover(False)
+        elif self.widget.target_rect is not None and not self.widget.dragging:
+            self._sync_popup(self.widget.target_rect)
+
+    def eventFilter(self, obj, ev) -> bool:
+        # The pop-up's Enter / Leave (real, or from HoverRelay) keep the hover.
+        try:
+            if obj is self.popup:
+                if ev.type() == ev.Type.Enter:
+                    self._grace.stop()
+                elif ev.type() == ev.Type.Leave:
+                    self.pointer_left()
+        except Exception as e:
+            log_exception("flow_widget", "pop-up hover filter failed", e)
+        return False
 
     # pop-ups
     def _close_popup(self) -> None:
@@ -1180,12 +1752,50 @@ class FlowApp(QObject):
             self.popup = None
             self._popup_key = None
 
-    def _make_popup(self, max_height: float) -> Surface | None:
-        v, th = self.widget.view, self.theme
+    def _popup_kind(self) -> str | None:
+        """Which pop-up the current view shows (one slot, by priority)."""
+        v = self.widget.view
+        if self._picker is not None and v in ("hover", "recording"):
+            return f"picker:{self._picker}"
         if v == "hover":
-            return Tooltip(th, copy.DICTATE, copy.hold_label(self.hold_key))
+            return "done" if self.state == "done" else "tooltip"
         if v == "recording" and self._hint_on:
+            return "hint"
+        if v in ("recording", "processing") and self.live_text:
+            return "live"
+        if v == "recording" and self._rec_hover:
+            return "chip"
+        if self._flashing and v in ("idle", "done", "recording"):
+            return "chip"
+        if v == "done":
+            return None   # at rest a paste looks idle; actions come on hover
+        return v
+
+    def _make_popup(self, max_height: float, kind: str | None = None) -> Surface | None:
+        v, th = self.widget.view, self.theme
+        kind = kind or self._popup_kind()
+        tones = [(t, copy.tone_label(t)) for t in copy.TONE_ORDER]
+        if kind == "tooltip":
+            return Tooltip(th, copy.DICTATE, copy.hold_label(self.hold_key),
+                           chip=self.chip_text(), on_chip=lambda: self.open_picker("modes"))
+        if kind == "done":
+            return DonePanel(th, self.done_tone, self.note,
+                             on_rewrite=lambda: self.open_picker("rewrite"),
+                             on_copy=lambda: self.send("copy_last"),
+                             on_undo=lambda: self.send("undo_paste"))
+        if kind == "picker:modes":
+            langs = [(lang, copy.LANGUAGE_LABELS[lang]) for lang in copy.LANGUAGE_ORDER]
+            return Picker(th, [(copy.PICK_TONE, tones, self.tone, self.pick_tone),
+                               (copy.PICK_LANGUAGE, langs, self.language, self.pick_language)])
+        if kind == "picker:rewrite":
+            return Picker(th, [(copy.REWRITE_AS, tones, self.done_tone, self.pick_rewrite)])
+        if kind == "hint":
             return Tooltip(th, copy.HANDS_FREE, copy.finish_label(self.hold_key))
+        if kind == "live":
+            return LivePanel(th, self.chip_text(), lambda: self.open_picker("modes"),
+                             text=self.live_text)
+        if kind == "chip":
+            return ChipPopup(th, self.chip_text(), lambda: self.open_picker("modes"))
         if v == "silent":
             return Toast(th, copy.CANT_HEAR, copy.MIC_SETTINGS, open_mic_settings)
         if v == "cancelled":
@@ -1205,7 +1815,8 @@ class FlowApp(QObject):
         if v == "card":
             return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
                         max_height=max_height, not_pasted=self.reason == "not_pasted",
-                        queued=self.reason == "queued")
+                        queued=self.reason == "queued",
+                        not_replaced=self.reason == "not_replaced")
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:
@@ -1213,13 +1824,17 @@ class FlowApp(QObject):
         final rect (never mid-animation) so it can't overlap the widget."""
         screen = self._screen or self._screen_rect()
         max_h = popup_max_height(anchor, screen, self.position)
-        key = (self.widget.view, self.text, self.reason, self.theme.name, self.hold_key,
-               self.position, max_h, self._hint_on)
+        kind = self._popup_kind()
+        # A picker shows the current choice; other chips are relabelled in place.
+        modes = (self.tone, self.language) if (kind or "").startswith("picker") else None
+        key = (kind, self.text, self.reason, self.theme.name, self.hold_key,
+               self.position, max_h, self.note, self.done_tone, modes)
         if self.popup is None or key != self._popup_key:
             self._close_popup()
-            popup = self._make_popup(max_h)
+            popup = self._make_popup(max_h, kind)
             if popup is None:
                 return
+            popup.installEventFilter(self)
             self.popup, self._popup_key = popup, key
         # Unchanged pop-ups are only moved, so timers and hover-pause survive.
         rect = popup_rect(anchor, self.popup.shape_size(), self.position)
@@ -1229,6 +1844,7 @@ class FlowApp(QObject):
 
     # drag to dock
     def begin_drag(self) -> None:
+        self._picker = None
         self._close_popup()
         screen = self._screen or self._screen_rect()
         for pos in POSITIONS:
@@ -1275,7 +1891,7 @@ class FlowApp(QObject):
     def _show_widget(self) -> None:
         """Show the widget unless it's hidden and there's nothing to show:
         recordings and results still appear while hidden."""
-        if self._hidden and self.state == "idle":
+        if self._hidden and self.state in ("idle", "done"):
             self._close_popup()
             self.widget.hide()
         else:

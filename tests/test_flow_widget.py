@@ -457,6 +457,11 @@ def test_hover_works_while_another_app_is_active(fa, monkeypatch):
     assert fa.widget.view == "hover"
     assert isinstance(fa.popup, fw.Tooltip)
     fa._hover.update(QPointF(400, 400))
+    # Widget 2.0: a short grace lets the pointer cross to the pop-up's chip.
+    assert fa.widget.view == "hover" and fa._grace.isActive()
+    monkeypatch.setattr(fa, "_pointer_over_us", lambda: False)
+    fa._grace.stop()
+    fa._check_hover_end()
     assert fa.widget.view == "idle"
 
 

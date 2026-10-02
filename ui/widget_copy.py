@@ -64,3 +64,33 @@ def hold_label(key: str) -> str:
 def finish_label(key: str) -> str:
     """Hands-free hint after HANDS_FREE, e.g. '· tap ⌘ right to finish'."""
     return f"· tap {key_name(key)} to finish"
+
+
+# Widget 2.0 (spec 2026-10-02-widget-2.md)
+PASTED = "Pasted"
+COPIED = "Copied"
+CANT_UNDO = "Can't undo here"
+REWRITE_AS = "Rewrite as"
+PICK_TONE = "Tone"
+PICK_LANGUAGE = "Language"
+# Card after a rewrite that couldn't replace the pasted text (reason "not_replaced").
+CARD_NOT_REPLACED_HEADING = "Couldn't replace"
+CARD_NOT_REPLACED_HINT = "On your clipboard · ⌘V to paste"
+LANGUAGE_LABELS = {"auto": "Auto", "en": "English", "hi": "Hindi", "hi_roman": "Hindi (Roman)",
+                   "hinglish": "Hinglish", "hi_to_en": "Hindi → English",
+                   "en_to_hi": "English → Hindi"}
+# Picker order: the order F6 cycles (daemon._TONE_CYCLE / _LANG_CYCLE).
+TONE_ORDER = ("raw", "verbatim", "casual", "professional", "bullets", "email", "slack")
+LANGUAGE_ORDER = ("auto", "en", "hi", "hi_roman", "hinglish", "hi_to_en", "en_to_hi")
+
+
+def tone_label(tone: str) -> str:
+    return TONE_LABELS.get(tone or "", (tone or "").capitalize())
+
+
+def chip_label(tone: str, language: str = "auto") -> str:
+    """The tone chip: 'Casual', or 'Casual · Hindi' when the language isn't Auto."""
+    label = tone_label(tone)
+    if language and language != "auto":
+        label += f" · {LANGUAGE_LABELS.get(language, language)}"
+    return label
