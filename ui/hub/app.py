@@ -457,8 +457,12 @@ def send_show(sock_path: Path, page: str, timeout: float = 1.0) -> bool:
 class HubServer:
     """Listens for {"show": page} lines from later launches."""
 
-    def __init__(self, sock_path: Path, on_show: Callable[[str], None]) -> None:
+    def __init__(self, sock_path: Path, on_show: Callable[[str], None],
+                 on_quit: Callable[[], None] | None = None,
+                 on_raise: Callable[[], None] | None = None) -> None:
         self.on_show = on_show
+        self.on_quit = on_quit      # {"quit": true}: OpenFlow quit from the Dock / ⌘Q
+        self.on_raise = on_raise    # {"raise": true}: Dock click, keep the current page
         self.path = str(sock_path)
         Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
         self.server = QLocalServer()
@@ -487,12 +491,19 @@ class HubServer:
             if not line.strip():
                 continue
             try:
-                page = json.loads(line).get("show")
+                msg = json.loads(line)
+                page = msg.get("show")
             except Exception as e:
                 log_exception("hub", f"bad hub.sock message {line[:80]!r}", e)
                 continue
             try:
-                self.on_show(page if isinstance(page, str) and page else "home")
+                if msg.get("quit"):
+                    if self.on_quit is not None:
+                        self.on_quit()
+                elif msg.get("raise"):
+                    (self.on_raise or (lambda: self.on_show("")))()
+                else:
+                    self.on_show(page if isinstance(page, str) and page else "home")
             except Exception as e:
                 log_exception("hub", "show request failed", e)
 
@@ -501,9 +512,25 @@ class HubServer:
 
 
 # ── entry point ───────────────────────────────────────────────────────────
-def _show_in_dock() -> bool:
+def _daemon_running() -> bool:
+    """True when the menu bar app holds its single-instance lock."""
+    import cli
+    fd = cli.acquire_daemon_lock(cli.DAEMON_LOCK)
+    if fd is None:
+        return True
+    cli.release_daemon_lock(fd)
+    return False
+
+
+def _show_in_dock(daemon_running: Callable[[], bool] = _daemon_running) -> bool:
+    """Should this window process have its own Dock icon? With Show in Dock
+    on, the running menu bar app already owns the OpenFlow Dock icon (and
+    quitting it closes this window too), so the window doesn't add a second
+    one. Only when OpenFlow itself isn't running does the window show it."""
     import config as cfg_mod
-    return bool(cfg_mod.load().get("hub", {}).get("show_in_dock", True))
+    if not bool(cfg_mod.load().get("hub", {}).get("show_in_dock", True)):
+        return False
+    return not daemon_running()
 
 
 def main(page: str = "home", *, sock_path: Path | None = None,
@@ -521,7 +548,8 @@ def main(page: str = "home", *, sock_path: Path | None = None,
     win = HubWindow(geometry_path=geometry_path)
     win.dock = DockPresence(AppKitBridge(), quit=app.quit, wanted=_show_in_dock)
     win.ctx.apply_dock = win.dock.apply
-    server = HubServer(sock_path, lambda p: win.present(p))
+    server = HubServer(sock_path, lambda p: win.present(p), on_quit=app.quit,
+                       on_raise=lambda: win.present(None))
     app.aboutToQuit.connect(win.save_geometry)
     win.present(page)
     try:

@@ -1,9 +1,11 @@
-"""Insights page (spec §5.2): two tabs.
+"""Insights page (spec §5.2): three tabs.
 
 "Your usage": every number from stats.compute over the history file.
 "Your voice": how the user speaks, from voice.analyze over the same rows,
 plus an on-request AI voice profile (voice_profile: one cloud call, cached
 in ~/.openflow/voice_profile.json).
+"Reliability": outcomes and key-up latency, from reliability.analyze over
+the same file (ROADMAP Phase 4, "Reliability you can see").
 
 Layout: every multi-card row is an S.Reflow, so cards stack instead of
 clipping at the 985 pt window (≈735 pt panel)."""
@@ -17,6 +19,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (QGridLayout, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
                              QWidget)
 
+import reliability
 import stats
 import voice
 import voice_profile
@@ -30,7 +33,8 @@ from ui.hub.pages import _voice_charts as V
 TONES = tuple(widget_copy.TONE_LABELS)           # raw, verbatim, casual, …
 APP_NOTE = "Per-app breakdown appears once OpenFlow has noted which apps you dictate into."
 MAX_APPS = 7
-TAB_LABELS = ["Your usage", "Your voice"]
+TAB_LABELS = ["Your usage", "Your voice", "Reliability"]
+STT_PATH_LABELS = {"stream": "Streaming", "upload": "Upload (fallback)", "batch": "Upload"}
 NAME_COL_MAX = 168            # bar-row label column: elides past this
 
 # Row breakpoints (body width, pt). The 2-up rows stack below ROW2; the
@@ -175,9 +179,13 @@ class InsightsPage(Page):
 
         self.usage = self._build_usage()
         self.voice_tab = self._build_voice()
+        self.rel_tab = self._build_reliability()
         root.addWidget(self.usage)
         root.addWidget(self.voice_tab)
+        root.addWidget(self.rel_tab)
         self.voice_tab.hide()
+        self.rel_tab.hide()
+        self.rel: reliability.Reliability = reliability.Reliability()
         root.addStretch(1)
         self.narrow: bool | None = None
 
@@ -198,6 +206,7 @@ class InsightsPage(Page):
         try:
             self.usage.setVisible(i == 0)
             self.voice_tab.setVisible(i == 1)
+            self.rel_tab.setVisible(i == 2)
             if i == 1:
                 self._ask_provider()
         except Exception as exc:  # pragma: no cover - never crash the window
@@ -544,6 +553,323 @@ class InsightsPage(Page):
         self._render_profile()
         return c
 
+    # ════════════════════════ Reliability ════════════════════════
+    def _build_reliability(self) -> QWidget:
+        w = QWidget()
+        col = QVBoxLayout(w)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(S.GAP)
+
+        self.rel_intro = _text(S.T_SMALL, S.MUTED, rich=False)
+        col.addWidget(self.rel_intro)
+
+        self.rel_empty = _card()
+        self.rel_empty.body.addWidget(S.heading("Reliability shows up after a few takes"))
+        self.rel_empty_note = _text(S.T_BODY, S.INK_SOFT, rich=False)
+        self.rel_empty.body.addWidget(self.rel_empty_note)
+        col.addWidget(self.rel_empty)
+
+        self.rel_full = QWidget()
+        full = QVBoxLayout(self.rel_full)
+        full.setContentsMargins(0, 0, 0, 0)
+        full.setSpacing(S.GAP)
+        col.addWidget(self.rel_full)
+
+        tiles = S.Reflow(S.WIDE)
+        a, b = S.Reflow(TILE_PAIR), S.Reflow(TILE_PAIR)
+        t1, self.rel_rate_value, self.rel_rate_sub = self._tile("Pasted")
+        t2, self.rel_p50_value, self.rel_p50_sub = self._tile("Typical · p50")
+        t3, self.rel_p90_value, self.rel_p90_sub = self._tile("Slow · p90")
+        t4, self.rel_timed_value, self.rel_timed_sub = self._tile("Timed takes")
+        a.add(t1)
+        a.add(t2)
+        b.add(t3)
+        b.add(t4)
+        tiles.add(a)
+        tiles.add(b)
+        full.addWidget(tiles)
+
+        r1 = S.Reflow(S.WIDE)
+        r1.add(self._rel_trend_card(), 3)
+        r1.add(self._rel_length_card(), 2)
+        full.addWidget(r1)
+        r2 = S.Reflow(S.WIDE - 120)
+        r2.add(self._rel_stage_card())
+        r2.add(self._rel_outcome_card())
+        full.addWidget(r2)
+        full.addWidget(self._rel_paths_card())
+
+        self.rel_footnote = _text(S.T_SMALL, S.MUTED, rich=False)
+        self.rel_footnote.setText(
+            "Wait is measured from the moment you let go of the key to the text landing "
+            "(the paste included). Retries and re-runs aren't counted in it, since they "
+            "don't start at a key-up. p50 is the typical take; p90 means 9 in 10 takes were "
+            "this fast or faster. Everything here is worked out on this Mac from your history.")
+        full.addWidget(self.rel_footnote)
+        return w
+
+    def _rel_trend_card(self) -> S.Card:
+        c = _card()
+        self.rel_trend_eyebrow = S.eyebrow("Weekly")
+        _card_head(c, "Wait over time", self.rel_trend_eyebrow)
+        self.rel_trend_caption = _text(S.T_SMALL, S.MUTED, rich=True)
+        c.body.addWidget(self.rel_trend_caption)
+        c.body.addSpacing(4)
+        self.rel_trend = V.LineChart(156, fmt=lambda v: f"{v:.2f} s")
+        c.body.addWidget(self.rel_trend)
+        self.rel_trend_note = self._note()
+        c.body.addWidget(self.rel_trend_note)
+        c.body.addStretch(1)
+        return c
+
+    def _rel_length_card(self) -> S.Card:
+        c = _card()
+        _card_head(c, "Wait by take length")
+        self.rel_length_caption = _text(S.T_SMALL, S.MUTED, rich=False)
+        c.body.addWidget(self.rel_length_caption)
+        c.body.addSpacing(4)
+        self.rel_length_grid = _bar_grid()
+        c.body.addLayout(self.rel_length_grid)
+        self.rel_length_note = self._note()
+        c.body.addWidget(self.rel_length_note)
+        c.body.addStretch(1)
+        return c
+
+    def _rel_stage_card(self) -> S.Card:
+        c = _card()
+        self.rel_stage_eyebrow = S.eyebrow("")
+        _card_head(c, "Where the time goes", self.rel_stage_eyebrow)
+        self.rel_stage_caption = _text(S.T_SMALL, S.MUTED, rich=True)
+        c.body.addWidget(self.rel_stage_caption)
+        c.body.addSpacing(4)
+        self.rel_stack = V.StackBar()
+        c.body.addWidget(self.rel_stack)
+        c.body.addSpacing(4)
+        self.rel_stage_grid = QGridLayout()
+        self.rel_stage_grid.setHorizontalSpacing(10)
+        self.rel_stage_grid.setVerticalSpacing(8)
+        self.rel_stage_grid.setColumnStretch(1, 1)
+        c.body.addLayout(self.rel_stage_grid)
+        c.body.addStretch(1)
+        return c
+
+    def _rel_outcome_card(self) -> S.Card:
+        c = _card()
+        self.rel_outcome_eyebrow = S.eyebrow("")
+        _card_head(c, "How takes ended", self.rel_outcome_eyebrow)
+        self.rel_outcome_caption = _text(S.T_SMALL, S.MUTED, rich=True)
+        c.body.addWidget(self.rel_outcome_caption)
+        c.body.addSpacing(4)
+        self.rel_outcome_grid = _bar_grid()
+        c.body.addLayout(self.rel_outcome_grid)
+        self.rel_cause_label = S.eyebrow("Failures by cause")
+        c.body.addSpacing(4)
+        c.body.addWidget(self.rel_cause_label)
+        self.rel_cause_grid = _bar_grid()
+        c.body.addLayout(self.rel_cause_grid)
+        self.rel_outcome_note = self._note()
+        c.body.addWidget(self.rel_outcome_note)
+        c.body.addStretch(1)
+        return c
+
+    def _rel_paths_card(self) -> S.Card:
+        c = _card()
+        _card_head(c, "How takes were served", S.eyebrow("Speech · cleanup"))
+        self.rel_paths_caption = _text(S.T_SMALL, S.MUTED, rich=False)
+        c.body.addWidget(self.rel_paths_caption)
+        c.body.addSpacing(4)
+        split = S.Reflow(640, spacing=28)
+        left, right = QWidget(), QWidget()
+        lc, rc = QVBoxLayout(left), QVBoxLayout(right)
+        for lay in (lc, rc):
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(10)
+        lc.addWidget(S.eyebrow("Speech-to-text path"))
+        self.rel_stt_grid = _bar_grid()
+        lc.addLayout(self.rel_stt_grid)
+        self.rel_stt_note = self._note()
+        lc.addWidget(self.rel_stt_note)
+        lc.addStretch(1)
+        rc.addWidget(S.eyebrow("Cleanup provider"))
+        self.rel_llm_grid = _bar_grid()
+        rc.addLayout(self.rel_llm_grid)
+        self.rel_llm_note = self._note()
+        rc.addWidget(self.rel_llm_note)
+        rc.addStretch(1)
+        left.setMinimumWidth(1)
+        right.setMinimumWidth(1)
+        split.add(left)
+        split.add(right)
+        c.body.addWidget(split)
+        return c
+
+    def _fill_reliability(self, r: reliability.Reliability) -> None:
+        self.rel = r
+        fs = reliability.fmt_s
+        enough = r.enough
+        self.rel_empty.setVisible(not enough)
+        self.rel_full.setVisible(enough)
+        if not enough:
+            self.rel_intro.setText("How dependably dictation works on this Mac, from your history.")
+            left = reliability.MIN_TAKES - r.timed
+            self.rel_empty_note.setText(
+                f"Wait times and success rate appear after {reliability.MIN_TAKES} timed "
+                f"dictations, so the numbers mean something. You have "
+                f"{C.plural(r.timed, 'timed take')} so far; {C.num(left)} more to go. "
+                "Takes saved before OpenFlow started timing each stage aren't counted.")
+            return
+        self.rel_intro.setText(
+            f"How dependably dictation works, from {C.plural(r.takes, 'take')} on this Mac: "
+            "how long you wait after letting go of the key, where that time goes, and how "
+            "takes ended.")
+
+        # tiles
+        if r.success_rate is not None:
+            pct = 100 * r.success_rate
+            self.rel_rate_value.setText(f"{pct:.0f}%" if pct >= 99.95 else f"{pct:.1f}%")
+            self.rel_rate_sub.setText(f"{C.num(r.pasted)} of {C.num(r.pasted + r.failed)} "
+                                      "takes pasted; cancels left out")
+        else:
+            self.rel_rate_value.setText("–")
+            self.rel_rate_sub.setText(
+                "Not measured yet: so far only takes that pasted are saved"
+                if not r.status_recorded else
+                f"Needs {reliability.MIN_OUTCOMES} takes with a recorded outcome")
+        self.rel_p50_value.setText(fs(r.overall.p50))
+        self.rel_p50_sub.setText("Wait from key-up to text; half of takes were faster")
+        self.rel_p90_value.setText(fs(r.overall.p90))
+        self.rel_p90_sub.setText(f"9 in 10 takes were faster · slowest {fs(r.slowest)}")
+        self.rel_timed_value.setText(C.num(r.timed))
+        untimed = r.takes - r.timed
+        self.rel_timed_sub.setText(
+            f"Of {C.num(r.takes)}; the other {C.num(untimed)} are from before timing, "
+            "re-runs or didn't paste" if untimed else "Every take is timed")
+
+        self._fill_rel_trend(r)
+        self._fill_rel_lengths(r)
+        self._fill_rel_stages(r)
+        self._fill_rel_outcomes(r)
+        self._fill_rel_paths(r)
+
+    def _fill_rel_trend(self, r: reliability.Reliability) -> None:
+        pts = r.weekly
+        ok = len(pts) >= reliability.MIN_TREND_WEEKS
+        self.rel_trend.setVisible(ok)
+        self.rel_trend_note.setVisible(not ok)
+        self.rel_trend_eyebrow.setText(C.plural(len(pts), "week").upper())
+        if ok:
+            self.rel_trend.set_points([(_week_label(w.week), w.p50) for w in pts],
+                                      [w.p90 for w in pts])
+            first, last = pts[0].p50, pts[-1].p50
+            diff = last - first
+            trend = ("about the same as" if abs(diff) < 0.05 * max(first, 0.01)
+                     else f"{reliability.fmt_s(abs(diff))} {'slower' if diff > 0 else 'faster'} than")
+            self.rel_trend_caption.setText(
+                f"Typical wait (p50, solid) and slow takes (p90, dashed) in each week with "
+                f"{reliability.MIN_WEEK_TAKES}+ timed takes. Your latest week is {trend} your first.")
+        else:
+            self.rel_trend_caption.setText("Typical and slow waits, week by week.")
+            self.rel_trend_note.setText(
+                f"The trend appears once {reliability.MIN_TREND_WEEKS} weeks each have "
+                f"{reliability.MIN_WEEK_TAKES}+ timed takes (so far: {len(pts)}).")
+
+    def _fill_rel_lengths(self, r: reliability.Reliability) -> None:
+        shown = [b for b in r.by_length if b.p50 is not None]
+        top = max((b.p50 or 0 for b in shown), default=0.0)
+        fs = reliability.fmt_s
+        rows = []
+        for b in r.by_length:
+            if b.p50 is None:
+                rows.append((b.label, 0, C.plural(b.n, "take") if b.n else "–", False))
+            else:
+                rows.append((b.label, 100 * b.p50 / top if top else 0, fs(b.p50),
+                             b.p50 == top and len(shown) > 1))
+        self.rel_length_rows = rows
+        _fill_bars(self.rel_length_grid, rows)
+        self.rel_length_caption.setText(
+            "Typical wait (p50) by how long you spoke. Longer takes leave more speech to "
+            "finish and more text to clean up.")
+        thin = [b for b in r.by_length if b.p50 is None]
+        self.rel_length_note.setText(
+            f"No bar means fewer than {reliability.MIN_BUCKET_TAKES} timed takes that long.")
+        self.rel_length_note.setVisible(bool(thin))
+
+    def _fill_rel_stages(self, r: reliability.Reliability) -> None:
+        stages = [s for s in r.stages if s.n > 0 and s.mean > 0]
+        self.rel_stage_eyebrow.setText(C.plural(r.timed, "take").upper())
+        self.rel_stage_caption.setText(
+            f"On average <b>{reliability.fmt_s(r.mean_total)}</b> from key-up to text. "
+            "These are averages, so the parts add up to the whole.")
+        self.rel_stack.set_shares([s.share for s in stages])
+        _clear(self.rel_stage_grid)
+        self.rel_stage_rows = []
+        for i, s in enumerate(stages):
+            sw = V.Swatch(V.STACK_COLORS[i % len(V.STACK_COLORS)])
+            self.rel_stage_grid.addWidget(sw, i, 0, Qt.AlignmentFlag.AlignVCenter)
+            name = V.ElideLabel(s.label)
+            name.setFont(S.sans(S.T_UI))
+            name.setStyleSheet(f"color:{S.INK};background:transparent;")
+            self.rel_stage_grid.addWidget(name, i, 1)
+            val = QLabel(f"{reliability.fmt_s(s.mean)} · {round(100 * s.share)}%")
+            val.setFont(S.mono(11, 400))
+            val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            val.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+            self.rel_stage_grid.addWidget(val, i, 2)
+            self.rel_stage_rows.append((s.label, val.text()))
+
+    def _fill_rel_outcomes(self, r: reliability.Reliability) -> None:
+        n = r.takes
+
+        def row(label, c, strong):
+            return (label, 100 * c / n if n else 0,
+                    f"{C.num(c)} · {round(100 * c / n) if n else 0}%", strong)
+        rows = [row("Pasted", r.pasted, True)]
+        if r.status_recorded:
+            rows += [row("Didn't paste", r.failed, False), row("Cancelled", r.cancelled, False)]
+        self.rel_outcome_rows = rows
+        _fill_bars(self.rel_outcome_grid, rows)
+        self.rel_outcome_eyebrow.setText(C.plural(n, "take").upper())
+        causes = r.failures[:5]
+        peak = causes[0][1] if causes else 0
+        _fill_bars(self.rel_cause_grid, [(c, 100 * k / peak if peak else 0, C.num(k), i == 0)
+                                         for i, (c, k) in enumerate(causes)])
+        self.rel_cause_label.setVisible(bool(causes))
+        if not r.status_recorded:
+            self.rel_outcome_caption.setText(
+                "Every saved take pasted, because until now OpenFlow only saved the takes "
+                "that did.")
+            self.rel_outcome_note.setText(
+                "Failed and cancelled takes, and what went wrong, are counted from the "
+                "never-lose-a-word update on.")
+        else:
+            extra = f" {C.plural(r.retried, 'take')} pasted after a retry." if r.retried else ""
+            self.rel_outcome_caption.setText(
+                f"<b>{C.num(r.failed)}</b> didn't paste.{extra}" if r.failed
+                else f"Nothing failed.{extra}")
+            self.rel_outcome_note.setText(
+                "Takes saved before outcomes were recorded count as pasted.")
+
+    def _fill_rel_paths(self, r: reliability.Reliability) -> None:
+        def fill(grid, note, shares, unrecorded, labels, what):
+            total = sum(c for _k, c in shares) + unrecorded
+            rows = [(labels.get(k, k[:1].upper() + k[1:]), 100 * c / total if total else 0,
+                     f"{C.num(c)} · {round(100 * c / total) if total else 0}%", i == 0)
+                    for i, (k, c) in enumerate(shares)]
+            if unrecorded and shares:
+                rows.append(("Not recorded", 100 * unrecorded / total, C.num(unrecorded), False))
+            _fill_bars(grid, rows, dim=("Not recorded",))
+            note.setVisible(not shares)
+            note.setText(f"Not recorded yet. Which {what} served each take is saved from "
+                         "the failover update on.")
+            return rows
+        self.rel_stt_rows = fill(self.rel_stt_grid, self.rel_stt_note, r.stt_paths,
+                                 r.stt_unrecorded, STT_PATH_LABELS, "speech path")
+        self.rel_llm_rows = fill(self.rel_llm_grid, self.rel_llm_note, r.cleanup_providers,
+                                 r.cleanup_unrecorded, {}, "cleanup provider")
+        self.rel_paths_caption.setText(
+            "Share of takes by how speech became text and which AI cleaned it up. A fallback "
+            "here means the first choice was slow or down and the take still landed.")
+
     # ════════════════════════ data ════════════════════════
     def shown(self, **kwargs) -> None:
         try:
@@ -575,6 +901,12 @@ class InsightsPage(Page):
             self._fill_voice(voice.analyze(rows, now=now))
         except Exception as exc:  # pragma: no cover - keep the usage tab alive
             print(f"[hub.insights] voice analysis failed: {exc}", flush=True)
+        try:
+            takes, cols = reliability.load(self.ctx.history_path)
+            self._fill_reliability(reliability.analyze(takes, cols))
+        except Exception as exc:  # keep the other tabs alive
+            print(f"[hub.insights] reliability analysis failed: {exc}", flush=True)
+            self._fill_reliability(reliability.Reliability())
         self.profile = voice_profile.load(self.profile_path)
         self._render_profile()
         if self.tab == 1:
@@ -794,9 +1126,13 @@ class InsightsPage(Page):
     def _fill_phrases(self, v: voice.VoiceStats) -> None:
         while self.phrase_flow.count():
             it = self.phrase_flow.takeAt(0)
-            if it.widget() is not None:
-                it.widget().setParent(None)
-                it.widget().deleteLater()
+            w = it.widget()
+            if w is not None:
+                # Hold one reference: setParent(None) hands the chip to
+                # Python, so a temporary wrapper would free it right away
+                # and a second it.widget() call would touch freed memory.
+                w.hide()
+                w.deleteLater()
         self.phrase_labels: list[str] = []
         for phrase, n in v.phrases:
             text = " ".join("I" if w == "i" else w for w in phrase.split())

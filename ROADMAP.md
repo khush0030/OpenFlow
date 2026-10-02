@@ -112,7 +112,7 @@ provider misbehaves.
   p50 / p90, failures by cause. Local only, from history and log.
 - **Data controls.** Retention limits (keep N days), export, delete
   everything; covers history and the voice profile.
-- **Release check.** A written on-screen checklist run before each deploy
+- ✅ **Release check.** [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md): an on-screen checklist run before each deploy
   (dictate into VS Code chat, Chrome, Slack; hands-free; cancel; command mode).
 
 Done when: two weeks of daily use with no lost dictation, and a forced

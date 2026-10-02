@@ -497,3 +497,84 @@ def test_tags_flow_in_rows_not_one_per_line(hist):
     tags = [page.detail._tags.itemAt(i).widget() for i in range(page.detail._tags.count())]
     assert len({t.geometry().y() for t in tags}) == 1
     page.hide()
+
+
+# ── never lose a word (Phase 4): failed takes, Transcribe again ───────────
+def _failed(hist, tmp_path, keep_audio=True):
+    wav = tmp_path / "take.wav"
+    if keep_audio:
+        wav.write_bytes(b"RIFF")
+    hid = hist.add("", "", "verbatim", "en", 4.2, ts=_ts(NOW.replace(hour=15, minute=50)),
+                   status="failed", audio_path=str(wav))
+    return hid
+
+
+def test_failed_take_listed_as_not_transcribed(hist, tmp_path):
+    hid = _failed(hist, tmp_path)
+    page = make_page(hist)
+    row = page.rows[0]
+    assert row.entry.id == hid and row.tone_text() == "Not transcribed"
+    d = page.detail
+    assert "Not transcribed" in d.tag_texts()
+    assert d.transcribe_btn.isVisibleTo(page) and d.transcribe_btn.isEnabled()
+    assert not d.paste_btn.isVisibleTo(page) and not d.copy_btn.isVisibleTo(page)
+    assert not d.pasted_section.isVisibleTo(page) and not d.rerun_section.isVisibleTo(page)
+    assert d.failed_section.isVisibleTo(page)
+    assert "saved" in d.failed_note.plain_text()
+
+
+def test_transcribe_again_fills_the_row_and_offers_paste(hist, tmp_path):
+    hid = _failed(hist, tmp_path)
+
+    def retranscribe(entry_id):
+        hist.set_result(entry_id, "make it bigger", "Make it bigger.")
+        return {"id": entry_id, "raw": "make it bigger", "final": "Make it bigger.",
+                "status": "retried"}
+    control = FakeControl({"retranscribe": retranscribe})
+    page = make_page(hist, control)
+    page.detail.transcribe_btn.click()
+    cmd, args = control.calls[-1]
+    assert cmd == "retranscribe" and args["entry_id"] == hid and args["timeout"] >= 60
+    d = page.detail
+    assert page.selected().id == hid and page.rows[0].tone_text() == "Verbatim"
+    assert d.pasted.plain_text() == "Make it bigger."
+    assert d.paste_btn.isVisibleTo(page) and d.copy_btn.isVisibleTo(page)
+    assert not d.transcribe_btn.isVisibleTo(page)
+    d.paste_btn.click()
+    assert control.calls[-1][0] == "paste_text"
+    assert control.calls[-1][1]["text"] == "Make it bigger."
+
+
+def test_transcribe_again_failure_keeps_the_take(hist, tmp_path):
+    _failed(hist, tmp_path)
+    control = FakeControl({"retranscribe": ControlError(
+        "Couldn't transcribe it just now — the audio is still saved")})
+    page = make_page(hist, control)
+    d = page.detail
+    d.transcribe_btn.click()
+    assert d.transcribe_btn.isEnabled() and d.transcribe_btn.text() == "Transcribe again"
+    assert "still saved" in d.offline_text()
+    assert page.rows[0].tone_text() == "Not transcribed"
+
+
+def test_transcribe_again_daemon_down(hist, tmp_path):
+    _failed(hist, tmp_path)
+    page = make_page(hist, FakeControl(down=True))
+    assert not page.detail.transcribe_btn.isEnabled()
+
+
+def test_failed_take_whose_audio_is_gone(hist, tmp_path):
+    _failed(hist, tmp_path, keep_audio=False)
+    page = make_page(hist)
+    d = page.detail
+    assert not d.transcribe_btn.isEnabled()
+    assert "no longer kept" in d.failed_note.plain_text()
+
+
+def test_selecting_a_normal_row_after_a_failed_one_restores_sections(hist, tmp_path):
+    _failed(hist, tmp_path)
+    page = make_page(hist)
+    page.select(page.rows[1].entry.id)
+    d = page.detail
+    assert d.pasted_section.isVisibleTo(page) and d.paste_btn.isVisibleTo(page)
+    assert not d.failed_section.isVisibleTo(page) and not d.transcribe_btn.isVisibleTo(page)

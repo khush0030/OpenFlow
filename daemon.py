@@ -87,6 +87,8 @@ from paste import (paste, get_active_app, capture_front_app, capture_paste_targe
                    focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
+import groq_stt
+import llm
 from sarvam import STT_URL, warm
 from dictionary import Dictionary
 from autolearn import AutoLearner, Correction, PasteWatch
@@ -96,11 +98,13 @@ import formatting
 import screen_context
 import command_mode
 from prompts import app_kind as prompts_app_kind
-from history import History
+from history import STATUS_FAILED, History
+from takes import TakeStore, network_up
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
+from flow_state import OFFLINE as FLOW_OFFLINE, SAVED as FLOW_SAVED
 from flow_state import PROCESSING as FLOW_PROCESSING
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
@@ -126,6 +130,9 @@ _LANG_CYCLE: list[LanguageMode] = [
 # two thirds of real taps (log, 2026-10-01: 105–313 ms, median ~190). A longer
 # tap's tick is cut off when the hands-free cue plays (sounds._SUPERSEDES).
 HOLD_CUE_DELAY_S = 0.2
+# A tap's mic stays open this much past the double-tap window, so a second
+# press whose handler runs a little late still reuses it (audio.cancel).
+TAP_LINGER_SLACK_S = 0.15
 
 
 def _after(delay_s: float, fn) -> None:
@@ -234,6 +241,10 @@ class RunContext:
     screen_terms: tuple[str, ...] = ()
     # Command mode (edit hotkey, nothing selected): its command_mode.Pending.
     command: object = None
+    # Never lose a word: the take's audio on disk (takes.py) until its text
+    # lands, and its history row once a failure was recorded there.
+    audio_path: str | None = None
+    history_id: int | None = None
 
 
 class _WidgetWatchdog:
@@ -352,6 +363,8 @@ class Daemon:
             model=sarvam_cfg.get("stt_model", "saaras:v4"),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
             streaming=sarvam_cfg.get("streaming", "auto"),
+            # Provider failover: Groq Whisper after Sarvam, read per take.
+            fallback=lambda: groq_stt.from_config(self.cfg),
         )
         self._stream_enabled = True   # see _open_stream
         self._stream = None
@@ -362,7 +375,7 @@ class Daemon:
             model=sarvam_cfg.get("chat_model", "sarvam-105b"),
             max_tokens=int(sarvam_cfg.get("max_tokens", 1024)),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
-        ), provider=make_cleanup_provider(self.cfg))
+        ), provider=llm.with_failover(make_cleanup_provider(self.cfg), self.cfg))
         print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
@@ -374,6 +387,13 @@ class Daemon:
         self._paste_watch: PasteWatch | None = None
         self.snippets = Snippets.load()
         self.history = History()
+        # Never lose a word: every take's audio is kept until its text lands.
+        # Test daemons (built without __init__) have no store and never write.
+        self._takes = TakeStore()
+        self._net_up = lambda: network_up(STT_URL)
+        self._takes_since = time.time()
+        threading.Thread(target=self._tidy_takes, name="takes-prune", daemon=True).start()
+        self._prune_history()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
         self._chords: HotkeySet | None = None
@@ -414,14 +434,41 @@ class Daemon:
         self.state.notify()
         print(f"[daemon] lang -> {lang.value}", flush=True)
 
+    def _prune_history(self) -> None:
+        """Retention at start: [history] keep_days and size_cap (also
+        applied on every save). Never fatal."""
+        try:
+            hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
+            n = self.history.prune(keep_days=int(hist_cfg.get("keep_days") or 0),
+                                   cap=int(hist_cfg["size_cap"]))
+            if n:
+                print(f"[daemon] history: pruned {n} old dictations", flush=True)
+        except Exception as e:
+            log_exception("daemon.history", "history prune failed", e)
+
     def shutdown(self) -> None:
         self._stop_evt.set()
 
+    def close_ui(self) -> None:
+        """Quitting from the Dock / ⌘Q ends the process inside AppKit, so the
+        run loop's cleanup never runs: tell the widget and edit overlay to
+        go now (best effort)."""
+        try:
+            self._send_widget({"type": "exit"})
+        except Exception as e:
+            log_exception("daemon", "could not close the flow widget", e)
+        try:
+            if getattr(self, "_edit_overlay", None) is not None:
+                self._edit_overlay.stop()
+        except Exception as e:
+            log_exception("daemon", "could not close the edit overlay", e)
+
     # -- Pipeline pieces -------------------------------------------------
 
-    def _stt_opts(self, tone: ToneMode | None = None) -> TranscribeOptions:
+    def _stt_opts(self, tone: ToneMode | None = None,
+                  language: LanguageMode | None = None) -> TranscribeOptions:
         """Map OpenFlow language mode → Saaras language_code + mode."""
-        m = self.state.language.value
+        m = (language or self.state.language).value
         always_en = self.cfg["general"].get("always_english_output", True)
         sr = int(self.cfg["audio"].get("sample_rate", 16000))
         tone_raw = (tone or self.state.tone).value == "raw"
@@ -662,7 +709,12 @@ class Daemon:
                 **extra,
             ))
         except Exception as e:
-            log_exception("daemon.pipeline", "AI cleanup failed — pasting corrected raw text", e)
+            # Provider failover: no provider answered in its budget. Paste
+            # the transcript as spoken, with the layout Python can do alone.
+            print(f"[daemon] cleanup unavailable ({str(e)[:160]}) — "
+                  "pasted the transcript uncleaned", flush=True)
+            if structure:
+                corrected = formatting.format_local(corrected, email=email).text
             return done(corrected)
 
     # -- Hotkey callbacks ------------------------------------------------
@@ -670,9 +722,11 @@ class Daemon:
     def _on_hold_press(self) -> None:
         # Only the hold key starts hands-free sessions; a widget click after
         # a session ✓ ended must not inherit the key's stale toggle mode.
-        self.on_record_start(hands_free=bool(getattr(self._hold, "hands_free", False)))
+        self.on_record_start(hands_free=bool(getattr(self._hold, "hands_free", False)),
+                             pressed_at_ms=getattr(self._hold, "last_press_ms", None))
 
-    def on_record_start(self, hands_free: bool = False) -> None:
+    def on_record_start(self, hands_free: bool = False,
+                        pressed_at_ms: float | None = None) -> None:
         if self.state.paused:
             print("[daemon] paused — key press ignored", flush=True)
             return
@@ -680,25 +734,26 @@ class Daemon:
             return
         print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
         t0 = time.monotonic()
+        # Key-down timing from the key event itself when the hotkey gave it
+        # (the handler can run late, behind the main thread's other work).
+        t_key = t0
+        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < 5.0:
+            t_key = pressed_at_ms / 1000.0
         # Feedback first: the widget (and cue) answer the key now, not after
-        # the AX read and the mic open below (~0.3 s cold), which used to
-        # leave a press looking ignored.
+        # the mic open below (~0.15 s), which used to leave a press looking
+        # ignored.
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
         self._flow.recording_started(hands_free=hands_free)
-        remembered = capture_paste_target()
-        if remembered is not None:
-            self._paste_target = remembered
-            print(
-                f"[daemon] paste target → {remembered.name} "
-                f"ax={'yes' if remembered.ax_element is not None else 'no'}",
-                flush=True,
-            )
-        t_target = time.monotonic()
-        self._open_stream()
-        self._start_screen_capture(remembered)
+        # Then the mic, before every other key-down read: the paste target
+        # (AX), the screen names and the STT stream all finish while the
+        # user talks; the stream gets the blocks it missed (attach).
+        t_open = time.monotonic()
         try:
-            self.recorder.start()
+            reused = (bool(getattr(self.recorder, "lingering", False))
+                      and self.recorder.resume(keep_s=t_open - t_key))
+            if not reused:
+                self.recorder.start()
         except Exception as e:
             # No input would open (device busy / gone). Say so on screen
             # instead of leaving the widget recording nothing.
@@ -710,9 +765,27 @@ class Daemon:
             self._flow.no_audio(None, None)
             return
         t_mic = time.monotonic()
+        remembered = capture_paste_target()
+        if remembered is not None:
+            self._paste_target = remembered
+            print(
+                f"[daemon] paste target → {remembered.name} "
+                f"ax={'yes' if remembered.ax_element is not None else 'no'}",
+                flush=True,
+            )
+        t_target = time.monotonic()
+        self._open_stream()
+        self._start_screen_capture(remembered)
         self._warm_up()
-        print(f"[daemon] mic open {1000 * (t_mic - t0):.0f}ms after key-down "
-              f"(paste target {1000 * (t_target - t0):.0f}ms)", flush=True)
+        if reused:
+            how = f"reused the tap's stream, kept {1000 * (t_open - t_key):.0f}ms"
+            mic_ms = 0.0
+        else:
+            how = (f"queued {1000 * (t0 - t_key):.0f}ms, "
+                   f"open {1000 * (t_mic - t_open):.0f}ms")
+            mic_ms = 1000 * (t_mic - t_key)
+        print(f"[daemon] mic open {mic_ms:.0f}ms after key-down ({how}; "
+              f"paste target +{1000 * (t_target - t_mic):.0f}ms)", flush=True)
 
     def _on_hold_cancel(self) -> None:
         """The hold key was tapped (first half of a double-tap) or used as a
@@ -720,7 +793,16 @@ class Daemon:
         no transcription, no "too short", no paste."""
         if not self.recorder.is_recording:
             return
-        self.recorder.stop()
+        # A tap may be the first half of a double-tap: keep the mic running
+        # for what is left of the double-tap window (plus a little for a
+        # late handler), so the second press reuses it instead of opening
+        # it again. Otherwise (a chord) it closes now. No tail wait: this
+        # audio is discarded either way.
+        hold = getattr(self, "_hold", None)
+        linger = 0.0
+        if getattr(hold, "double_tap_armed", False):
+            linger = hold.double_tap_window_s() + TAP_LINGER_SLACK_S
+        self.recorder.cancel(linger_s=linger)
         self._drop_stream()
         self._screen = None
         self.state.recording = RecordingState.IDLE
@@ -743,7 +825,7 @@ class Daemon:
             return
         if stream is not None:
             self._stream = stream
-            self.recorder.on_block = stream.feed
+            self.recorder.attach(stream.feed)   # with the blocks it missed
 
     def _take_stream(self):
         """Detach the take's stream from the recorder; None if not streaming."""
@@ -895,8 +977,9 @@ class Daemon:
             elif action == "open_history":
                 spawn_ui("ui.hub", "history")
             elif action == "paste_last":
-                last = self.history.recent(1)
-                if last and last[0].final.strip():
+                # A take saved but not transcribed has no text: skip it.
+                last = [e for e in self.history.recent(5) if e.final.strip()][:1]
+                if last:
                     status = paste(last[0].final, target=capture_front_app() or self._paste_target)
                     print(f"[daemon] paste last transcript -> {status}", flush=True)
         except Exception as e:
@@ -1004,6 +1087,14 @@ class Daemon:
         if ch.hotkeys is not None:
             self._pending_hotkeys = ch.hotkeys
             self._apply_pending_hotkeys()
+        # Settings › General › Show in Dock (not part of plan_changes).
+        from tray import show_in_dock
+        dock = show_in_dock(fresh)
+        if dock != show_in_dock(self.cfg):
+            self.cfg["hub"] = dict(fresh.get("hub") or {})
+            tray = getattr(self, "_tray", None)
+            if tray is not None:
+                tray.set_dock(dock)
         if ch.dictionary is not None:
             self.cfg["dictionary"] = ch.dictionary
             if not self._auto_learn():
@@ -1019,9 +1110,12 @@ class Daemon:
             print(f"[daemon] streaming STT -> {streaming}", flush=True)
         if ch.cleanup is not None:
             self.cfg["cleanup"] = ch.cleanup
-            self.ai.provider = make_cleanup_provider(self.cfg)
+            self.ai.provider = llm.with_failover(make_cleanup_provider(self.cfg), self.cfg)
             print(f"[daemon] cleanup LLM -> {self.ai.provider.name} "
                   f"({self.ai.provider.model})", flush=True)
+        # [failover]: read per take (groq_stt.from_config) and per failure (llm).
+        if isinstance(fresh.get("failover"), dict):
+            self.cfg["failover"] = fresh["failover"]
 
     def choose_tone(self, tone: ToneMode) -> None:
         """A tone picked from a menu (menu bar or widget) becomes the default."""
@@ -1386,8 +1480,93 @@ class Daemon:
     # -- Worker ----------------------------------------------------------
 
     def _stale(self, run: int) -> None:
-        print(f"[daemon] pipeline run {run} no longer owns the widget — result not shown",
-              flush=True)
+        print(f"[daemon] pipeline run {run} no longer owns the widget — "
+              f"result waits until it is free ({self._flow.queued} queued)", flush=True)
+
+    # -- Never lose a word: saved takes (takes.py) -------------------------
+
+    def _tidy_takes(self) -> None:
+        """Start-up: prune old takes, then list any take a crash left behind
+        (on disk, in no history row) as a failed one, so History can
+        transcribe it again."""
+        try:
+            removed = self._takes.prune()
+            if removed:
+                print(f"[daemon] pruned {removed} old saved take(s)", flush=True)
+            known = self.history.audio_paths()
+            sr = int(self.cfg["audio"]["sample_rate"])
+            started = getattr(self, "_takes_since", None)
+            if started is None:
+                started = time.time()
+            for path in reversed(self._takes.paths()):        # oldest first
+                # Only takes from before this start: a live take is not an orphan.
+                if str(path) in known or path.stat().st_mtime >= started:
+                    continue
+                audio, rate = TakeStore.load(path)
+                hid = self._record_failed_take(str(path), audio.size / (rate or sr),
+                                               ts=path.stat().st_mtime)
+                print(f"[daemon] recovered an untranscribed take -> history #{hid}",
+                      flush=True)
+        except Exception as e:
+            log_exception("daemon.takes", "tidying saved takes failed", e)
+
+    def _save_take(self, audio, ctx: RunContext) -> RunContext:
+        """Key-up: the take's audio on disk before anything can fail.
+        Edit / command takes stay in memory: they only replay on the widget."""
+        store = getattr(self, "_takes", None)
+        if store is None or ctx.edit_mode or getattr(audio, "size", 0) == 0:
+            return ctx
+        if ctx.audio_path and os.path.exists(ctx.audio_path):
+            return ctx
+        path = store.save(audio, int(self.cfg["audio"]["sample_rate"]))
+        return replace(ctx, audio_path=path) if path else ctx
+
+    def _take_landed(self, ctx: RunContext) -> None:
+        """The take's text was pasted or shown: drop its audio."""
+        store = getattr(self, "_takes", None)
+        if store is not None and ctx.audio_path:
+            store.discard(ctx.audio_path)
+
+    def _record_failed_take(self, audio_path: str, duration: float, *,
+                            app: str | None = None, ts: float | None = None,
+                            tone: ToneMode | None = None) -> int | None:
+        hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
+        if not hist_cfg["enabled"]:
+            return None
+        return self.history.add(
+            raw="", final="", tone=(tone or self._tone_for(None)).value,
+            lang=self.state.language.value, duration=duration, app=app,
+            cap=int(hist_cfg["size_cap"]), ts=ts,
+            status=STATUS_FAILED, audio_path=audio_path)
+
+    def _take_failed(self, audio, ctx: RunContext, run: int, reason: str = "") -> None:
+        """Transcription failed (after the whole provider chain): keep the
+        take on disk and in history as 'failed', and offer Retry. The widget
+        says "Saved" (or "Offline · saved") when the audio is safe."""
+        ctx = self._save_take(audio, ctx)
+        if ctx.audio_path and not ctx.edit_mode:
+            if ctx.history_id is None:
+                try:
+                    hid = self._record_failed_take(
+                        ctx.audio_path, audio.size / self.cfg["audio"]["sample_rate"],
+                        app=getattr(ctx.target, "name", None) or None,
+                        tone=self._tone_for(ctx.target))
+                except Exception as e:
+                    log_exception("daemon.takes", "could not save the failed take to history", e)
+                    hid = None
+                ctx = replace(ctx, history_id=hid)
+            if not reason:
+                probe = getattr(self, "_net_up", None)
+                online = True
+                if probe is not None:
+                    try:
+                        online = bool(probe())
+                    except Exception:
+                        online = True
+                reason = FLOW_SAVED if online else FLOW_OFFLINE
+                print(f"[daemon] take saved for Retry ({'online' if online else 'offline'})",
+                      flush=True)
+        self._flow.failed(audio, ctx, run=run, reason=reason) or self._stale(run)
 
     def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
         """True (and logs) if the user cancelled this run: its text must
@@ -1401,12 +1580,14 @@ class Daemon:
     def _pipeline_worker(self, audio, ctx: RunContext | None, run: int) -> None:
         ctx = ctx or RunContext()
         target = ctx.target
+        if not self._flow.is_cancelled(run):
+            ctx = self._save_take(audio, ctx)    # never lose a word (takes.py)
         if not self._busy.acquire(timeout=self._BUSY_WAIT_S):
             # The previous dictation never finished: keep this audio and
             # offer Retry rather than dropping it.
             print("[daemon] previous dictation still processing — offering Retry.", flush=True)
             self._abort_stream(ctx)
-            self._flow.failed(audio, ctx, run=run) or self._stale(run)
+            self._take_failed(audio, ctx, run)
             return
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
@@ -1418,6 +1599,7 @@ class Daemon:
         start = ctx.keyup_at if ctx.keyup_at is not None else time.monotonic()
         try:
             if self._discarded(run, ctx, "before transcription"):
+                self._take_landed(ctx)
                 return  # e.g. cancelled while queued behind another dictation
             t0 = time.monotonic()
             tone = self._tone_for(target)
@@ -1433,7 +1615,7 @@ class Daemon:
                     raw = self.transcriber.transcribe(audio, opts)
             except Exception as e:
                 log_exception("daemon.pipeline", "transcription failed — offering Retry", e)
-                self._flow.failed(audio, ctx, run=run) or self._stale(run)
+                self._take_failed(audio, ctx, run)
                 return
             t1 = time.monotonic()
             stt_t = getattr(self.transcriber, "last_timings", None) or {}
@@ -1441,19 +1623,24 @@ class Daemon:
             if encode_s is not None:
                 timings["encode"] = encode_s
             timings["stt"] = stt_t.get("stt", (t1 - t0) - (encode_s or 0.0))
+            stt_path = getattr(self.transcriber, "last_path", None)
             print(
                 f"[daemon] sarvam-stt {t1-t0:.2f}s "
-                f"via={getattr(self.transcriber, 'last_source', 'batch')} mode={opts.mode} "
+                f"via={stt_path or getattr(self.transcriber, 'last_source', 'batch')} "
+                f"mode={opts.mode} "
                 f"lang={opts.language_code!r} "
                 f"trimmed={getattr(self.transcriber, 'last_trimmed_s', 0.0):.2f}s: {raw!r}",
                 flush=True,
             )
             if not raw.strip():
+                self._take_landed(ctx)
                 self._flow.done(run=run) or self._stale(run)
                 return
             if self._discarded(run, ctx, "after transcription"):
+                self._take_landed(ctx)
                 return
 
+            llm.trace_start()    # which LLM answered (history cleanup_provider)
             if ctx.edit_mode:
                 instruction = raw.strip()
                 try:
@@ -1474,14 +1661,17 @@ class Daemon:
 
             t2 = time.monotonic()
             timings["cleanup"] = t2 - t1
+            cleanup_provider = llm.trace_result()
             print(f"[daemon] post {t2-t1:.2f}s -> {final!r}", flush=True)
             if not final:
+                self._take_landed(ctx)
                 self._flow.done(run=run) or self._stale(run)
                 return
             # Last chance: a cancel from here on is too late (commit marks
             # the run as pasting under the flow lock).
             if not self._flow.commit(run):
                 self._discarded(run, ctx, "before paste")
+                self._take_landed(ctx)
                 return
 
             self.state.last_pasted = final
@@ -1512,9 +1702,15 @@ class Daemon:
             handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
                        if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
-                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff, flush=True)
+                f"{k}={v:.2f}s" for k, v in timings.items()) + handoff
+                + f" stt_path={stt_path} cleanup={cleanup_provider}", flush=True)
             hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
-            if hist_cfg["enabled"]:
+            # Pasted, or shown on a card / queued for one: the audio can go.
+            self._take_landed(ctx)
+            if ctx.history_id is not None:
+                # A saved take, transcribed on Retry: fill in its row.
+                self.history.set_result(ctx.history_id, raw, final)
+            elif hist_cfg["enabled"]:
                 self.history.add(
                     raw=raw,
                     final=final,
@@ -1524,6 +1720,9 @@ class Daemon:
                     app=getattr(target, "name", None) or None,
                     cap=int(hist_cfg["size_cap"]),
                     timings=timings,
+                    stt_path=stt_path,
+                    cleanup_provider=cleanup_provider,
+                    keep_days=int(hist_cfg.get("keep_days") or 0),
                 )
         except Exception as e:
             log_exception("daemon.pipeline", "pipeline crashed", e)
@@ -1551,6 +1750,7 @@ class Daemon:
             "set_language": self._ctl_set_language,
             "paste_text": self._ctl_paste_text,
             "rerun": self._ctl_rerun,
+            "retranscribe": self._ctl_retranscribe,
             "play_cues": self._ctl_play_cues,
             "check": self._ctl_check,
             "dictionary_suggestions": self._ctl_dictionary_suggestions,
@@ -1637,6 +1837,50 @@ class Daemon:
         lang = self._parse_language(language) if language else self.state.language
         text = self._post_process(raw or "", tone=t, language=lang, skip_trivial=False)
         return {"text": text, "tone": t.value, "language": lang.value}
+
+    # A hub "Transcribe again" waits this long for a dictation in progress.
+    _RETRANSCRIBE_WAIT_S = 30.0
+
+    def _ctl_retranscribe(self, entry_id: int) -> dict:
+        """History "Transcribe again": run a saved take (status 'failed')
+        through STT and cleanup in its own tone and language, fill in its
+        row and drop the audio. No paste; the hub offers Copy / Paste again.
+        A failure leaves the row and the audio as they were."""
+        # Not "id": that key is the control request's own id.
+        try:
+            entry_id = int(entry_id)
+        except (TypeError, ValueError):
+            raise ValueError(f"bad history id: {entry_id!r}") from None
+        e = self.history.get(entry_id)
+        if e is None:
+            raise ValueError("That dictation is no longer in your history")
+        if e.status != STATUS_FAILED:
+            return {"id": e.id, "raw": e.raw, "final": e.final, "status": e.status}
+        if not e.audio_path or not os.path.exists(e.audio_path):
+            raise ValueError("The audio for this take is no longer kept")
+        audio, sr = TakeStore.load(e.audio_path)
+        if not self._busy.acquire(timeout=self._RETRANSCRIBE_WAIT_S):
+            raise RuntimeError("OpenFlow is busy with a dictation — try again in a moment")
+        try:
+            tone, lang = _coerce_tone(e.tone), _coerce_lang(e.lang)
+            opts = self._stt_opts(tone, language=lang)
+            opts.sample_rate = sr
+            try:
+                raw = self.transcriber.transcribe(audio, opts)
+            except Exception as exc:
+                log_exception("daemon.control", "retranscribe: transcription failed", exc)
+                raise RuntimeError("Couldn't transcribe it just now — the audio is still saved") from None
+            if not raw.strip():
+                raise ValueError("No speech found in this take")
+            final = self._post_process(raw, tone=tone, language=lang)
+        finally:
+            self._busy.release()
+        self.history.set_result(e.id, raw, final)
+        store = getattr(self, "_takes", None)
+        if store is not None:
+            store.discard(e.audio_path)
+        print(f"[daemon] retranscribed history #{e.id}", flush=True)
+        return {"id": e.id, "raw": raw, "final": final, "status": "retried"}
 
     def _ctl_play_cues(self) -> dict:
         sounds.play("start")

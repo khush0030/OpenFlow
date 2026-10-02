@@ -54,6 +54,9 @@ def keychain(monkeypatch):
     store: dict[str, str] = {}
     monkeypatch.setattr(settings_mod, "keychain_read", lambda: store.get("key", ""))
     monkeypatch.setattr(settings_mod, "keychain_save", lambda k: store.__setitem__("key", k))
+    # Backup providers (failover): keys named in store["fallback"], never the real Keychain.
+    monkeypatch.setattr(settings_mod, "fallback_key_found",
+                        lambda name, cfg: name in store.get("fallback", ()))
     return store
 
 

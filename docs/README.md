@@ -7,6 +7,7 @@
 | [superpowers/plans/](superpowers/plans/) | Step-by-step implementation plans for larger features |
 | [design/](design/) | Mockups (flow widget) |
 | [../OpenFlow_Brand_Book.html](../OpenFlow_Brand_Book.html) | Brand: colour, type, voice |
+| [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) | On-screen checks before every deploy |
 | [archive/](archive/) | The original May 2026 handoff plans; historical, superseded |
 
 ## Specs

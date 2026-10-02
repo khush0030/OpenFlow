@@ -38,7 +38,47 @@ def test_history_disabled_saves_nothing_but_still_pastes(env):
 
 
 def test_history_defaults():
-    assert dm.cfg_mod.DEFAULTS["history"] == {"enabled": True, "size_cap": 500}
+    assert dm.cfg_mod.DEFAULTS["history"] == {"enabled": True, "size_cap": 500, "keep_days": 0}
+
+
+# -- retention (Phase 4 data controls) ---------------------------------------
+
+def test_save_passes_keep_days(env):
+    d = make_daemon()
+    d.cfg["history"] = {"enabled": True, "size_cap": 500, "keep_days": 30}
+    work(d, d._flow.processing())
+    assert d.history.rows[0]["keep_days"] == 30
+
+
+def test_save_without_keep_days_keeps_forever(env):
+    d = make_daemon()                        # cfg has no [history] section
+    work(d, d._flow.processing())
+    assert d.history.rows[0]["keep_days"] == 0
+
+
+class PruneHistory:
+    def __init__(self, fail=False):
+        self.calls, self.fail = [], fail
+
+    def prune(self, **kw):
+        if self.fail:
+            raise OSError("disk gone")
+        self.calls.append(kw)
+        return 2
+
+
+def test_startup_prune_applies_retention(env):
+    d = make_daemon()
+    d.history = PruneHistory()
+    d.cfg["history"] = {"keep_days": 7, "size_cap": 300}
+    d._prune_history()
+    assert d.history.calls == [{"keep_days": 7, "cap": 300}]
+
+
+def test_startup_prune_failure_is_logged_not_raised(env):
+    d = make_daemon()
+    d.history = PruneHistory(fail=True)
+    d._prune_history()                       # no exception
 
 
 # -- per-stage latency (ROADMAP Phase 2 latency pass) -------------------------

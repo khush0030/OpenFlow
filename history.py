@@ -11,6 +11,8 @@ from typing import Iterable, Iterator
 
 from config import HISTORY_PATH, ensure_dirs
 
+DAY_S = 86400.0
+
 
 @dataclass
 class Entry:
@@ -30,6 +32,17 @@ class Entry:
     t_cleanup: float | None = None
     t_paste: float | None = None
     t_total: float | None = None
+    # Provider failover: which STT step produced the transcript ('stream',
+    # 'upload', 'groq') and which LLM cleaned it ('sarvam', 'groq',
+    # 'anthropic'; 'none' = no provider answered, pasted uncleaned;
+    # 'skipped' = no LLM call). None for rows saved before.
+    stt_path: str | None = None
+    cleanup_provider: str | None = None
+    # Never lose a word (Phase 4): NULL = pasted as before; 'failed' = not
+    # transcribed yet, its audio kept at audio_path; 'retried' = transcribed
+    # later from the saved audio (widget Retry / History "Transcribe again").
+    status: str | None = None
+    audio_path: str | None = None
 
 
 SCHEMA = """
@@ -58,6 +71,14 @@ TIMING_STAGES = ("record", "encode", "stt", "cleanup", "paste", "total")
 _TIMING_COLS = tuple(f"t_{s}" for s in TIMING_STAGES)
 
 _COLS = "id, ts, raw, final, tone, lang, duration, app, " + ", ".join(_TIMING_COLS)
+# Provider failover columns (added by migration below).
+_FAILOVER_COLS = ("stt_path", "cleanup_provider")
+# Never lose a word: status / audio_path columns (see Entry).
+_TAKE_COLS = ("status", "audio_path")
+STATUS_FAILED = "failed"
+STATUS_RETRIED = "retried"
+# Same order as Entry's fields: rows are unpacked positionally.
+_COLS += ", " + ", ".join(_FAILOVER_COLS + _TAKE_COLS)
 
 
 def _like(text: str) -> str:
@@ -92,6 +113,11 @@ class History:
             for col in _TIMING_COLS:
                 if col not in cols:
                     c.execute(f"ALTER TABLE dictations ADD COLUMN {col} REAL")
+            # Provider failover: stt_path, cleanup_provider (NULL for older rows).
+            # Never lose a word (Phase 4): a take's status and saved audio.
+            for col in _FAILOVER_COLS + _TAKE_COLS:
+                if col not in cols:
+                    c.execute(f"ALTER TABLE dictations ADD COLUMN {col} TEXT")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -105,28 +131,72 @@ class History:
     def add(self, raw: str, final: str, tone: str, lang: str, duration: float,
             app: str | None = None, cap: int | None = None,
             ts: float | None = None,
-            timings: dict[str, float] | None = None) -> None:
-        """Insert a dictation. With a positive `cap` ([history] size_cap),
-        the oldest rows are then pruned so at most `cap` remain. `timings`
-        maps TIMING_STAGES names to seconds; missing stages are stored NULL."""
+            timings: dict[str, float] | None = None,
+            stt_path: str | None = None,
+            cleanup_provider: str | None = None,
+            status: str | None = None, audio_path: str | None = None,
+            keep_days: int | None = None) -> int | None:
+        """Insert a dictation; returns its id. With a positive `cap`
+        ([history] size_cap), the oldest rows are then pruned so at most `cap`
+        remain; with a positive `keep_days` ([history] keep_days), rows older
+        than that many days go too. `timings` maps TIMING_STAGES names to
+        seconds; missing stages are stored NULL. stt_path / cleanup_provider /
+        status / audio_path: see Entry."""
         t = timings or {}
         stage_vals = tuple(
             None if t.get(s) is None else float(t[s]) for s in TIMING_STAGES
         )
+        cols = _TIMING_COLS + _FAILOVER_COLS + _TAKE_COLS
         with self._conn() as c:
-            c.execute(
+            cur = c.execute(
                 "INSERT INTO dictations(ts, raw, final, tone, lang, duration, app, "
-                + ", ".join(_TIMING_COLS) + ") "
-                "VALUES(" + ",".join("?" * (7 + len(_TIMING_COLS))) + ")",
+                + ", ".join(cols) + ") "
+                "VALUES(" + ",".join("?" * (7 + len(cols))) + ")",
                 (time.time() if ts is None else ts, raw, final, tone, lang, duration, app,
-                 *stage_vals),
+                 *stage_vals, stt_path, cleanup_provider, status, audio_path),
             )
-            if cap and cap > 0:
-                c.execute(
-                    "DELETE FROM dictations WHERE id NOT IN ("
-                    "SELECT id FROM dictations ORDER BY ts DESC, id DESC LIMIT ?)",
-                    (int(cap),),
-                )
+            new_id = cur.lastrowid
+            _prune(c, keep_days=keep_days, cap=cap)
+        return new_id
+
+    def get(self, entry_id: int) -> Entry | None:
+        with self._conn() as c:
+            row = c.execute(f"SELECT {_COLS} FROM dictations WHERE id = ?",
+                            (int(entry_id),)).fetchone()
+        return Entry(*row) if row else None
+
+    def set_result(self, entry_id: int, raw: str, final: str,
+                   status: str | None = STATUS_RETRIED) -> bool:
+        """A saved take was transcribed after all: fill in its text and
+        status; its audio is gone (audio_path cleared)."""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE dictations SET raw = ?, final = ?, status = ?, audio_path = NULL "
+                "WHERE id = ?", (raw, final, status, int(entry_id)))
+            return cur.rowcount > 0
+
+    def audio_paths(self) -> set[str]:
+        """Saved-take paths that history rows point at."""
+        with self._conn() as c:
+            return {r[0] for r in c.execute(
+                "SELECT audio_path FROM dictations WHERE audio_path IS NOT NULL")}
+
+    def prune(self, keep_days: int | None = 0, cap: int | None = None,
+              now: float | None = None) -> int:
+        """Apply the retention settings ([history] keep_days, size_cap)
+        without adding a row (daemon start, Settings). Returns rows removed.
+        0 / None for either limit means no limit."""
+        with self._conn() as c:
+            return _prune(c, keep_days=keep_days, cap=cap, now=now)
+
+    def count_older_than(self, keep_days: int, now: float | None = None) -> int:
+        """How many rows a keep_days retention would remove (0 = forever)."""
+        if not keep_days or keep_days <= 0:
+            return 0
+        cutoff = (time.time() if now is None else now) - keep_days * DAY_S
+        with self._conn() as c:
+            return c.execute("SELECT COUNT(*) FROM dictations WHERE ts < ?",
+                             (cutoff,)).fetchone()[0]
 
     def recent(self, limit: int = 500) -> list[Entry]:
         with self._conn() as c:
@@ -173,5 +243,103 @@ class History:
             return cur.rowcount > 0
 
     def clear(self) -> None:
+        """Delete every row, then VACUUM so the text doesn't linger in the
+        file's free pages."""
         with self._conn() as c:
             c.execute("DELETE FROM dictations")
+        c = sqlite3.connect(self.path, isolation_level=None)
+        try:
+            c.execute("VACUUM")
+        finally:
+            c.close()
+
+    def count(self) -> int:
+        with self._conn() as c:
+            return c.execute("SELECT COUNT(*) FROM dictations").fetchone()[0]
+
+
+def _prune(c: sqlite3.Connection, keep_days: int | None = None, cap: int | None = None,
+           now: float | None = None) -> int:
+    removed = 0
+    if keep_days and keep_days > 0:
+        cutoff = (time.time() if now is None else now) - int(keep_days) * DAY_S
+        removed += c.execute("DELETE FROM dictations WHERE ts < ?", (cutoff,)).rowcount
+    if cap and cap > 0:
+        removed += c.execute(
+            "DELETE FROM dictations WHERE id NOT IN ("
+            "SELECT id FROM dictations ORDER BY ts DESC, id DESC LIMIT ?)",
+            (int(cap),),
+        ).rowcount
+    return removed
+
+
+# ── export (Settings › Privacy › Export history) ─────────────────────────
+EXPORT_FORMATS = ("json", "csv")
+_EXPORT_SKIP = {"audio_path"}     # a local file path, not part of the dictation
+_EXPORT_RENAME = {"lang": "language"}
+
+
+def export_rows(db_path: Path, tz: tzinfo | None = None) -> list[dict]:
+    """Every dictation, oldest first, as plain dicts: ts as ISO 8601 local
+    time with its offset, then every column the database has (timings,
+    and status / provider columns when present). Read-only."""
+    path = Path(db_path)
+    if not path.exists():
+        return []
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        cols = [r[1] for r in c.execute("PRAGMA table_info(dictations)")]
+        if not cols:
+            return []
+        rows = c.execute("SELECT * FROM dictations ORDER BY ts, id").fetchall()
+    finally:
+        c.close()
+    out = []
+    for r in rows:
+        d: dict = {}
+        for k, v in zip(cols, r):
+            if k in _EXPORT_SKIP:
+                continue
+            if k == "ts":
+                d["ts"] = datetime.fromtimestamp(v, tz).astimezone(tz).isoformat(timespec="seconds")
+            else:
+                d[_EXPORT_RENAME.get(k, k)] = v
+        out.append(d)
+    return out
+
+
+def export(db_path: Path, out_path: Path, fmt: str = "json",
+           tz: tzinfo | None = None) -> int:
+    """Write every dictation to `out_path` as JSON (a list of objects) or
+    CSV (one row each, header first). Atomic: a temp file is renamed into
+    place. Returns the number of dictations written."""
+    import csv
+    import json
+    import os
+    import tempfile
+
+    fmt = fmt.lower()
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(f"unknown export format: {fmt!r}")
+    rows = export_rows(db_path, tz)
+    out_path = Path(out_path)
+    fd, tmp = tempfile.mkstemp(prefix=out_path.name + ".", dir=str(out_path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            if fmt == "json":
+                json.dump(rows, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            else:
+                fields = list(rows[0]) if rows else ["id", "ts", "raw", "final", "tone",
+                                                     "language", "duration", "app"]
+                w = csv.DictWriter(f, fieldnames=fields)
+                w.writeheader()
+                w.writerows(rows)
+        os.replace(tmp, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return len(rows)

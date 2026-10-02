@@ -190,6 +190,9 @@ class HoldOrToggle:
         self._mode = "idle"
         self._press_ms = 0.0
         self._last_tap_release_ms = 0.0
+        # When the latest press happened (event clock = time.monotonic ms),
+        # so the daemon can time key-down -> mic open from the key itself.
+        self.last_press_ms: Optional[float] = None
         self._monitor = None
         self._stopped = False
         self._match_seen = False
@@ -208,11 +211,26 @@ class HoldOrToggle:
         """True while the key is held down in an ordinary hold (not hands-free)."""
         return self._mode == "hold" and self._down
 
+    @property
+    def double_tap_armed(self) -> bool:
+        """True during the cancel of a tap that may become a double-tap: a
+        second press within the remaining double_tap_window_s() starts a
+        hands-free take."""
+        return self._mode == "hold" and not self._down and bool(self._last_tap_release_ms)
+
+    def double_tap_window_s(self) -> float:
+        """What is left of the double-tap window, in seconds."""
+        if not self._last_tap_release_ms:
+            return 0.0
+        left = self.DOUBLE_TAP_GAP_MS - (self._now_ms() - self._last_tap_release_ms)
+        return max(0.0, left / 1000.0)
+
     def _on_press(self, at_ms: Optional[float] = None) -> None:
         if self._down:
             return
         self._down = True
         now = self._now_ms() if at_ms is None else at_ms
+        self.last_press_ms = now
         if self._mode == "toggle" and self.is_active is not None and not self.is_active():
             print("[hotkey] press: toggle session already stopped elsewhere", flush=True)
             self._mode = "idle"

@@ -9,7 +9,9 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.io import wavfile
 
+import groq_stt
 import stream_stt
+from failover import AllFailed, Step, race
 from sarvam import (
     STT_MAX_SECONDS,
     STTResult,
@@ -72,6 +74,23 @@ def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
+# Time budgets for the STT chain (spec 2026-10-02-provider-failover; numbers
+# from history.sqlite / openflow.log on 2026-10-02):
+# - stream finish: healthy p99 0.54 s, max seen 1.2 s; the upload starts in
+#   parallel after STREAM_HEDGE_S and the stream gives up at its own
+#   stream_stt.FINISH_TIMEOUT_S (2.0 s).
+# - upload: 8 of 9 healthy under 1.5 s (one 2.9 s on a 17.9 s clip); a degraded
+#   Sarvam took 2.9-5.3 s. The fallback provider starts in parallel after
+#   UPLOAD_HEDGE_S.
+# - the whole chain: STT_DEADLINE_S + STT_DEADLINE_PER_AUDIO_S per second of
+#   audio, then the take fails to "Retry" instead of waiting out retries of
+#   a 25 s HTTP timeout.
+STREAM_HEDGE_S = 1.0
+UPLOAD_HEDGE_S = 2.0
+STT_DEADLINE_S = 15.0
+STT_DEADLINE_PER_AUDIO_S = 0.1
+
+
 def streaming_policy(value) -> str:
     """[sarvam] streaming: "auto" (default), True/"true"/"on" or
     False/"false"/"off". Anything else reads as "auto"."""
@@ -91,8 +110,12 @@ class Transcriber:
         model: str = "saaras:v4",
         api_key_env: str = "SARVAM_API_KEY",
         streaming="auto",
+        fallback=None,
     ) -> None:
         self.model = model
+        # () -> groq_stt.GroqWhisper | None, called only when the chain
+        # reaches it (a Keychain read); None: the chain ends at the upload.
+        self.fallback = fallback
         self.api_key_env = api_key_env
         self._api_key: str | None = None
         # Seconds spent in the last transcribe call: "encode" (WAV) and
@@ -101,6 +124,9 @@ class Transcriber:
         self.last_trimmed_s = 0.0     # silence cut from the last clip
         # "stream" or "batch": where the last transcript came from.
         self.last_source = "batch"
+        # "stream", "upload" or "groq": the chain step that produced the
+        # last transcript (history stt_path).
+        self.last_path = "upload"
         self.streaming = streaming_policy(streaming)
         # "auto" stops streaming after Sarvam refuses the session itself
         # (bad parameter / key / account not enabled), until restart or a
@@ -166,30 +192,88 @@ class Transcriber:
         self, audio: np.ndarray, opts: TranscribeOptions | None = None,
         stream: "stream_stt.StreamingSession | None" = None,
     ) -> STTResult:
-        """`stream`: the take's realtime session (begin_stream at key-down).
-        Its transcript is used when it finishes cleanly with the same
-        language and mode; otherwise `audio` (always the full take) goes
-        to the batch API, so a stream problem costs time, never text."""
+        """The STT chain: `stream` (the take's realtime session, opened at
+        key-down) -> Sarvam upload of `audio` (always the full take) -> the
+        fallback provider, each started early in parallel when the previous
+        one runs past its hedge delay (failover.race). The first usable
+        transcript wins. Raises when every step failed or the chain ran past
+        its deadline: a provider problem costs time, never text."""
         self.last_timings = {}
         self.last_trimmed_s = 0.0
         self.last_source = "batch"
-        if stream is not None:
-            result = self._finish_stream(stream, opts or TranscribeOptions())
-            if result is not None:
-                return result
-        if audio.size == 0:
-            return STTResult(transcript="")
+        self.last_path = "upload"
         opts = opts or TranscribeOptions()
+        steps: list[Step] = []
+        if stream is not None:
+            if stream.matches(opts.language_code, opts.mode):
+                steps.append(Step("stream", lambda: self._finish_stream(stream),
+                                  accept=lambda r: r is not None))
+            else:
+                stream.abort()
+                print("[transcribe] stream opened for another language/mode — batch",
+                      flush=True)
+        if audio.size > 0:
+            steps.append(Step("upload", lambda: self._upload(audio, opts),
+                              hedge_s=STREAM_HEDGE_S if steps else None))
+            if self.fallback is not None:
+                steps.append(Step("groq", lambda: self._fallback_stt(audio, opts),
+                                  hedge_s=UPLOAD_HEDGE_S))
+        if not steps:
+            return STTResult(transcript="")
+        sr = opts.sample_rate or 16000
+        deadline = STT_DEADLINE_S + STT_DEADLINE_PER_AUDIO_S * audio.size / sr
+        t0 = time.monotonic()
+        try:
+            name, value = race(steps, deadline)
+        except AllFailed as e:
+            print(f"[transcribe] no transcript: {e}", flush=True)
+            if len(e.errors) == 1:
+                raise next(iter(e.errors.values())) from None
+            raise
+        elapsed = time.monotonic() - t0
+        self.last_path = name
+        if name == "stream":
+            self.last_source = "stream"
+            self.last_timings = {"stt": elapsed}
+            return value
+        result, encode_s, trimmed_s = value
+        self.last_trimmed_s = trimmed_s
+        self.last_timings = {"encode": encode_s, "stt": max(0.0, elapsed - encode_s)}
+        if name != "upload":
+            print(f"[transcribe] transcript from the fallback ({name})", flush=True)
+        return result
+
+    def _trimmed(self, audio: np.ndarray, opts: TranscribeOptions) -> tuple[np.ndarray, float]:
+        if opts.silence_threshold is None:
+            return audio, 0.0
+        trimmed = trim_silence(audio, opts.sample_rate, opts.silence_threshold)
+        return trimmed, (audio.size - trimmed.size) / opts.sample_rate
+
+    def _fallback_stt(self, audio: np.ndarray, opts: TranscribeOptions):
+        """The second provider (groq_stt): (STTResult, encode s, trimmed s)."""
+        provider = self.fallback() if self.fallback is not None else None
+        if provider is None:
+            raise RuntimeError("no fallback STT (no Groq key, or [failover] stt = off)")
+        t0 = time.monotonic()
+        audio, trimmed_s = self._trimmed(audio, opts)
+        if not groq_stt.has_speech(audio, opts.silence_threshold, opts.sample_rate):
+            return STTResult(transcript=""), time.monotonic() - t0, trimmed_s
+        wav = audio_to_wav_bytes(audio, opts.sample_rate)
+        encode_s = time.monotonic() - t0
+        result = provider.transcribe(wav, mode=opts.mode, language_code=opts.language_code,
+                                     keyterms=opts.keyterms)
+        return result, encode_s, trimmed_s
+
+    def _upload(self, audio: np.ndarray, opts: TranscribeOptions):
+        """Sarvam batch: (STTResult, encode seconds, trimmed seconds). Runs
+        on a race worker thread, so it sets no per-take attributes."""
         key = self._ensure_key()
         sr = opts.sample_rate
         t0 = time.monotonic()
-        if opts.silence_threshold is not None:
-            trimmed = trim_silence(audio, sr, opts.silence_threshold)
-            self.last_trimmed_s = (audio.size - trimmed.size) / sr
-            audio = trimmed
+        audio, trimmed_s = self._trimmed(audio, opts)
         chunks = _split_audio(audio, sr, STT_MAX_SECONDS)
         wavs = [audio_to_wav_bytes(chunk, sr) for chunk in chunks]
-        t1 = time.monotonic()
+        encode_s = time.monotonic() - t0
 
         # Only when there are any, so the request is otherwise unchanged.
         extra = {"keyterms": list(opts.keyterms)} if opts.keyterms else {}
@@ -208,7 +292,6 @@ class Transcriber:
             results = [send(wavs[0])]
         else:
             results = _send_parallel(send, wavs)
-        self.last_timings = {"encode": t1 - t0, "stt": time.monotonic() - t1}
         parts = [r.transcript for r in results if r.transcript]
         last = results[-1]
         return STTResult(
@@ -216,16 +299,11 @@ class Transcriber:
             language_code=last.language_code,
             language_probability=last.language_probability,
             request_id=last.request_id,
-        )
+        ), encode_s, trimmed_s
 
-
-    def _finish_stream(self, stream, opts: TranscribeOptions) -> STTResult | None:
-        if not stream.matches(opts.language_code, opts.mode):
-            stream.abort()
-            print("[transcribe] stream opened for another language/mode — batch",
-                  flush=True)
-            return None
-        t0 = time.monotonic()
+    def _finish_stream(self, stream) -> STTResult | None:
+        """The stream's transcript, or None (failed, or heard nothing): the
+        chain then uses the upload. Runs on a race worker thread."""
         try:
             result = stream.finish()
         except Exception as e:
@@ -242,8 +320,6 @@ class Transcriber:
             # voice under the gate still gets its chance).
             print("[transcribe] stream returned no text — batch", flush=True)
             return None
-        self.last_timings = {"stt": time.monotonic() - t0}
-        self.last_source = "stream"
         return result
 
 

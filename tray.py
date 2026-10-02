@@ -93,6 +93,25 @@ class OpenFlowTray(rumps.App):
         self._build_menu()
         self.state.subscribe(self._on_state_change)
         _install_reopen_handler()
+        # Settings › General › Show in Dock: OpenFlow is a Dock app while it
+        # runs, and quitting it there (or ⌘Q, or the menu) closes everything.
+        self.set_dock(show_in_dock(getattr(daemon, "cfg", {}) or {}))
+        rumps.events.before_quit.register(self._before_quit)
+
+    def set_dock(self, show: bool) -> None:
+        _call_on_main(lambda: set_dock_icon(show))
+
+    def _before_quit(self) -> None:
+        """Any quit (Dock, ⌘Q, menu): stop the daemon and close the widget,
+        overlay and OpenFlow window with it."""
+        try:
+            self.daemon.shutdown()
+            quit_ui = getattr(self.daemon, "close_ui", None)
+            if quit_ui is not None:
+                quit_ui()
+        except Exception as e:
+            print(f"[tray] quit cleanup failed: {e}", flush=True)
+        notify_hub({"quit": True})
 
     # ── menu construction ────────────────────────────────────
     def _build_menu(self) -> None:
@@ -244,10 +263,70 @@ def _spawn_ui_subprocess(module: str, *args: str) -> None:
 _reopen_installed = False
 
 
-def _on_reopen() -> None:
-    """Finder / Spotlight / Dock opened OpenFlow while it runs: show the hub."""
+# ── Dock presence ─────────────────────────────────────────────────────────
+HUB_SOCK = Path(os.path.expanduser("~/.openflow")) / "hub.sock"
+
+
+def show_in_dock(cfg: dict) -> bool:
+    """[hub] show_in_dock (default on)."""
+    return bool((cfg.get("hub") or {}).get("show_in_dock", True))
+
+
+def set_dock_icon(show: bool, app=None) -> bool:
+    """Regular activation policy (Dock icon, ⌘-Tab, Quit from the Dock) or
+    accessory (menu bar only). The bundle is LSUIElement, so this is the
+    only thing that puts the daemon in the Dock. Main thread only."""
     try:
-        _spawn_ui_subprocess("ui.hub", "home")
+        from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,  # type: ignore
+                            NSApplicationActivationPolicyRegular)
+        app = app or NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyRegular if show
+                                 else NSApplicationActivationPolicyAccessory)
+        if show:
+            _install_main_menu(app)
+        return True
+    except Exception as e:
+        print(f"[tray] dock icon {'on' if show else 'off'} failed: {e}", flush=True)
+        return False
+
+
+def _install_main_menu(app) -> None:
+    """A Dock app shows its menu in the menu bar when active; give it the
+    app menu with Quit (⌘Q) so the standard quit works."""
+    menu = app.mainMenu()
+    if menu is not None and menu.numberOfItems() > 0:
+        return
+    from AppKit import NSMenu, NSMenuItem  # type: ignore
+    main = NSMenu.alloc().init()
+    app_item = NSMenuItem.alloc().init()
+    main.addItem_(app_item)
+    app_menu = NSMenu.alloc().initWithTitle_("OpenFlow")
+    app_menu.addItemWithTitle_action_keyEquivalent_("Quit OpenFlow", "terminate:", "q")
+    app_item.setSubmenu_(app_menu)
+    app.setMainMenu_(main)
+
+
+def notify_hub(msg: dict, sock_path: Path | None = None, timeout: float = 0.5) -> bool:
+    """Send one JSON line to a running OpenFlow window (hub.sock):
+    {"quit": true} or {"raise": true}. False when no window is open."""
+    import json
+    import socket
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(str(sock_path or HUB_SOCK))
+            s.sendall((json.dumps(msg) + "\n").encode())
+        return True
+    except OSError:
+        return False
+
+
+def _on_reopen() -> None:
+    """Finder / Spotlight / Dock opened OpenFlow while it runs: bring the
+    window forward on its current page, or open it on Home."""
+    try:
+        if not notify_hub({"raise": True}):
+            _spawn_ui_subprocess("ui.hub", "home")
     except Exception as e:
         print(f"[tray] reopen failed: {e}", flush=True)
 

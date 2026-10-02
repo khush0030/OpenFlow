@@ -63,11 +63,11 @@ def texts(w) -> str:
     return "\n".join(l.text() for l in w.findChildren(QLabel))
 
 
-def test_header_and_two_tabs(db):
+def test_header_and_three_tabs(db):
     page = make(db)
     assert page.since_label.text() == "SINCE SEP 29, 2026 · ON THIS MAC"
-    assert page.tab_labels == ["Your usage", "Your voice"]
-    assert [b.text() for b in page.tabs.buttons] == ["Your usage", "Your voice"]
+    assert page.tab_labels == ["Your usage", "Your voice", "Reliability"]
+    assert [b.text() for b in page.tabs.buttons] == ["Your usage", "Your voice", "Reliability"]
     assert page.tab == 0
     assert not page.usage.isHidden() and page.voice_tab.isHidden()
     page.tabs.buttons[1].click()
@@ -319,3 +319,14 @@ def test_profile_busy_state(voice_db, tmp_path, monkeypatch):
     fn, done = pending[0]
     done(fn(), None)
     assert not page.profile_busy and page.profile_text.text() == "You speak fast."
+
+
+def test_reloading_with_phrase_chips_does_not_crash(voice_db):
+    # Regression: every visit to Insights reloads; clearing the phrase chips
+    # used a freed wrapper (segfault on the second visit with phrases).
+    page = make(voice_db)
+    for _ in range(3):
+        page.shown()
+        _app.processEvents()
+    assert "make sure ×4" in page.phrase_labels
+    assert page.phrase_flow.count() == len(page.phrase_labels)
