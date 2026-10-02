@@ -275,7 +275,7 @@ def test_check_returns_doctor_results(env, monkeypatch):
 
 def test_handler_table_names_every_command(env):
     assert set(make_daemon()._control_handlers()) == {
-        "status", "set_tone", "set_language", "paste_text", "rerun", "play_cues", "check",
+        "status", "set_tone", "set_language", "paste_text", "rerun", "retranscribe", "play_cues", "check",
         "dictionary_suggestions", "accept_suggestion", "dismiss_suggestion"}
 
 

@@ -36,6 +36,11 @@ class Entry:
     # 'skipped' = no LLM call). None for rows saved before.
     stt_path: str | None = None
     cleanup_provider: str | None = None
+    # Never lose a word (Phase 4): NULL = pasted as before; 'failed' = not
+    # transcribed yet, its audio kept at audio_path; 'retried' = transcribed
+    # later from the saved audio (widget Retry / History "Transcribe again").
+    status: str | None = None
+    audio_path: str | None = None
 
 
 SCHEMA = """
@@ -66,7 +71,12 @@ _TIMING_COLS = tuple(f"t_{s}" for s in TIMING_STAGES)
 _COLS = "id, ts, raw, final, tone, lang, duration, app, " + ", ".join(_TIMING_COLS)
 # Provider failover columns (added by migration below).
 _FAILOVER_COLS = ("stt_path", "cleanup_provider")
-_COLS += ", " + ", ".join(_FAILOVER_COLS)
+# Never lose a word: status / audio_path columns (see Entry).
+_TAKE_COLS = ("status", "audio_path")
+STATUS_FAILED = "failed"
+STATUS_RETRIED = "retried"
+# Same order as Entry's fields: rows are unpacked positionally.
+_COLS += ", " + ", ".join(_FAILOVER_COLS + _TAKE_COLS)
 
 
 def _like(text: str) -> str:
@@ -102,7 +112,8 @@ class History:
                 if col not in cols:
                     c.execute(f"ALTER TABLE dictations ADD COLUMN {col} REAL")
             # Provider failover: stt_path, cleanup_provider (NULL for older rows).
-            for col in _FAILOVER_COLS:
+            # Never lose a word (Phase 4): a take's status and saved audio.
+            for col in _FAILOVER_COLS + _TAKE_COLS:
                 if col not in cols:
                     c.execute(f"ALTER TABLE dictations ADD COLUMN {col} TEXT")
 
@@ -120,30 +131,56 @@ class History:
             ts: float | None = None,
             timings: dict[str, float] | None = None,
             stt_path: str | None = None,
-            cleanup_provider: str | None = None) -> None:
-        """Insert a dictation. With a positive `cap` ([history] size_cap),
-        the oldest rows are then pruned so at most `cap` remain. `timings`
-        maps TIMING_STAGES names to seconds; missing stages are stored NULL.
-        stt_path / cleanup_provider: see Entry."""
+            cleanup_provider: str | None = None,
+            status: str | None = None, audio_path: str | None = None) -> int | None:
+        """Insert a dictation; returns its id. With a positive `cap`
+        ([history] size_cap), the oldest rows are then pruned so at most `cap`
+        remain. `timings` maps TIMING_STAGES names to seconds; missing stages
+        are stored NULL. stt_path / cleanup_provider / status / audio_path:
+        see Entry."""
         t = timings or {}
         stage_vals = tuple(
             None if t.get(s) is None else float(t[s]) for s in TIMING_STAGES
         )
-        cols = _TIMING_COLS + _FAILOVER_COLS
+        cols = _TIMING_COLS + _FAILOVER_COLS + _TAKE_COLS
         with self._conn() as c:
-            c.execute(
+            cur = c.execute(
                 "INSERT INTO dictations(ts, raw, final, tone, lang, duration, app, "
                 + ", ".join(cols) + ") "
                 "VALUES(" + ",".join("?" * (7 + len(cols))) + ")",
                 (time.time() if ts is None else ts, raw, final, tone, lang, duration, app,
-                 *stage_vals, stt_path, cleanup_provider),
+                 *stage_vals, stt_path, cleanup_provider, status, audio_path),
             )
+            new_id = cur.lastrowid
             if cap and cap > 0:
                 c.execute(
                     "DELETE FROM dictations WHERE id NOT IN ("
                     "SELECT id FROM dictations ORDER BY ts DESC, id DESC LIMIT ?)",
                     (int(cap),),
                 )
+        return new_id
+
+    def get(self, entry_id: int) -> Entry | None:
+        with self._conn() as c:
+            row = c.execute(f"SELECT {_COLS} FROM dictations WHERE id = ?",
+                            (int(entry_id),)).fetchone()
+        return Entry(*row) if row else None
+
+    def set_result(self, entry_id: int, raw: str, final: str,
+                   status: str | None = STATUS_RETRIED) -> bool:
+        """A saved take was transcribed after all: fill in its text and
+        status; its audio is gone (audio_path cleared)."""
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE dictations SET raw = ?, final = ?, status = ?, audio_path = NULL "
+                "WHERE id = ?", (raw, final, status, int(entry_id)))
+            return cur.rowcount > 0
+
+    def audio_paths(self) -> set[str]:
+        """Saved-take paths that history rows point at."""
+        with self._conn() as c:
+            return {r[0] for r in c.execute(
+                "SELECT audio_path FROM dictations WHERE audio_path IS NOT NULL")}
 
     def recent(self, limit: int = 500) -> list[Entry]:
         with self._conn() as c:

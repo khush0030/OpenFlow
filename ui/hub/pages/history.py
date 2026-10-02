@@ -10,6 +10,7 @@ it isn't running.
 from __future__ import annotations
 
 import html
+import os
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -22,7 +23,7 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
                              QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
                              QVBoxLayout, QWidget, QWidgetItem)
 
-from history import Entry, History
+from history import STATUS_FAILED, Entry, History
 from stats import word_count
 from ui.hub import style as S
 from ui.hub import workers
@@ -53,6 +54,16 @@ LANG_LABELS = {
 OFFLINE = "OpenFlow isn't running"
 REWRITE_FAILED = "Couldn't rewrite it just now. Try again."
 PASTE_FAILED = "Couldn't paste just now. Try again."
+# Never lose a word (Phase 4): a take saved but not transcribed yet.
+NOT_TRANSCRIBED = "Not transcribed"
+TRANSCRIBE_AGAIN = "Transcribe again"
+TRANSCRIBING = "Transcribing…"
+FAILED_NOTE = ("This take couldn't be transcribed when you said it. Its audio is "
+               "saved on this Mac, so nothing is lost: transcribe it again when "
+               "you're back online.")
+AUDIO_GONE_NOTE = ("This take couldn't be transcribed, and its audio is no longer "
+                   "kept (saved takes are cleared after a week).")
+RETRANSCRIBE_FAILED = "Couldn't transcribe it just now. The audio is still saved; try again."
 
 RunAsync = Callable[[Callable[[], Any], Callable[[Any, BaseException | None], None]], None]
 
@@ -83,6 +94,15 @@ def clock_time(ts: float) -> str:
 def when_label(ts: float) -> str:
     d = datetime.fromtimestamp(ts)
     return f"{d:%A, %b} {d.day} · {d.hour % 12 or 12}:{d:%M} {'AM' if d.hour < 12 else 'PM'}"
+
+
+def is_failed(e: Entry) -> bool:
+    return getattr(e, "status", None) == STATUS_FAILED
+
+
+def audio_kept(e: Entry) -> bool:
+    path = getattr(e, "audio_path", None)
+    return bool(path) and os.path.exists(path)
 
 
 def _words(n: int) -> str:
@@ -342,16 +362,23 @@ class _Row(QFrame):
         top.setSpacing(8)
         self._time = QLabel(clock_time(entry.ts))
         self._time.setFont(S.mono(S.T_EYEBROW + 0.5, 400))
-        self._tone = QLabel(tone_label(entry.tone))
-        self._tone.setFont(S.sans(S.T_SMALL))
+        failed = is_failed(entry)
+        self._tone = QLabel(NOT_TRANSCRIBED if failed else tone_label(entry.tone))
+        self._tone.setFont(S.sans(S.T_SMALL, 500 if failed else 400))
         for lbl in (self._time, self._tone):
             lbl.setStyleSheet(f"color:{S.MUTED};background:transparent;")
+        if failed:
+            self._tone.setStyleSheet(f"color:{S.ACCENT_TEXT};background:transparent;")
         top.addWidget(self._time)
         top.addStretch(1)
         top.addWidget(self._tone)
         lay.addLayout(top)
-        text = " ".join((entry.final or entry.raw or "(empty)").split())
-        lay.addWidget(_Clamp(text, S.sans(S.T_BODY), S.INK))
+        if failed:
+            text = f"Saved audio · {entry.duration:.1f} s"
+            lay.addWidget(_Clamp(text, S.sans(S.T_BODY), S.MUTED))
+        else:
+            text = " ".join((entry.final or entry.raw or "(empty)").split())
+            lay.addWidget(_Clamp(text, S.sans(S.T_BODY), S.INK))
         self.set_selected(False)
 
     def time_text(self) -> str:
@@ -389,6 +416,15 @@ def _section(title: str, *widgets: QWidget, spacing: int = 10) -> QVBoxLayout:
     for w in widgets:
         box.addWidget(w)
     return box
+
+
+def _boxed(layout: QLayout) -> QWidget:
+    """A layout in a transparent widget, so a section can be hidden whole."""
+    w = QWidget()
+    w.setStyleSheet("background:transparent;")
+    layout.setContentsMargins(0, 0, 0, 0)
+    w.setLayout(layout)
+    return w
 
 
 def _flow_host(hspace: int = 8, vspace: int = 8) -> tuple[QWidget, "_Flow"]:
@@ -468,6 +504,8 @@ class _Detail(QWidget):
         self.paste_btn.setIcon(_icon("paste", S.PAPER))
         self.copy_btn = _fixed(S.button("Copy"))
         self.copy_btn.setIcon(_icon("copy", S.INK))
+        self.transcribe_btn = _fixed(S.button(TRANSCRIBE_AGAIN, kind="primary"))
+        self.transcribe_btn.hide()
         self.details_btn = _fixed(S.button("Show details"))
         self.delete_btn = _fixed(S.button("Delete", kind="danger"))
         # inline delete confirm: replaces the Delete pill, wraps like the row
@@ -490,7 +528,8 @@ class _Detail(QWidget):
         self.confirm_label.setFixedHeight(S.CONTROL_H)       # centre on the pills
         self.confirm.hide()
         # two groups that wrap as units: use it | look closer / remove it
-        for pair in ((self.paste_btn, self.copy_btn), (self.details_btn, self.delete_btn)):
+        for pair in ((self.transcribe_btn, self.paste_btn, self.copy_btn),
+                     (self.details_btn, self.delete_btn)):
             group = QWidget()
             group.setStyleSheet("background:transparent;")
             gl = QHBoxLayout(group)
@@ -525,7 +564,13 @@ class _Detail(QWidget):
 
         # what was pasted: the hero, Fraunces, comfortable leading
         self.pasted = _Para(S.serif(S.T_H3), S.INK, leading=150)
-        lay.addLayout(_section("What was pasted", self.pasted, spacing=10))
+        self.pasted_section = _boxed(_section("What was pasted", self.pasted, spacing=10))
+        lay.addWidget(self.pasted_section)
+        # a take saved but not transcribed: says so, calmly, instead
+        self.failed_note = _Para(S.sans(S.T_BODY), S.INK_SOFT)
+        self.failed_section = _boxed(_section(NOT_TRANSCRIBED, self.failed_note, spacing=10))
+        self.failed_section.hide()
+        lay.addWidget(self.failed_section)
         lay.addSpacing(24)
 
         # what you said: a soft inset, muted Geist
@@ -544,13 +589,15 @@ class _Detail(QWidget):
         sl.addLayout(sh)
         self.said = _Para(S.sans(S.T_BODY), S.INK_SOFT)
         sl.addWidget(self.said)
+        self.said_card = said
         lay.addWidget(said)
         lay.addSpacing(26)
 
         # run it again as… (tone chips, wrapping)
         self._rerun_host, self._rerun = _flow_host(8, 8)
         self.rerun_chips: dict[str, QPushButton] = {}
-        lay.addLayout(_section("Run it again as", self._rerun_host, spacing=12))
+        self.rerun_section = _boxed(_section("Run it again as", self._rerun_host, spacing=12))
+        lay.addWidget(self.rerun_section)
         lay.addSpacing(16)
 
         # inline rerun result (not saved to history)
@@ -611,15 +658,30 @@ class _Detail(QWidget):
         self.scroll.verticalScrollBar().setValue(0)
         self.when.setText(when_label(e.ts).upper())
         _clear(self._tags)
-        tags = [S.tag(tone_label(e.tone))]
-        tags.append(S.neutral_tag(lang_label(e.lang)))
-        tags.append(S.neutral_tag(f"{e.duration:.1f} s · {_words(word_count(e.final))}"))
+        failed = is_failed(e)
+        if failed:
+            tags = [S.tag(NOT_TRANSCRIBED), S.neutral_tag(tone_label(e.tone))]
+            tags.append(S.neutral_tag(f"{e.duration:.1f} s"))
+        else:
+            tags = [S.tag(tone_label(e.tone))]
+            tags.append(S.neutral_tag(lang_label(e.lang)))
+            tags.append(S.neutral_tag(f"{e.duration:.1f} s · {_words(word_count(e.final))}"))
         if e.app:
             tags.append(S.neutral_tag(e.app))
         for t in tags:
             self._tags.addWidget(t)
         self.pasted.set_plain(e.final or "")
         self.said.set_plain(e.raw or "")
+        kept = failed and audio_kept(e)
+        self.failed_note.set_plain(FAILED_NOTE if kept else AUDIO_GONE_NOTE)
+        self.failed_section.setVisible(failed)
+        for w in (self.pasted_section, self.said_card, self.rerun_section,
+                  self.paste_btn, self.copy_btn):
+            w.setVisible(not failed)
+        self.transcribe_btn.setVisible(failed)
+        self.transcribe_btn.setEnabled(kept)
+        self.transcribe_btn.setText(TRANSCRIBE_AGAIN)
+        self.offline.hide()
         self.meta.setText(
             f"Raw length  {len(e.raw or '')} characters\n"
             f"App         {e.app or 'not recorded'}\n"
@@ -661,6 +723,7 @@ class HistoryPage(Page):
         self._selected_id: int | None = None
         self._offline = False
         self._rerun_token: object | None = None
+        self._transcribing: int | None = None     # history id being retranscribed
         self._error = ""
         self.rows: list[_Row] = []
         self.chips: dict[str, QPushButton] = {}
@@ -753,6 +816,7 @@ class HistoryPage(Page):
         d.copy_btn.clicked.connect(lambda: self._guard(self._copy_final))
         d.copy_raw_btn.clicked.connect(lambda: self._guard(self._copy_raw))
         d.paste_btn.clicked.connect(lambda: self._guard(self._paste_selected))
+        d.transcribe_btn.clicked.connect(lambda: self._guard(self._transcribe_selected))
         d.details_btn.clicked.connect(lambda: self._guard(self._toggle_details))
         d.delete_btn.clicked.connect(lambda: self._guard(self._ask_delete))
         d.confirm_cancel.clicked.connect(lambda: self._guard(self._cancel_delete))
@@ -1109,6 +1173,40 @@ class HistoryPage(Page):
         if self._result_text:
             self._paste(self._result_text)
 
+    # -- transcribe again (a saved take) --------------------------------------
+    def _transcribe_selected(self) -> None:
+        e = self.selected()
+        if e is None or not is_failed(e) or self._transcribing is not None:
+            return
+        entry_id = self._transcribing = e.id
+        d = self.detail
+        d.transcribe_btn.setEnabled(False)
+        d.transcribe_btn.setText(TRANSCRIBING)
+
+        def call():
+            return self.ctx.call("retranscribe", entry_id=entry_id, timeout=120)
+
+        self._run_async(call, lambda r, err: self._transcribe_done(entry_id, r, err))
+
+    def _transcribe_done(self, entry_id: int, _result, err) -> None:
+        self._transcribing = None
+        if err is None:
+            # The row now has its text: re-read it, keep it selected, and the
+            # detail offers Paste again / Copy like any dictation.
+            self._reload()
+            if self._selected_id != entry_id:
+                self.select(entry_id)
+            return
+        if isinstance(err, DaemonNotRunning):
+            self._set_offline(True)
+        if self._selected_id == entry_id:
+            d = self.detail
+            d.transcribe_btn.setText(TRANSCRIBE_AGAIN)
+            d.transcribe_btn.setEnabled(not self._offline)
+            if not isinstance(err, DaemonNotRunning):
+                msg = str(err) if isinstance(err, ControlError) and str(err) else RETRANSCRIBE_FAILED
+                self._notice(msg)
+
     # -- rerun ----------------------------------------------------------------
     def _rerun(self, tone: str) -> None:
         e = self.selected()
@@ -1194,6 +1292,9 @@ class HistoryPage(Page):
             d.offline.hide()
         busy = self._rerun_token is not None and d.spinner.isVisibleTo(self)
         d.paste_btn.setEnabled(not self._offline)
+        e = self.selected()
+        if e is not None and is_failed(e) and self._transcribing is None:
+            d.transcribe_btn.setEnabled(not self._offline and audio_kept(e))
         d.result_paste.setEnabled(not self._offline)
         for c in d.rerun_chips.values():
             c.setEnabled(not self._offline and not busy)

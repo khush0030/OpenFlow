@@ -209,3 +209,44 @@ def test_tmp_history_never_creates_the_real_config_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(hist_mod, "ensure_dirs", lambda: called.append(1))
     History(tmp_path / "x.sqlite")
     assert called == []
+
+
+# -- never lose a word (Phase 4): status / audio_path -------------------------
+
+def test_old_db_gets_status_and_audio_path_null(tmp_path):
+    path = tmp_path / "old.sqlite"
+    c = sqlite3.connect(path)
+    c.executescript(OLD_SCHEMA)
+    c.execute("INSERT INTO dictations(ts, raw, final, tone, lang, duration) "
+              "VALUES(1.0, 'hi', 'Hi.', 'verbatim', 'auto', 2.0)")
+    c.commit()
+    c.close()
+    h = History(path)
+    assert {"status", "audio_path"} <= set(_columns(path))
+    [e] = h.recent()
+    assert (e.status, e.audio_path) == (None, None)
+    History(path)                      # idempotent
+    assert _columns(path).count("status") == 1
+
+
+def test_failed_take_round_trip_and_set_result(h):
+    hid = h.add("", "", "verbatim", "en", 3.0, status=hist_mod.STATUS_FAILED,
+                audio_path="/tmp/t.wav")
+    assert isinstance(hid, int)
+    e = h.get(hid)
+    assert (e.status, e.audio_path, e.final) == ("failed", "/tmp/t.wav", "")
+    assert h.audio_paths() == {"/tmp/t.wav"}
+    assert h.set_result(hid, "hi", "Hi.") is True
+    e = h.get(hid)
+    assert (e.raw, e.final, e.status, e.audio_path) == ("hi", "Hi.", "retried", None)
+    assert h.audio_paths() == set()
+    assert h.get(9999) is None
+    assert h.set_result(9999, "a", "b") is False
+
+
+def test_stats_load_skips_untranscribed_takes(h):
+    import stats
+    h.add("a b", "A b.", "verbatim", "en", 1.0)
+    h.add("", "", "verbatim", "en", 3.0, status="failed", audio_path="/x.wav")
+    rows = stats.load(h.path)
+    assert [r.final for r in rows] == ["A b."]

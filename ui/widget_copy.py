@@ -10,11 +10,17 @@ UNDO = "Undo"
 ERROR = "Couldn't transcribe"
 WRITE_ERROR = "Couldn't write that"   # edit / command: the LLM call failed
 RETRY = "Retry"
+# Transcription failed but the take's audio is saved (Phase 4).
+SAVED = "Saved"
+OFFLINE_SAVED = "Offline · saved"
 CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"
 # Card after a paste that couldn't land (state 6, reason "not_pasted").
 CARD_NOT_PASTED_HEADING = "Couldn't paste"
 CARD_NOT_PASTED_HINT = "On your clipboard · ⌘V to paste"
+# Card for an earlier take that lost the widget to a newer one (reason "queued").
+CARD_QUEUED_HEADING = "Earlier dictation"
+CARD_QUEUED_HINT = "Not pasted · Copy to use it"
 COPY = "Copy"
 MENU_APPEARANCE = "Appearance"
 MENU_HIDE = "Hide for 1 hour"
