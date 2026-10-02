@@ -14,7 +14,7 @@ import daemon as dm
 from flow_state import CARD, ERROR, IDLE, WRITE_FAILED
 from paste import FieldText, PasteTarget
 from test_daemon_edit_overlay import FakeOverlayServer
-from test_daemon_widget import AUDIO, env, make_daemon, work  # noqa: F401  (env is a fixture)
+from test_daemon_widget import AUDIO, FakeRecorder, env, make_daemon, work  # noqa: F401  (env is a fixture)
 
 SLACK = PasteTarget(pid=42, name="Slack", ax_element="FIELD")
 THREAD = cm.CommandContext(app="Slack", before="Hi Priya,", screen="Priya: review Thursday?")
@@ -66,9 +66,19 @@ def hotkey(monkeypatch):
     return state
 
 
+class StartableRecorder(FakeRecorder):
+    def start(self):
+        self.is_recording = True
+
+
 def arm(d, hotkey, monkeypatch):
     # Cmd+C stands in as "whatever is selected" (see the _copy_selection test).
     monkeypatch.setattr(dm.Daemon, "_copy_selection", lambda self, t: hotkey["copied"])
+    # One step: the hotkey opens the mic; end-pointing is tested on its own
+    # (test_command_one_step.py), so no watcher thread here.
+    monkeypatch.setattr(dm.Daemon, "_watch_edit_take", lambda self, take: None)
+    if not hasattr(d.recorder, "start"):
+        d.recorder = StartableRecorder()
     d.on_edit_mode()
 
 
@@ -86,6 +96,8 @@ def test_hotkey_with_nothing_selected_arms_a_command(env, hotkey, monkeypatch):
     assert last["mode"] == "command"
     assert last["selection"] == "Priya: review Thursday?"
     assert last["note"] == "Writing in Slack with the text around your cursor."
+    assert last["phase"] == "listening"            # one step: already listening
+    assert d.recorder.is_recording
 
 
 def test_command_screen_off_keeps_to_the_text_box(env, hotkey, monkeypatch):
@@ -104,15 +116,18 @@ def test_hotkey_with_a_selection_still_edits(env, hotkey, monkeypatch):
     arm(d, hotkey, monkeypatch)
     assert d._edit_pending and d._edit_selection == "Priya"
     assert d._command is None
-    assert d._edit_overlay.sent[-1] == {"type": "show", "selection": "Priya"}
+    assert d._edit_overlay.sent[-1] == {"type": "show", "selection": "Priya",
+                                        "phase": "listening", "hotkey": ""}
 
 
 def test_no_app_in_front_arms_nothing(env, monkeypatch):
     d = make_daemon()
+    d.recorder = StartableRecorder()
     monkeypatch.setattr(dm, "capture_paste_target", lambda: None)
     monkeypatch.setattr(dm.Daemon, "_copy_selection", lambda self, t: "")
     d.on_edit_mode()
     assert d._edit_pending is False
+    assert not d.recorder.is_recording and d._edit_take is None   # the mic closed again
 
 
 def test_empty_selection_at_the_caret_skips_cmd_c(env, monkeypatch):
@@ -142,7 +157,7 @@ def test_the_take_carries_the_armed_command(env, hotkey, monkeypatch):
     seen = []
     d._start_worker = lambda audio, ctx, run: seen.append(ctx)
     d._screen_terms = lambda: ()
-    d.recorder.is_recording = True
+    assert d.recorder.is_recording                 # the hotkey started the take
     d.on_record_stop()
     assert seen and seen[0].edit_mode and seen[0].command is d._command
     assert d._edit_pending is False
