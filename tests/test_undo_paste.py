@@ -69,7 +69,8 @@ def fake_os(monkeypatch):
     monkeypatch.setattr(paste, "_cgevent_paste", lambda: state["keys"].append("cmd+v") or True)
     monkeypatch.setattr(paste, "_cgevent_cmd_key",
                         lambda vk: state["keys"].append(f"cmd+{vk}") or True)
-    monkeypatch.setattr(paste, "_wait_modifiers_released", lambda: None)
+    monkeypatch.setattr(paste, "_wait_modifiers_released", lambda *a, **k: True)
+    monkeypatch.setattr(paste, "_read_field", lambda pid: None)   # field unreadable
     monkeypatch.setattr(paste, "_ax_text_before_caret", lambda pid: None)
     monkeypatch.setattr(paste.time, "sleep", lambda s: None)
     monkeypatch.setattr(paste, "print", lambda *a, **k: None, raising=False)
@@ -79,7 +80,8 @@ def fake_os(monkeypatch):
 
 
 def test_paste_records_the_cmd_v_paste(fake_os):
-    assert paste.paste("hi there", target=PasteTarget(pid=42, name="Notes")) == "pasted"
+    # Field unreadable over AX: sent but unconfirmed, still undoable.
+    assert paste.paste("hi there", target=PasteTarget(pid=42, name="Notes")) == "unconfirmed"
     r = paste._LAST_PASTE
     assert (r.text, r.pid, r.app, r.clip_before, r.clip_change) == \
         ("hi there", 42, "Notes", "old", 7)

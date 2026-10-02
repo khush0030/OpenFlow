@@ -378,13 +378,36 @@ def _clipboard_set(text: str) -> bool:
         return False
 
 
+def _event_source():
+    """Event source for our synthetic keys that suppresses the user's own
+    keyboard while it posts: a hotkey still held (⌥ pressed again to stop a
+    hands-free take or start the next one) can't merge into the event and
+    turn Cmd+V into Cmd+⌥V, which apps ignore. None = the default source."""
+    try:
+        from Quartz import (  # type: ignore
+            CGEventSourceCreate, CGEventSourceSetLocalEventsFilterDuringSuppressionState,
+            kCGEventSourceStateCombinedSessionState, kCGEventFilterMaskPermitLocalMouseEvents,
+            kCGEventFilterMaskPermitSystemDefinedEvents, kCGEventSuppressionStateSuppressionInterval,
+        )
+        src = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState)
+        if src is not None:
+            CGEventSourceSetLocalEventsFilterDuringSuppressionState(
+                src,
+                kCGEventFilterMaskPermitLocalMouseEvents | kCGEventFilterMaskPermitSystemDefinedEvents,
+                kCGEventSuppressionStateSuppressionInterval)
+        return src
+    except Exception:
+        return None
+
+
 def _cgevent_cmd_key(vk: int) -> bool:
     """Post Cmd+<key> (down, up) to the frontmost app."""
     if not _HAS_QUARTZ:
         return False
     try:
-        down = CGEventCreateKeyboardEvent(None, vk, True)
-        up = CGEventCreateKeyboardEvent(None, vk, False)
+        src = _event_source()
+        down = CGEventCreateKeyboardEvent(src, vk, True)
+        up = CGEventCreateKeyboardEvent(src, vk, False)
         CGEventSetFlags(down, kCGEventFlagMaskCommand)
         CGEventSetFlags(up, kCGEventFlagMaskCommand)
         CGEventPost(kCGHIDEventTap, down)
@@ -416,12 +439,80 @@ def _osascript_paste() -> bool:
         return False
 
 
+# Before Cmd+V, wait this long for held modifiers (the hotkey) to come up.
+PASTE_MODIFIER_WAIT_S = 1.0
+# Bringing the target app back to the front can take a moment.
+ACTIVATE_WAIT_S = 0.5
+# After Cmd+V, watch the field this long for the text to show up.
+CONFIRM_TIMEOUT_S = 0.6
+CONFIRM_POLL_S = 0.05
+
+
+def _read_field(pid: int) -> Optional["FieldText"]:
+    if pid <= 0:
+        return None
+    try:
+        return ax_field_text(pid, max_chars=MAX_FIELD_CHARS)
+    except Exception:
+        return None
+
+
+def _bring_to_front(target: PasteTarget) -> bool:
+    """Make `target` the frontmost app again. False only when we know it
+    isn't: Cmd+V would then go to some other app (or nowhere)."""
+    if _front_pid() in (None, target.pid):
+        return True
+    if not activate_front_app(target):
+        print(f"[paste] could not restore {target.name}", flush=True)
+        return False
+    for _ in range(max(1, int(ACTIVATE_WAIT_S / 0.04))):
+        time.sleep(0.04)
+        front = _front_pid()
+        if front in (None, target.pid):
+            print(f"[paste] restored {target.name} ({target.pid})", flush=True)
+            return True
+    print(f"[paste] {target.name} did not come to the front", flush=True)
+    return False
+
+
+def paste_landed(before: Optional["FieldText"], after: Optional["FieldText"],
+                 text: str) -> bool:
+    """Did the paste show up: the field changed and our text now sits right
+    before the caret (tolerating reflowed whitespace and smart quotes)."""
+    if after is None:
+        return False
+    if before is not None and after.value == before.value:
+        return False
+    return paste_still_at_caret(after.value[: after.caret], text)
+
+
+def _confirm_paste(pid: int, before: Optional["FieldText"], text: str) -> bool:
+    """Watch the focused field until the pasted text shows up. False means
+    "not confirmed": it didn't show up, or the app doesn't expose its
+    field's text over AX (e.g. some editors and canvas views)."""
+    for _ in range(max(1, int(CONFIRM_TIMEOUT_S / CONFIRM_POLL_S))):
+        time.sleep(CONFIRM_POLL_S)
+        after = _read_field(pid)
+        if paste_landed(before, after, text):
+            return True
+        if after is None and before is None:
+            return False   # this app's field text isn't readable: can't tell
+    return False
+
+
 def paste(text: str, target: PasteTarget | None = None) -> str:
     """Land `text` at the caret in `target` via clipboard + Cmd+V.
 
     Cmd+V first: Electron / Chromium apps (VS Code, Chrome, Slack) accept an
     AXSelectedText write and report success while inserting nothing, so AX
-    insert is only a last resort when synthetic keystrokes are unavailable."""
+    insert is only a last resort when synthetic keystrokes are unavailable.
+
+    Returns "pasted" only when the text was seen in the field afterwards.
+    "unconfirmed": Cmd+V went out but the text wasn't seen (it may have
+    landed: the app may not expose its field over AX). "clipboard": nothing
+    was sent (no Accessibility, or the target app couldn't be brought back).
+    "failed": the clipboard couldn't be written. In every case but "failed"
+    the text is left on the clipboard."""
     global _LAST_CLIPBOARD, _LAST_PASTE
     _LAST_PASTE = None
     if not text:
@@ -438,33 +529,40 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
         print("[paste] Accessibility not granted — text left on clipboard (press ⌘V)", flush=True)
         return "clipboard"
 
-    if target is not None and _front_pid() != target.pid:
-        if activate_front_app(target):
-            print(f"[paste] restored {target.name} ({target.pid})", flush=True)
-            time.sleep(0.08)
-        else:
-            print(f"[paste] could not restore {target.name}", flush=True)
+    if target is not None and not _bring_to_front(target):
+        return "clipboard"
 
-    time.sleep(0.04)
-    sent = _cgevent_paste()
-    if sent:
-        print("[paste] sent Cmd+V", flush=True)
+    # The hotkey may still be down (⌥ pressed to stop a hands-free take, or
+    # to start the next one while this one finishes): an app sees Cmd+⌥V
+    # and pastes nothing. Give it a moment to come up.
+    if _wait_modifiers_released(PASTE_MODIFIER_WAIT_S) is False:
+        print("[paste] modifier keys still held — sending Cmd+V anyway", flush=True)
     else:
+        time.sleep(0.04)
+    pid = target.pid if target is not None else (_front_pid() or 0)
+    before = _read_field(pid)
+    sent = _cgevent_paste()
+    if not sent:
         print("[paste] CGEvent failed; falling back to osascript", flush=True)
         sent = _osascript_paste()
     if sent:
         # Only a Cmd+V paste is undoable (the AX fallback below is not one
         # undo step everywhere).
-        pid = target.pid if target is not None else (_front_pid() or 0)
         _LAST_PASTE = PasteRecord(text=text, pid=pid,
                                   app=target.name if target is not None else "",
                                   at=time.monotonic(), clip_before=_LAST_CLIPBOARD,
                                   clip_change=clip_change)
-        return "pasted"
+        if _confirm_paste(pid, before, text):
+            print("[paste] sent Cmd+V — landed", flush=True)
+            return "pasted"
+        print("[paste] sent Cmd+V — not confirmed "
+              f"({'field not readable over AX' if before is None else 'text not seen in the field'})",
+              flush=True)
+        return "unconfirmed"
     ax_el = target.ax_element if target is not None else None
     if _ax_insert(text, ax_el):
         print("[paste] inserted via AXSelectedText", flush=True)
-        return "pasted"
+        return "pasted" if _confirm_paste(pid, before, text) else "unconfirmed"
     return "clipboard"
 
 
@@ -590,9 +688,11 @@ def _ax_text_before_caret(pid: int) -> Optional[str]:
     return None if f is None else f.value[: f.caret]
 
 
-def _wait_modifiers_released(timeout_s: float = 1.0) -> None:
+def _wait_modifiers_released(timeout_s: float = 1.0) -> Optional[bool]:
     """The undo chord's ⌘⇧ are still down when it fires; a Cmd+Z sent now
-    could reach the app as ⌘⇧Z (Redo). Wait for them to come up."""
+    could reach the app as ⌘⇧Z (Redo). Same for the dictation hotkey and
+    Cmd+V. Wait for them to come up: True once up, False if still held at
+    the timeout, None if the key state can't be read."""
     try:
         from Quartz import (  # type: ignore
             CGEventSourceFlagsState, kCGEventSourceStateHIDSystemState,
@@ -600,16 +700,17 @@ def _wait_modifiers_released(timeout_s: float = 1.0) -> None:
         )
     except Exception:
         time.sleep(0.2)
-        return
+        return None
     held = kCGEventFlagMaskShift | kCGEventFlagMaskAlternate | kCGEventFlagMaskControl
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         try:
             if not CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & held:
-                return
+                return True
         except Exception:
-            return
+            return None
         time.sleep(0.02)
+    return False
 
 
 def undo_last_paste(window_s: float = UNDO_WINDOW_S) -> str:

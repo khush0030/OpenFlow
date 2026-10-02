@@ -287,6 +287,27 @@ def test_failed_paste_shows_card(env, monkeypatch):
     assert d._flow.state == CARD and d._flow.text == "hello world"
 
 
+@pytest.mark.parametrize("status", ["unconfirmed", "clipboard", "failed"])
+def test_paste_not_seen_in_the_field_shows_the_unconfirmed_card(env, monkeypatch, status):
+    played = []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    monkeypatch.setattr(dm, "paste", lambda text, target=None: status)
+    d = make_daemon()
+    work(d, d._flow.processing())
+    assert d._flow.state == CARD and d._flow.text == "hello world"
+    assert d._flow.reason == flow_state.UNCONFIRMED
+    assert d._flow.message()["reason"] == "unconfirmed"     # widget picks its copy
+    assert "paste" not in played                             # no success cue
+
+
+def test_confirmed_paste_plays_cue_and_goes_idle(env, monkeypatch):
+    played = []
+    monkeypatch.setattr(dm.sounds, "play", played.append)
+    d = make_daemon()
+    work(d, d._flow.processing())
+    assert d._flow.state == IDLE and played == ["paste"]
+
+
 # -- Review fix 4: respawn backoff -------------------------------------------
 
 class Clock:
@@ -495,6 +516,18 @@ def test_pump_pastes_card_into_clicked_text_box(env, monkeypatch):
     pump_once(d)
     assert ("paste", "hello") in env["calls"]
     assert d._flow.state == IDLE
+
+
+def test_pump_never_repastes_an_unconfirmed_card(env, monkeypatch):
+    # The text may already be in the focused field: pasting it again on
+    # focus would duplicate it. The card offers Copy instead.
+    asked = focus_probe(monkeypatch)
+    d = make_daemon()
+    d._flow.show_card("hello", run=d._flow.processing(), reason=flow_state.UNCONFIRMED)
+    pump_once(d)
+    assert not any(c[0] == "paste" for c in env["calls"])
+    assert asked == []
+    assert d._flow.state == CARD
 
 
 def test_pump_never_pastes_card_while_widget_disconnected(env, monkeypatch):

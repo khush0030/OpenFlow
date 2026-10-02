@@ -99,7 +99,7 @@ from history import History
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
-from flow_state import CARD, FlowController, FlowHooks
+from flow_state import CARD, UNCONFIRMED, FlowController, FlowHooks
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
@@ -1043,7 +1043,10 @@ class Daemon:
                     self._flow.tick()
                     # Only for a card the user can see: never paste a
                     # transcript they can't see into whatever gets focus.
-                    if self._flow.state == CARD and self._widget.connected \
+                    # A card for an unconfirmed paste never pastes itself:
+                    # the text may already be in that field.
+                    if self._flow.state == CARD and not self._flow.reason \
+                            and self._widget.connected \
                             and focused_editable() is True:
                         text = self._flow.text
                         print("[daemon] text box focused — pasting card text", flush=True)
@@ -1344,15 +1347,16 @@ class Daemon:
                 paste_status = paste(final, target=target)
                 self.state.last_paste_at = time.time()
                 print(f"[daemon] paste {paste_status}", flush=True)
-                if paste_status == "pasted":
+                if paste_status in ("pasted", "unconfirmed"):
                     self._watch_paste(final, target)
-                if paste_status in ("clipboard", "failed"):
-                    # Accessibility missing or paste failed: never lose the
-                    # text (spec §8).
-                    self._flow.show_card(final, run=run) or self._stale(run)
-                else:
+                if paste_status == "pasted":
                     sounds.play("paste")
                     self._flow.done(run=run) or self._stale(run)
+                else:
+                    # Not seen in the field (or never sent): never lose the
+                    # text — it's on the clipboard and in the card (spec §8).
+                    self._flow.show_card(final, run=run, reason=UNCONFIRMED) \
+                        or self._stale(run)
             t3 = time.monotonic()
             timings["paste"] = t3 - t2
             timings["total"] = t3 - start
