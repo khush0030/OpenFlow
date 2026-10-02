@@ -163,6 +163,18 @@ def test_card_shows_text_and_copy(fa):
     assert fa.client.sent[-1] == {"action": "copy"}
 
 
+def test_not_pasted_card_says_so(fa):
+    from ui import widget_copy as copy
+    from PyQt6.QtWidgets import QLabel
+    fa._on_message({"type": "state", "state": "card", "text": "hi", "reason": "not_pasted"})
+    labels = [l.text() for l in fa.popup.findChildren(QLabel)]
+    assert copy.CARD_NOT_PASTED_HEADING in labels and copy.CARD_NOT_PASTED_HINT in labels
+    assert copy.CARD_HEADING not in labels and copy.CARD_HINT not in labels
+    fa._on_message({"type": "state", "state": "card", "text": "hi"})
+    labels = [l.text() for l in fa.popup.findChildren(QLabel)]
+    assert copy.CARD_HEADING in labels and copy.CARD_HINT in labels
+
+
 def test_menu_choices_apply_and_persist(fa):
     fa.choose("appearance", "ink")
     assert fa.theme is INK

@@ -503,7 +503,7 @@ class Card(Surface):
     BODY_W = W - 32  # inside the 16 pt side margins
 
     def __init__(self, theme: Theme, text: str, on_copy, on_dismiss,
-                 max_height: float | None = None) -> None:
+                 max_height: float | None = None, not_pasted: bool = False) -> None:
         super().__init__(theme, radius=18)
         self.setFixedWidth(self.W + 2 * M)
         muted = f"color:{css(theme.muted)};background:transparent;"
@@ -514,7 +514,7 @@ class Card(Surface):
         head = QHBoxLayout()
         head.setSpacing(9)
         head.addWidget(MarkIcon(theme))
-        heading = QLabel(copy.CARD_HEADING)
+        heading = QLabel(copy.CARD_NOT_PASTED_HEADING if not_pasted else copy.CARD_HEADING)
         heading.setFont(ui_font(12, 500))
         heading.setStyleSheet(muted)
         head.addWidget(heading, 1)
@@ -556,7 +556,7 @@ class Card(Surface):
         foot = QHBoxLayout()
         foot.setSpacing(7)
         foot.addWidget(PulseDot(theme))
-        hint = QLabel(copy.CARD_HINT)
+        hint = QLabel(copy.CARD_NOT_PASTED_HINT if not_pasted else copy.CARD_HINT)
         hint.setFont(ui_font(12))
         hint.setStyleSheet(muted)
         foot.addWidget(hint, 1)
@@ -1194,7 +1194,7 @@ class FlowApp(QObject):
             return Toast(th, copy.ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "card":
             return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
-                        max_height=max_height)
+                        max_height=max_height, not_pasted=self.reason == "not_pasted")
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:
