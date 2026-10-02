@@ -651,10 +651,18 @@ class Daemon:
 
     def on_record_start(self, hands_free: bool = False) -> None:
         if self.state.paused:
+            print("[daemon] paused — key press ignored", flush=True)
             return
         if self.recorder.is_recording:
             return
         print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
+        t0 = time.monotonic()
+        # Feedback first: the widget (and cue) answer the key now, not after
+        # the AX read and the mic open below (~0.3 s cold), which used to
+        # leave a press looking ignored.
+        self.state.recording = RecordingState.RECORDING
+        self.state.notify()
+        self._flow.recording_started(hands_free=hands_free)
         remembered = capture_paste_target()
         if remembered is not None:
             self._paste_target = remembered
@@ -663,13 +671,38 @@ class Daemon:
                 f"ax={'yes' if remembered.ax_element is not None else 'no'}",
                 flush=True,
             )
+        t_target = time.monotonic()
         self._open_stream()
         self._start_screen_capture(remembered)
-        self.recorder.start()
+        try:
+            self.recorder.start()
+        except Exception as e:
+            # No input would open (device busy / gone). Say so on screen
+            # instead of leaving the widget recording nothing.
+            log_exception("daemon.audio", "microphone failed to start", e)
+            self._drop_stream()
+            self._screen = None
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            self._flow.no_audio(None, None)
+            return
+        t_mic = time.monotonic()
         self._warm_up()
-        self.state.recording = RecordingState.RECORDING
+        print(f"[daemon] mic open {1000 * (t_mic - t0):.0f}ms after key-down "
+              f"(paste target {1000 * (t_target - t0):.0f}ms)", flush=True)
+
+    def _on_hold_cancel(self) -> None:
+        """The hold key was tapped (first half of a double-tap) or used as a
+        modifier (⌥+key): that press was no dictation. Drop the take quietly:
+        no transcription, no "too short", no paste."""
+        if not self.recorder.is_recording:
+            return
+        self.recorder.stop()
+        self._drop_stream()
+        self._screen = None
+        self.state.recording = RecordingState.IDLE
         self.state.notify()
-        self._flow.recording_started(hands_free=hands_free)
+        self._flow.idle_if_recording()
 
     def _open_stream(self) -> None:
         """Key-down: stream this take to Sarvam while the user talks
@@ -1511,7 +1544,8 @@ class Daemon:
         # is_active: the widget (✓ / ✕) or Esc can stop a double-tap toggle
         # session; the key must then treat its next press as a fresh hold.
         return HoldToTalk(hold_key, self._on_hold_press, self.on_record_stop,
-                          is_active=lambda: self.recorder.is_recording)
+                          is_active=lambda: self.recorder.is_recording,
+                          on_cancel=self._on_hold_cancel)
 
     def _chord_bindings(self, hk: dict) -> dict[str, callable]:
         chords: dict[str, callable] = {}
