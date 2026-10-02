@@ -56,9 +56,11 @@ Linux are not supported. What's shipped and what's next:
   voice ("make this shorter"). With nothing selected, ⌘⇧E writes new text at
   the cursor from what's around it ("reply saying yes but push to Friday").
 - **Fixes itself.** "…no wait, make it 3pm" keeps only the correction.
-- **Safety nets.** Undo the last paste (⌘⇧Z); Esc or ✕ cancels at any stage;
-  if a paste can't land, the text stays on the clipboard with a copy card;
-  "can't hear you" when the mic is silent.
+- **Never loses a word.** Every take's audio is kept until its text lands;
+  if Sarvam is slow or down it falls back to Sarvam upload, then Groq Whisper
+  (with a Groq key), and failed takes wait in History with "Transcribe
+  again". Undo the last paste (⌘⇧Z); Esc or ✕ cancels at any stage; if a
+  paste can't land, the text stays on the clipboard with a copy card.
 - **The OpenFlow window.** Home, Insights (usage and **Your voice**), History
   (search, copy, paste again, re-run in another tone), Dictionary, Tone &
   language, Settings and Help.
@@ -86,9 +88,10 @@ pip install -r requirements.txt
 ```
 
 Then turn on **Settings › General › Open at login** (or run
-`./scripts/install_macos.sh`). Login starts `/Applications/OpenFlow.app`, a
-menu-bar app with no Dock icon; the OpenFlow window shows in the Dock only
-while it's open.
+`./scripts/install_macos.sh`). Login starts `/Applications/OpenFlow.app`.
+While it runs, OpenFlow sits in the Dock: click it to open the window, and
+quit it there (or ⌘Q) to close everything, including the menu bar icon and
+widget. Turn off **Settings › General › Show in Dock** for a menu-bar-only app.
 
 A signed, notarized DMG with auto-update is planned (Roadmap, Phase 7).
 
@@ -149,9 +152,10 @@ Open it from the menu bar, the Dock or Spotlight, or with `python -m openflow hu
 
 - **Home**: today's dictations, headline numbers, current tone, language and
   permissions.
-- **Insights**: *Your usage* (words per minute, time saved, streak, tones) and
+- **Insights**: *Your usage* (words per minute, time saved, streak, tones),
   *Your voice* (pace over time and by time of day, filler words, signature
-  phrases, how you open sentences, an optional AI-written voice profile).
+  phrases, how you open sentences, an optional AI-written voice profile) and
+  *Reliability* (success rate, wait times, where the time goes, providers).
 - **History**: search, filters, copy, paste again, re-run in another tone.
 - **Dictionary**: names and words to spell your way, plus suggestions learned
   from your corrections.
@@ -166,7 +170,7 @@ python -m openflow dict add "Oltaflock" --hints "oh la flock,ola flock"
 python -m openflow dict list | remove NAME
 python -m openflow snippets add "my email" "me@example.com"
 python -m openflow history --limit 20
-python -m openflow key set groq|anthropic   # store a fast cleanup key in the Keychain
+python -m openflow key set groq|anthropic   # store a Groq / Anthropic key in the Keychain (Groq also backs up STT)
 python -m openflow doctor              # permissions, mic, key, network
 python -m openflow logs                # recent log lines
 python -m openflow config               # config, dictionary and history paths
@@ -226,6 +230,11 @@ volume = 0.35
 [history]
 enabled = true
 size_cap = 500
+keep_days = 0                    # 0 = forever; Settings › Privacy offers 90 / 30 / 7
+
+[failover]
+stt = "auto"                     # "off": never send audio to the backup STT (Groq)
+cleanup = "auto"                 # "off": only the configured cleanup provider
 ```
 
 Files in `~/.openflow/`: `config.toml`, `dictionary.json`, `snippets.json`,
