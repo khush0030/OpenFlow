@@ -90,27 +90,27 @@ skip cleanup for ≤3 words, per-stage timings), test logs isolated.
 The order is deliberate: trust first (people stop using a dictation app the
 first time it eats a paragraph), then feel, then intelligence, then other people.
 
-### Phase 4: Never lose a word (trust) ⬜ — next up
+### Phase 4: Never lose a word (trust) 🟡 shipped 2026-10-02, in its two-week trial
 
 Goal: zero lost dictations and graceful behaviour when the network or a
 provider misbehaves.
 
-- **Provider failover.** STT: stream → upload → a second cloud STT
+- ✅ **Provider failover.** STT: stream → upload → a second cloud STT
   (Deepgram or Groq Whisper) behind the same interface. Cleanup: per-provider
   timeout budget, then the next provider, then paste the transcript
   uncleaned rather than nothing. Show which path a take used in History.
-- **Offline and slow network.** Keep the audio of every take until it has
+- ✅ **Offline and slow network.** Keep the audio of every take until it has
   pasted. When transcription fails, the widget shows "Saved · Retry", and
   History gets "Transcribe again" for failed takes.
-- **Queued cards.** A failure card for a take that lost the widget to a newer
+- ✅ **Queued cards.** A failure card for a take that lost the widget to a newer
   take waits its turn instead of disappearing.
-- **First words, without an always-on mic.** Shorten the ~0.3 s from key-down
+- ✅ **First words, without an always-on mic.** Shorten the ~0.3 s from key-down
   to mic open (open the stream before the slower key-down work, reuse the
   device between takes in a session) and measure with the `mic open` log
   line. Decided 2026-10-02: no always-on mic or pre-roll buffer.
-- **Reliability you can see.** Insights › Reliability: success rate, latency
+- ✅ **Reliability you can see.** Insights › Reliability: success rate, latency
   p50 / p90, failures by cause. Local only, from history and log.
-- **Data controls.** Retention limits (keep N days), export, delete
+- ✅ **Data controls.** Retention limits (keep N days), export, delete
   everything; covers history and the voice profile.
 - ✅ **Release check.** [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md): an on-screen checklist run before each deploy
   (dictate into VS Code chat, Chrome, Slack; hands-free; cancel; command mode).
@@ -198,6 +198,9 @@ the call, write the summary, next steps and a follow-up email.
 
 - 2026-10-02: the mic is only open while dictating; no always-on pre-roll.
 - 2026-10-02: the Undo button after a cancel stays as it is.
+- 2026-10-02: after a lone tap the mic may stay open ~0.75 s waiting for a double-tap.
+- 2026-10-02: OpenFlow is a Dock app while it runs; quitting it closes everything.
+- 2026-10-02: Sarvam stays the main cleanup model; Groq is a backup only.
 - 2026-10-02: one accent (widget red `#E5402F`) across widget and hub.
 
 ## Working agreement
