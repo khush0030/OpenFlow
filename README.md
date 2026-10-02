@@ -3,16 +3,16 @@
 
   # OpenFlow
 
-  **Open-source, self-hosted [Wispr Flow](https://wisprflow.ai) alternative.**
-  Hold a hotkey, speak, get cleaned-up text pasted into any app — with first-class
-  Hindi / Hinglish input and a user-extensible custom dictionary.
+  **Hold a key, speak, and clean text lands wherever you're typing.**
+  An open-source [Wispr Flow](https://wisprflow.ai) alternative for macOS, built
+  for Indian English and Hinglish, running on your own Sarvam key.
 
   [![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#license)
   [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-  [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-success.svg)](#install)
-  [![Status](https://img.shields.io/badge/status-beta-orange.svg)](#status)
+  [![Platform](https://img.shields.io/badge/platform-macOS-black.svg)](#install)
+  [![Status](https://img.shields.io/badge/status-beta-orange.svg)](./ROADMAP.md)
 
-  [Download](#download) · [Quick Start](#quick-start) · [Configuration](#configuration) · [Roadmap](#roadmap)
+  [Install](#install) · [Using it](#using-it) · [Configuration](#configuration) · [Architecture](#architecture) · [Roadmap](./ROADMAP.md)
 </div>
 
 ---
@@ -21,308 +21,275 @@
 
 | | Wispr Flow Pro | **OpenFlow** |
 |---|---|---|
-| Price | $15 / month | **Free** (BYO Sarvam key, pay-per-use) |
-| Hosting | Cloud | **Your machine + your API key** (Sarvam cloud STT/LLM) |
-| Hindi / Hinglish → English | Limited | **First-class** |
-| Custom dictionary | No | **Yes** (canonical + phonetic hints) |
+| Price | $15 / month | **Free**: bring your own Sarvam key, pay per use |
+| Hindi / Hinglish → English | Limited | **First-class**: speak any mix, paste English (or keep Hindi) |
+| Custom dictionary | Yes | **Yes**, and it learns from your corrections |
+| Your data | Their cloud | **Your Mac** (`~/.openflow`); audio and text go only to the model providers you configure |
 | Open source | No | **Yes** |
-| Edit-by-voice | Yes | **Yes** |
 
-> **Default behaviour:** speak Hindi / Hinglish, get **English** text pasted.
-> Toggle off with `general.always_english_output = false` in `~/.openflow/config.toml`
-> if you want Devanagari output.
-
----
+Also: about 0.6 s from key-up to text for a 10 s take, command mode
+("reply saying yes but push to Friday"), and Insights into how you speak.
 
 ## Status
 
-Beta. Daily-driver on macOS. Linux runs from source.
-
-| Phase | What | Status |
-|---|---|---|
-| 0 | Bootstrap (venv, deps, repo structure) | ✅ done |
-| 1 | Core loop: hotkey → record → speech-to-text → paste | ✅ done |
-| 2 | AI cleanup + tone modes + always-English default | ✅ done |
-| 3 | Tray icon (status, mode submenus, quit) | ✅ done |
-| 4 | Hindi / Hinglish + auto-translate-to-English | ✅ done |
-| 5 | Custom dictionary (cleanup glossary + rapidfuzz correction) | ✅ done |
-| 6 | Edit mode (select → speak instruction → AI rewrite) | ✅ done |
-| 7 | PyQt6 settings GUI + onboarding wizard + dict editor | ✅ done |
-| 8 | macOS `.app` packaging + LaunchAgent auto-start | ✅ done |
-| 9 | NSEvent-based hotkey backend (macOS reliability fix) | ✅ done |
-| 10 | Sarvam pipeline (Saaras v4 STT + Sarvam chat), signed local build | ✅ done |
-
-What's next — widget redesign, speed, hands-free, call copilot — lives in
+Beta: a daily driver on macOS 13+ (Apple Silicon and Intel). Windows and
+Linux are not supported. What's shipped and what's next:
 [ROADMAP.md](./ROADMAP.md).
 
 ---
 
-## Download
+## What it does
 
-### macOS
-
-> Signed DMG releases land on the [Releases](https://github.com/khush0030/OpenFlow/releases) page once Phase 10 ships. Until then, build from source — instructions below.
-
-**Built from source:** `pyinstaller openflow.spec` → `dist/OpenFlow.app`.
-Install + register the auto-start LaunchAgent in one shot:
-
-```bash
-./scripts/install_macos.sh
-```
-
-This copies `OpenFlow.app` to `/Applications/`, strips quarantine, and offers to
-register `~/Library/LaunchAgents/com.openflow.dictation.plist` so the daemon
-starts at login inside the Aqua session.
-
-### Linux
-
-Run from source (packaging targeted in Phase 11):
-
-```bash
-git clone https://github.com/khush0030/OpenFlow.git
-cd OpenFlow
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python -m openflow
-```
-
-### Windows
-
-Not supported yet — see Phase 11 in [Roadmap](#roadmap).
+- **Dictate anywhere.** Hold the dictation key, talk, let go. Text is pasted
+  at your cursor in any app. Double-tap the key for hands-free; tap once to stop.
+- **Fast.** Audio streams to Sarvam Saaras v4 while you speak, so the
+  transcript is ready about 0.3 s after you let go.
+- **Clean, not rewritten.** The default *Verbatim* tone keeps your words and
+  adds punctuation, capitals and layout. Six more tones (Raw, Casual,
+  Professional, Email, Slack, Bullet points); cycle with F6 or set one per app.
+- **Formats itself.** "Number one … number two …" becomes a list, "new
+  paragraph" breaks the line, long takes get paragraphs, emails get a
+  greeting and sign-off. No modes to switch.
+- **Knows your names.** A custom dictionary, names read from the screen, and
+  automatic learning when you fix a word right after it's pasted.
+- **Edit and command mode.** Select text and press ⌘⇧E to rewrite it by
+  voice ("make this shorter"). With nothing selected, ⌘⇧E writes new text at
+  the cursor from what's around it ("reply saying yes but push to Friday").
+- **Fixes itself.** "…no wait, make it 3pm" keeps only the correction.
+- **Safety nets.** Undo the last paste (⌘⇧Z); Esc or ✕ cancels at any stage;
+  if a paste can't land, the text stays on the clipboard with a copy card;
+  "can't hear you" when the mic is silent.
+- **The OpenFlow window.** Home, Insights (usage and **Your voice**), History
+  (search, copy, paste again, re-run in another tone), Dictionary, Tone &
+  language, Settings and Help.
 
 ---
 
-## Quick Start
+## Install
 
-Requirements: **macOS**, **Python ≥ 3.10**, **Sarvam API key** ([dashboard.sarvam.ai](https://dashboard.sarvam.ai)).
+Requirements: macOS 13+, Python 3.10+ (3.12 recommended), a
+[Sarvam API key](https://dashboard.sarvam.ai).
 
 ```bash
-# 1. Deps
 brew install python@3.12
-
-# 2. Clone + venv
 git clone https://github.com/khush0030/OpenFlow.git
 cd OpenFlow
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# 3. API key
-cp .env.example .env
-$EDITOR .env                            # paste your key after SARVAM_API_KEY=
-
-# 4. Run
-python -m openflow
 ```
 
-OpenFlow auto-loads `.env` from the project root **and** `~/.openflow/.env`.
-Real environment vars win over `.env`. Both files are gitignored.
+### Build and install the app
+
+```bash
+./scripts/setup_codesign.sh          # once: a local signing identity (keeps permissions across builds)
+./scripts/build_app.sh --deploy      # build, sign, copy to /Applications, relaunch
+```
+
+Then turn on **Settings › General › Open at login** (or run
+`./scripts/install_macos.sh`). Login starts `/Applications/OpenFlow.app`, a
+menu-bar app with no Dock icon; the OpenFlow window shows in the Dock only
+while it's open.
+
+A signed, notarized DMG with auto-update is planned (Roadmap, Phase 7).
 
 ### First run
 
-On first launch a four-step window (`ui/first_run.py`) walks you through
-Welcome, the three macOS permissions (Microphone, Accessibility, Input
-Monitoring; the rows update as you grant them), your Sarvam key (tested
-against Sarvam, then saved to the Keychain) and a box to try dictating into.
-Re-open it with `python -m openflow onboarding`.
+A four-step window asks for the three macOS permissions (rows update as you
+grant them), your Sarvam key (tested, then stored in the Keychain) and gives
+you a box to try dictating into. Reopen it with `python -m openflow onboarding`.
 
-### macOS permissions
+| Permission | Why |
+|---|---|
+| Microphone | Hear you |
+| Accessibility | Paste where you're typing, read the focused field for context |
+| Input Monitoring | Notice the dictation key |
 
-OpenFlow needs two permissions, both prompted automatically:
+If keys stop working after a macOS update, re-grant Accessibility and Input
+Monitoring in System Settings › Privacy & Security. `python -m openflow doctor`
+checks permissions, mic, key, network and paths.
 
-- **Accessibility** — global hotkey listener + synthetic Cmd+V paste.
-- **Microphone** — capture audio.
-
-If hotkeys go dead after a macOS update, re-grant Accessibility:
-`System Settings → Privacy & Security → Accessibility → OpenFlow`.
-
-Diagnostics:
+### Run from source (development)
 
 ```bash
-python -m openflow doctor    # prints ax_trusted, mic, hotkey backend, paths
+cp .env.example .env && $EDITOR .env      # SARVAM_API_KEY=...
+OPENFLOW_FROM_SOURCE=1 python -m openflow
 ```
+
+OpenFlow reads `.env` from the project root and `~/.openflow/.env`; real
+environment variables win. Without `OPENFLOW_FROM_SOURCE=1`, a source run
+hands the login item and the OpenFlow window to the installed app when one
+exists, and only one OpenFlow runs at a time (`~/.openflow/daemon.lock`).
 
 ---
 
-## Usage
+## Using it
 
-```bash
-# Run the daemon (foreground)
-python -m openflow
+### Keys
 
-# Custom dictionary
-python -m openflow dict add "Oltaflock" --hints "oh la flock,ola flock,olaf lock"
-python -m openflow dict list
-python -m openflow dict remove "Oltaflock"
-
-# History
-python -m openflow history --limit 20
-
-# Paths + config locations
-python -m openflow config
-```
-
-### Default hotkeys
-
-Override in `~/.openflow/config.toml`.
+All configurable in **Settings › Shortcuts** (or `~/.openflow/config.toml`).
 
 | Action | Default |
 |---|---|
-| **Hold to talk** *or* double-tap to toggle | `Right Cmd` (`cmd_r`) |
-| Cycle tone mode | `F6` |
-| Edit mode (rewrite selection) / command mode (nothing selected) | `Cmd+Shift+E` |
-| Undo last paste *(stub)* | `Cmd+Shift+Z` |
+| Dictate: hold, talk, release | Right Option (`alt_r`) |
+| Hands-free: double-tap, then tap to finish | the same key |
+| Cancel | Esc, or ✕ on the widget |
+| Edit selection / command mode (nothing selected) | ⌘⇧E |
+| Undo last paste | ⌘⇧Z |
+| Cycle tone | F6 |
 
-**Two ways to dictate with the same key:**
-- **Hold** → records while held, pastes on release.
-- **Double-tap** → toggle mode for hands-free long-form dictation; tap once more to stop.
+### Languages
 
-### Tone modes
+Auto · English · Hindi (Devanagari) · Hindi (Roman) · Hinglish · Hindi → English
+· English → Hindi. With **Always output English** on (the default), anything
+you say is pasted in English.
 
-`raw` · `casual` · `professional` · `bullets` · `email` · `slack`
+### The OpenFlow window
 
-Cycle with `F6` or pick from the tray's **Tone** submenu.
+Open it from the menu bar, the Dock or Spotlight, or with `python -m openflow hub [page]`.
 
-### Language modes
+- **Home**: today's dictations, headline numbers, current tone, language and
+  permissions.
+- **Insights**: *Your usage* (words per minute, time saved, streak, tones) and
+  *Your voice* (pace over time and by time of day, filler words, signature
+  phrases, how you open sentences, an optional AI-written voice profile).
+- **History**: search, filters, copy, paste again, re-run in another tone.
+- **Dictionary**: names and words to spell your way, plus suggestions learned
+  from your corrections.
+- **Tone & language**, **Settings**, **Help & shortcuts**.
 
-`auto` · `en` · `hi` · `hi_roman` · `hinglish` · `hi_to_en` · `en_to_hi`
+### Command line
 
-With `general.always_english_output = true` (default), every mode except `hi`,
-`hi_roman`, and `en_to_hi` forces English output via Saaras `mode="translate"`.
-
-### Edit mode
-
-1. Select text in any app.
-2. Press `Cmd+Shift+E` — the selection is captured.
-3. Hold the record key and speak an instruction ("make this more concise", "translate to Hindi").
-4. Release. The selection is replaced with the rewritten text.
-
-### Command mode
-
-Press `Cmd+Shift+E` with **nothing selected** (cursor in a reply box), hold the
-record key and say what to write: "reply saying yes but push to Friday". The
-text around the cursor and the nearby on-screen text (the message you're
-replying to, capped) go to the cleanup LLM, and the reply is typed at the
-cursor. If the model call fails, the widget offers Retry and the field is left
-untouched. Set `[context] command_screen = false` to send only the text box's
-own text. Spec: `docs/superpowers/specs/2026-10-02-command-mode.md`.
-
-### Custom dictionary
-
-`~/.openflow/dictionary.json`:
-
-```json
-{
-  "terms": [
-    {
-      "canonical": "Oltaflock",
-      "phonetic_hints": ["oh la flock", "ola flock", "olaf lock"],
-      "language": "en",
-      "context": "company name"
-    }
-  ]
-}
-```
-
-Each term contributes two things:
-
-1. `canonical` is injected into the cleanup prompt as a glossary so names stay spelled correctly.
-2. `phonetic_hints` feed a post-transcription fuzzy-correction pass (rapidfuzz, default threshold 85).
-
-Edit visually from the tray → **Settings → Dictionary**.
-
----
-
-## Architecture
-
-```
-HotkeyListener (NSEvent on macOS / pynput fallback)
-   └─> AudioRecorder (sounddevice, 16 kHz mono)
-         └─> Transcriber (Sarvam Saaras v4 speech-to-text)
-               └─> DictionaryCorrector (rapidfuzz, threshold 85)
-                     └─> AIProcessor (Sarvam chat — skipped for raw/verbatim tones)
-                           └─> Paster (clipboard + Cmd+V, osascript / AX fallbacks)
-                                 └─> History (SQLite)
-TrayUI (pystray, main thread) + PyQt6 windows wrap the daemon.
-```
-
-Single source of truth lives under `~/.openflow/`:
-
-- `config.toml` — settings
-- `dictionary.json` — custom terms
-- `history.sqlite` — past dictations
-- `openflow.log` — daemon log
-- `launchd.{out,err}.log` — LaunchAgent stdout / stderr
-
-### Repo layout
-
-```
-OpenFlow/
-├── README.md
-├── PROJECT_PLAN.md
-├── pyproject.toml
-├── requirements.txt
-├── launcher.py            # PyInstaller entry (calls freeze_support())
-├── openflow.spec          # PyInstaller build spec
-├── entitlements.plist     # mic + AX entitlements for signed bundle
-├── scripts/
-│   ├── install_macos.sh   # copy .app + register LaunchAgent
-│   └── build_dmg.sh       # pyinstaller → codesign → notarize → .dmg
-├── assets/                # logos, tray icons, fonts, sounds
-├── ui/                    # PyQt6 windows (hub/ main window, first run, flow widget, …)
-├── tests/                 # unit + smoke tests
-├── daemon.py              # orchestrator
-├── audio.py               # sounddevice recorder
-├── sarvam.py              # Sarvam HTTP client (STT + chat)
-├── transcribe.py          # Saaras speech-to-text wrapper
-├── ai.py                  # cleanup / translate / edit prompts
-├── permissions.py         # macOS Accessibility check + prompt
-├── dictionary.py          # custom-term biasing + fuzzy correction
-├── hotkeys.py             # pynput backend (fallback)
-├── hotkeys_nsevent.py     # NSEvent backend (macOS default)
-├── paste.py               # clipboard + Cmd+V, osascript / AX fallbacks
-├── history.py             # sqlite log
-├── tray.py                # pystray system-tray UI
-├── prompts.py             # all system prompts
-├── config.py              # ~/.openflow/config.toml + .env loader
-└── cli.py                 # `dict`, `history`, `config`, `doctor` subcommands
+```bash
+python -m openflow                     # run (same as `run`)
+python -m openflow hub [page]          # open the window: home, insights, history, …
+python -m openflow dict add "Oltaflock" --hints "oh la flock,ola flock"
+python -m openflow dict list | remove NAME
+python -m openflow snippets add "my email" "me@example.com"
+python -m openflow history --limit 20
+python -m openflow key set groq|anthropic   # store a fast cleanup key in the Keychain
+python -m openflow doctor              # permissions, mic, key, network
+python -m openflow logs                # recent log lines
+python -m openflow config               # config, dictionary and history paths
 ```
 
 ---
 
 ## Configuration
 
-`~/.openflow/config.toml` — created on first run. Key sections:
+`~/.openflow/config.toml` is created on first run. The window writes it and
+the running app applies changes live. The main sections, with defaults:
 
 ```toml
 [general]
-default_tone = "verbatim"          # raw / verbatim / casual / professional / bullets / email / slack
+default_tone = "verbatim"        # raw · verbatim · casual · professional · email · slack · bullets
 default_language = "auto"
-always_english_output = true       # speak any language, paste English
+always_english_output = true
 
 [hotkeys]
-record_hold = "cmd_r"
-cycle_mode = "f6"
+record_hold = "alt_r"
 edit_mode = "<cmd>+<shift>+e"
+undo_paste = "<cmd>+<shift>+z"
+cycle_mode = "f6"
 
 [sarvam]
 stt_model = "saaras:v4"
 chat_model = "sarvam-105b"
-api_key_env = "SARVAM_API_KEY"
+streaming = "auto"               # stream while the key is held; upload as fallback
+
+[cleanup]
+provider = "auto"                # first fast provider with a key (groq, anthropic), else sarvam
+skip_max_words = 3               # very short takes skip the LLM
 
 [dictionary]
 fuzzy_threshold = 85
-inject_into_cleanup = true
+auto_learn = true
+
+[formatting]
+auto = true                      # lists, line breaks, paragraphs, email layout
+
+[context]
+screen_names = true              # names on screen help spelling
+command_screen = true            # command mode may read nearby on-screen text
+
+[apps]
+context_hints = true
+tones = {}                       # e.g. { Slack = "casual", "com.apple.mail" = "professional" }
+
+[widget]
+position = "right"               # left · bottom · right
+appearance = "paper"             # paper · ink · auto
+
+[sounds]
+enabled = true
+volume = 0.35
+
+[history]
+enabled = true
+size_cap = 500
 ```
 
-Edit live from the tray → **Settings**; the daemon hot-reloads.
+Files in `~/.openflow/`: `config.toml`, `dictionary.json`, `snippets.json`,
+`history.sqlite`, `voice_profile.json`, `openflow.log`, `errors.log`, and
+`sounds/` (drop a `<cue>.wav` there to replace a sound, including the
+optional `paste` cue).
+
+### Privacy
+
+- Audio goes to Sarvam for transcription. Cleanup, edit and command text go
+  to the configured cleanup provider.
+- Command mode also sends the text around your cursor and, if
+  `command_screen` is on, nearby on-screen text (capped). Nothing is read from
+  password fields.
+- The AI voice profile sends a sample of recent dictations only when you
+  click it.
+- Everything else (history, dictionary, stats) stays in `~/.openflow`.
+
+### Cost
+
+You pay Sarvam (and Groq or Anthropic, if configured) per use: speech-to-text
+on every take, and an LLM call only when a tone or layout needs one (Verbatim
+skips it for most takes). Check current rates on each provider's dashboard.
 
 ---
 
-## Cost
+## Architecture
 
-All inference runs on Sarvam's API with your own key: speech-to-text on every
-dictation, plus a chat call only for cleanup tones (verbatim/raw skip it).
-Check current per-hour/per-token rates on the Sarvam dashboard.
+```
+Menu bar app (rumps) ── daemon.py ─────────────────────────────────────────────
+  Keys      hotkeys_nsevent.py (NSEvent monitor; hold / double-tap / chords)
+  Audio     audio.py (sounddevice, 16 kHz mono) ─┬─> stream_stt.py (Sarvam realtime)
+                                                 └─> transcribe.py (upload fallback)
+  Context   screen_context.py (names on screen), paste.ax_field_text (focused field)
+  Text      dictionary.py → snippets.py → formatting.py / lists.py → llm.py + prompts.py
+  Out       paste.py (clipboard + ⌘V, waits for held keys, checks it landed) → history.py
+  Learn     autolearn.py (corrections right after a paste)
+  Sockets   widget_channel.py ── flow widget (ui/flow_widget.py, own process)
+            widget_channel.py ── edit overlay (ui/edit_overlay.py)
+            control_channel.py ── the OpenFlow window (ui/hub/, own process)
+```
+
+PyQt windows run as separate processes because rumps and PyQt can't share an
+NSApp. In the app bundle every process is `OpenFlow.app` (menu-bar only).
+
+### Repo layout
+
+```
+OpenFlow/
+├── README.md · ROADMAP.md · OpenFlow_Brand_Book.html
+├── docs/
+│   ├── superpowers/specs/      # design specs, one per feature (current)
+│   ├── superpowers/plans/      # implementation plans
+│   ├── design/                 # mockups
+│   └── archive/                # the original May 2026 handoff plans (historical)
+├── scripts/                    # build_app.sh, build_dmg.sh, setup_codesign.sh,
+│                               # install_macos.sh, bench_latency.py, hub_shots.py, …
+├── assets/                     # logo, tray icons, fonts, sounds
+├── ui/                         # flow widget, edit overlay, first run, hub/ (the window)
+├── tests/                      # pytest suite (offscreen Qt; no network, no real ~/.openflow)
+├── daemon.py                   # orchestrator: keys → audio → STT → text → paste
+├── cli.py · launcher.py        # CLI and PyInstaller entry
+└── *.py                        # one module per concern (see Architecture)
+```
 
 ---
 
@@ -330,53 +297,34 @@ Check current per-hour/per-token rates on the Sarvam dashboard.
 
 ```bash
 source .venv/bin/activate
-
-python tests/test_dictionary.py        # fuzzy-correction unit tests
-python tests/test_pipeline_smoke.py    # Sarvam pipeline smoke test (needs key)
-
-# Headless daemon mode (no tray) — for debugging in a terminal
-OPENFLOW_NO_TRAY=1 python -m openflow run
-
-# Show on-disk paths + permission state
-python -m openflow doctor
+QT_QPA_PLATFORM=offscreen python -m pytest -q        # full suite
+OPENFLOW_LIVE=1 python -m pytest tests/... -q          # opt-in tests that call Sarvam
+python scripts/hub_shots.py /tmp/shots home --size 985x760   # render window pages to PNG
+OPENFLOW_FROM_SOURCE=1 OPENFLOW_NO_TRAY=1 python -m openflow run   # headless, from source
 ```
 
-### Build the macOS bundle
+Workflow: spec in `docs/superpowers/specs/` for behaviour or UI changes →
+failing test → fix → full suite → `./scripts/build_app.sh --deploy` → check
+it on screen. Tests never play sounds, open sockets to Sarvam, or touch the
+real `~/.openflow`.
+
+Signed, notarized DMG (needs a Developer ID):
 
 ```bash
-source .venv/bin/activate
-pyinstaller openflow.spec              # → dist/OpenFlow.app
-
-# Optionally codesign + notarize + wrap in .dmg:
 SIGN_ID="Developer ID Application: Your Name (TEAMID)" \
-NOTARIZE=1 NOTARY_PROFILE=openflow-notary \
-  ./scripts/build_dmg.sh
+NOTARIZE=1 NOTARY_PROFILE=openflow-notary ./scripts/build_dmg.sh
 ```
-
----
-
-## Roadmap
-
-See [ROADMAP.md](./ROADMAP.md).
-
----
 
 ## Contributing
 
-Issues and PRs welcome. Before opening a PR:
-
-1. Run smoke tests: `python tests/test_dictionary.py && python tests/test_pipeline_smoke.py`
-2. Don't bypass pre-commit hooks (`--no-verify`) — fix the underlying issue.
-3. Keep changes scoped; new features should land behind a flag in `config.toml`.
-
-File bugs with the output of `python -m openflow doctor` attached.
-
----
+Issues and PRs welcome. Run the full suite, keep changes scoped, and attach
+`python -m openflow doctor` output to bug reports. Larger changes start with
+a spec; see [ROADMAP.md](./ROADMAP.md) for what's planned.
 
 ## License
 
-License TBD. Treat as source-available until a `LICENSE` file lands; use freely
-for personal purposes.
+Not chosen yet (planned in Roadmap Phase 7). Until a `LICENSE` file lands,
+treat the code as source-available for personal use.
 
 ---
 

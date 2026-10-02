@@ -3,7 +3,7 @@
 Every color, font, size, motion, and shadow constant lives here.
 Do not hardcode these values anywhere else in the UI code.
 
-Source: DESIGN_INTEGRATION.md §A.1, cross-checked against brand book.
+Source: docs/archive/DESIGN_INTEGRATION.md §A.1, cross-checked against brand book.
 """
 from __future__ import annotations
 

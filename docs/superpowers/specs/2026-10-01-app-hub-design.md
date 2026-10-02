@@ -1,6 +1,11 @@
 # OpenFlow app hub, screens and icons: design
 
-Date: 2026-10-01 · Branch: feat/flow-widget · Status: awaiting user review
+Date: 2026-10-01 · Status: shipped
+
+> **Update 2026-10-02:** the hub now uses the widget's red `#E5402F` as its only
+> accent (user decision; supersedes the terracotta row in §2), pill buttons, a
+> shared type scale and responsive layouts (`ui/hub/style.py`). Insights has a
+> second tab, *Your voice* (`voice.py`, `voice_profile.py`).
 
 Mockups (source of truth for layout and copy):
 https://claude.ai/artifact/MWamRSaeh78S5AkDUVcncY (12 boards: main window,

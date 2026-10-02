@@ -2,7 +2,7 @@
 
 > **Handoff document for Claude Code.** Read this entire file before writing any code. Build incrementally by phase. Do not skip the testing checkpoints.
 >
-> **Scope: macOS only.** OpenFlow v1.0 targets macOS 13 (Ventura) and later, Apple Silicon and Intel both supported. Linux and Windows support is deferred to future versions. See `RECONCILIATION.md` for the full scope decision and `DESIGN_INTEGRATION.md` for the UI specifications that consume this plan.
+> **Scope: macOS only.** OpenFlow v1.0 targets macOS 13 (Ventura) and later, Apple Silicon and Intel both supported. Linux and Windows support is deferred to future versions. See `docs/archive/RECONCILIATION.md` for the full scope decision and `docs/archive/DESIGN_INTEGRATION.md` for the UI specifications that consume this plan.
 
 ---
 
@@ -43,7 +43,7 @@ Build these in order. Tick them off as you go.
 - [ ] **Edit mode**: select text in any app, hit hotkey, dictate edit instruction → AI rewrites
 - [ ] **Undo last paste** hotkey
 - [ ] **Dictation history**: last 50 transcriptions, searchable
-- [ ] **Settings GUI** (PyQt6 with custom QSS stylesheet — see `DESIGN_INTEGRATION.md`)
+- [ ] **Settings GUI** (PyQt6 with custom QSS stylesheet — see `docs/archive/DESIGN_INTEGRATION.md`)
 
 ### Tier 3 — Hindi/Hinglish Support (THE differentiator)
 - [ ] Language mode switcher: `EN` / `HI` / `HINGLISH` / `AUTO`
@@ -120,7 +120,7 @@ Build these in order. Tick them off as you go.
 | Paste simulation | `osascript` via subprocess | Native AppleScript is the most reliable path |
 | AI cleanup | `anthropic` SDK | Claude Haiku 4.5 for speed + cost |
 | Tray UI | `rumps` | Native NSStatusItem + NSMenu wrapper; no styling fights |
-| Settings GUI | `PyQt6` | Custom QSS stylesheet — see `DESIGN_INTEGRATION.md` |
+| Settings GUI | `PyQt6` | Custom QSS stylesheet — see `docs/archive/DESIGN_INTEGRATION.md` |
 | macOS bridge | `pyobjc-framework-Cocoa` + `pyobjc-framework-AppKit` | NSVisualEffectView for blur, NSSound for ticks |
 | Fuzzy matching | `rapidfuzz` | Fast Levenshtein for dictionary correction |
 | Config | `tomli` / `tomli-w` | TOML is more user-friendly than JSON |
@@ -138,7 +138,7 @@ Build these in order. Tick them off as you go.
 ```
 openflow/
 ├── README.md
-├── PROJECT_PLAN.md          # this file
+├── docs/archive/PROJECT_PLAN.md          # this file
 ├── pyproject.toml
 ├── requirements.txt
 ├── .env.example
@@ -218,12 +218,12 @@ You are a dictation cleanup assistant. Clean up the user's voice transcription:
 
 ### Phase 3 — Tray UI (Day 2 morning)
 
-1. **`tray.py`** — rumps-based menu (see `DESIGN_INTEGRATION.md` §4 for full spec):
+1. **`tray.py`** — rumps-based menu (see `docs/archive/DESIGN_INTEGRATION.md` §4 for full spec):
    - Status header: Ready to listen / Recording / Processing
    - Tone submenu: Casual / Professional / Bullet points / Email / Slack
    - Language submenu: EN / HI / HI_ROMAN / HINGLISH / HI→EN / EN→HI
    - Dictionary, History, Settings, Quit
-2. Three icon states with template-image tinting (see `DESIGN_INTEGRATION.md` §4 and brand book §07).
+2. Three icon states with template-image tinting (see `docs/archive/DESIGN_INTEGRATION.md` §4 and brand book §07).
 
 ### Phase 4 — Hindi/Hinglish Support (Day 2 afternoon — THIS IS CRITICAL)
 
