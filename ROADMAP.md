@@ -104,11 +104,10 @@ provider misbehaves.
   History gets "Transcribe again" for failed takes.
 - **Queued cards.** A failure card for a take that lost the widget to a newer
   take waits its turn instead of disappearing.
-- **First words.** Optional pre-roll: a short in-memory mic buffer so the
-  first word is never clipped. Off by default because the mic indicator
-  stays on.
-- **Undo after cancel.** Ignore an Undo clicked within ~400 ms of a cancel,
-  or move it away from the ✕.
+- **First words, without an always-on mic.** Shorten the ~0.3 s from key-down
+  to mic open (open the stream before the slower key-down work, reuse the
+  device between takes in a session) and measure with the `mic open` log
+  line. Decided 2026-10-02: no always-on mic or pre-roll buffer.
 - **Reliability you can see.** Insights › Reliability: success rate, latency
   p50 / p90, failures by cause. Local only, from history and log.
 - **Data controls.** Retention limits (keep N days), export, delete
@@ -194,6 +193,12 @@ the call, write the summary, next steps and a follow-up email.
 - **Depends on:** Phase 4 failover, Phase 5 panel work, streaming STT.
 
 ---
+
+## Decisions
+
+- 2026-10-02: the mic is only open while dictating; no always-on pre-roll.
+- 2026-10-02: the Undo button after a cancel stays as it is.
+- 2026-10-02: one accent (widget red `#E5402F`) across widget and hub.
 
 ## Working agreement
 
