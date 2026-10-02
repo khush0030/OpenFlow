@@ -104,3 +104,8 @@ class AIProcessor:
             selection=selection, instruction=instruction
         )
         return self._call("You are an inline text editor.", prompt, self.provider)
+
+    def command(self, system: str, user: str) -> str:
+        """Command mode (command_mode.build_prompt): write new text from a
+        spoken instruction plus the context around the cursor."""
+        return self._call(system, user, self.provider)

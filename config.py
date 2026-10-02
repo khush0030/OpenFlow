@@ -138,6 +138,11 @@ DEFAULTS: dict[str, Any] = {
         # keyterms), cleanup and a conservative respelling. The text stays
         # in memory for that one dictation; only the short term list is sent.
         "screen_names": True,
+        # Command mode (the edit hotkey with nothing selected, command_mode.py):
+        # also send nearby on-screen text (the message being replied to) to
+        # the cleanup LLM, capped at ~3k characters, with the text box's own
+        # text around the cursor. Off: the text box's text only.
+        "command_screen": True,
     },
 }
 

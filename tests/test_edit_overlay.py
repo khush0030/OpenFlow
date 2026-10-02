@@ -139,6 +139,43 @@ def test_finish_is_idempotent(link):
     assert quits == [1]
 
 
+# -- Command mode (edit hotkey with nothing selected) ------------------------
+
+def test_command_show_says_what_to_do_and_previews_the_context(link):
+    lk, srv, _quits, _gone = link
+    srv.send({"type": "show", "mode": "command", "selection": "Can we meet Thursday?",
+              "note": "Writing in Slack with the text around your cursor."})
+    assert wait_for(lambda: lk.overlay is not None)
+    ov = lk.overlay
+    assert ov.mode == "command"
+    assert ov._caption.text() == eo.COMMAND_CAPTION
+    assert ov._note.text().startswith("Writing in Slack")
+    assert not ov._note.isHidden() and not ov._sel.isHidden()
+    assert ov.selection_text() == "Can we meet Thursday?"
+
+
+def test_command_with_nothing_to_read_hides_the_preview_card(link):
+    lk, srv, _quits, _gone = link
+    srv.send({"type": "show", "mode": "command", "selection": "",
+              "note": "Reading the text around your cursor…"})
+    assert wait_for(lambda: lk.overlay is not None)
+    assert lk.overlay._sel.isHidden()
+    # The read finishes: the same window swaps in what was found.
+    srv.send({"type": "show", "mode": "command", "selection": "the thread",
+              "note": "Writing with the text around your cursor."})
+    assert wait_for(lambda: lk.overlay.selection_text() == "the thread")
+    assert not lk.overlay._sel.isHidden()
+
+
+def test_edit_show_keeps_the_edit_look(link):
+    lk, srv, _quits, _gone = link
+    srv.send({"type": "show", "selection": "Selected text"})
+    assert wait_for(lambda: lk.overlay is not None)
+    assert lk.overlay.mode == "edit"
+    assert lk.overlay._caption.text() == eo.EDIT_CAPTION
+    assert lk.overlay._note.isHidden()
+
+
 def test_open_fails_cleanly_without_a_daemon():
     path = os.path.join(tempfile.mkdtemp(dir="/tmp", prefix="ofo"), "none.sock")
     lk = eo.OverlayLink(path, quit=lambda: None)

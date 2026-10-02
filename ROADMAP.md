@@ -104,7 +104,8 @@ Everything needed to stop opening Wispr.
 
 - Streaming STT → text is basically ready at key-up
 - Auto-learn dictionary: detect edits right after paste, offer to add the term
-- Command mode: "reply saying yes but push to Friday" using selection / screen context
+- ✅ Command mode: "reply saying yes but push to Friday" using selection / screen context
+  (edit hotkey with nothing selected; spec 2026-10-02-command-mode)
 - Provider abstraction + automatic failover between cloud providers (replaces
   the earlier "local model fallback" idea — laptop compute is reserved for dev work)
 - Privacy: everything stays in `~/.openflow`, opt-in retention limits

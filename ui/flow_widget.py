@@ -1183,6 +1183,9 @@ class FlowApp(QObject):
         if v == "error" and self.reason == "no_audio":
             # The take was silent end to end: nothing to retry; check the mic.
             return Toast(th, copy.CANT_HEAR, copy.MIC_SETTINGS, open_mic_settings)
+        if v == "error" and self.reason == "write_failed":
+            # Edit / command: heard you, the model call failed; text untouched.
+            return Toast(th, copy.WRITE_ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "error":
             return Toast(th, copy.ERROR, copy.RETRY, lambda: self.send("retry"))
         if v == "card":

@@ -22,6 +22,7 @@ CARD = "card"
 CANCELLED = "cancelled"
 ERROR = "error"
 NO_AUDIO = "no_audio"   # ERROR reason: the mic gave nothing at all
+WRITE_FAILED = "write_failed"  # ERROR reason: the edit/command LLM call failed
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
@@ -174,12 +175,13 @@ class FlowController:
             self._retained = _Retained(audio, target, self._clock() + UNDO_WINDOW_S)
             self._set(CANCELLED)
 
-    def failed(self, audio: Any, target: Any, run: Optional[int] = None) -> bool:
+    def failed(self, audio: Any, target: Any, run: Optional[int] = None,
+               reason: str = "") -> bool:
         with self._lock:
             if not self._owns(run):
                 return False
             self._retained = _Retained(audio, target, self._clock() + RETRY_WINDOW_S)
-            self._set(ERROR)
+            self._set(ERROR, reason=reason)
             return True
 
     def no_audio(self, audio: Any, target: Any) -> None:

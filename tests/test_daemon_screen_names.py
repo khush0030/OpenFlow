@@ -191,7 +191,7 @@ def test_no_terms_no_screen_glossary(post):
 # -- Config -----------------------------------------------------------------------------
 
 def test_default_is_on():
-    assert cfg_mod.DEFAULTS["context"] == {"screen_names": True}
+    assert cfg_mod.DEFAULTS["context"]["screen_names"] is True
 
 
 def test_toggle_applies_live(env, capture):
@@ -200,7 +200,7 @@ def test_toggle_applies_live(env, capture):
     new = copy.deepcopy(cfg_mod.DEFAULTS)
     new["context"]["screen_names"] = False
     ch = plan_changes(old, new)
-    assert ch.context == {"screen_names": False} and ch
+    assert ch.context["screen_names"] is False and ch
     assert plan_changes(old, copy.deepcopy(old)).context is None
     d.cfg.update(copy.deepcopy(old))
     d._apply_config(new)
