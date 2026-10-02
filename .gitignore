@@ -52,3 +52,7 @@ test.wav
 .playwright-mcp/
 !assets/sounds/*.wav
 !assets/tray/*.png
+
+# Quality evals: built from the user's own dictations; never committed.
+evals/data/
+evals/runs/
