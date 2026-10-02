@@ -18,6 +18,14 @@ class RecorderConfig:
     blocksize: int = 1024
 
 
+# Key-up waits at most this long for the mic block that covers the key-up
+# moment (a block is blocksize / sample_rate = 64 ms). A stalled device just
+# returns what it has.
+TAIL_WAIT_S = 0.25
+# start() waits at most this long for the previous take's stream to close.
+CLOSE_WAIT_S = 2.0
+
+
 class Recorder:
     def __init__(self, cfg: RecorderConfig | None = None) -> None:
         self.cfg = cfg or RecorderConfig()
@@ -32,19 +40,40 @@ class Recorder:
         # top of the queue stop() drains: the streaming transcriber's feed.
         # Must be quick and must not raise into PortAudio.
         self.on_block: Callable[[np.ndarray], None] | None = None
+        # Key-up (stop) without waiting on PortAudio: stop() keeps the take
+        # up to the first block after key-up, then stops and closes the
+        # stream on a background thread. Pa_StopStream + Pa_CloseStream held
+        # every key-up for ~0.11 s (history t_record). Blocks are tagged by
+        # take, so a late callback from a closing stream is dropped.
+        self._cb_lock = threading.Lock()
+        self._take = 0              # current take; callbacks of older ones are ignored
+        self._stopping = False      # stop() is waiting for the tail block
+        self._tail = threading.Event()
+        self._closer: threading.Thread | None = None
 
-    def _callback(self, indata: np.ndarray, frames: int, time, status) -> None:  # noqa: ARG002
+    def _callback(self, indata: np.ndarray, frames: int, time, status,  # noqa: ARG002
+                  take: int | None = None) -> None:
         if status:
             # Underruns/overruns can spam; print once.
             print(f"[audio] status: {status}", flush=True)
         block = indata.copy()
-        self._q.put(block)
-        listener = self.on_block
-        if listener is not None:
-            try:
-                listener(block.reshape(-1))
-            except Exception:
-                pass
+        with self._cb_lock:
+            if take is not None and take != self._take:
+                return                   # a stopped take's stream, closing
+            self._q.put(block)
+            listener = self.on_block
+            if listener is not None:
+                try:
+                    listener(block.reshape(-1))
+                except Exception:
+                    pass
+            if self._stopping:
+                # The block that covers key-up: stop() has its audio, and
+                # nothing after it belongs to this take.
+                self._take += 1
+                self._stopping = False
+                self._tail.set()
+                return
         try:
             self._rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
         except Exception:
@@ -59,15 +88,29 @@ class Recorder:
         with self._lock:
             if self._recording:
                 return
+            # PortAudio isn't safe to open a stream while another closes.
+            closer = self._closer
+            if closer is not None:
+                closer.join(CLOSE_WAIT_S)
+                self._closer = None
             device = self.cfg.device if self.cfg.device not in (None, "default") else None
-            self._q = queue.Queue()
+            with self._cb_lock:
+                self._take += 1
+                take = self._take
+                self._stopping = False
+                self._tail = threading.Event()
+                self._q = queue.Queue()
+
+            def callback(indata, frames, time, status, _take=take):
+                self._callback(indata, frames, time, status, take=_take)
+
             self._stream = sd.InputStream(
                 samplerate=self.cfg.sample_rate,
                 channels=self.cfg.channels,
                 dtype="float32",
                 blocksize=self.cfg.blocksize,
                 device=device,
-                callback=self._callback,
+                callback=callback,
             )
             self._stream.start()
             self._recording = True
@@ -76,19 +119,38 @@ class Recorder:
         with self._lock:
             if not self._recording or self._stream is None:
                 return np.zeros(0, dtype=np.float32)
-            self._stream.stop()
-            self._stream.close()
+            stream = self._stream
             self._stream = None
             self._recording = False
             self._rms = 0.0
+            with self._cb_lock:
+                self._stopping = True
+                tail = self._tail
+            tail.wait(TAIL_WAIT_S)
+            with self._cb_lock:
+                if self._stopping:           # no block came: stalled device
+                    self._stopping = False
+                    self._take += 1
+                q = self._q
+            self._closer = threading.Thread(target=self._close_stream, args=(stream,),
+                                            name="mic-close", daemon=True)
+            self._closer.start()
 
         chunks: list[np.ndarray] = []
-        while not self._q.empty():
-            chunks.append(self._q.get_nowait())
+        while not q.empty():
+            chunks.append(q.get_nowait())
         if not chunks:
             return np.zeros(0, dtype=np.float32)
         audio = np.concatenate(chunks, axis=0).reshape(-1)
         return audio.astype(np.float32)
+
+    @staticmethod
+    def _close_stream(stream) -> None:
+        try:
+            stream.stop()
+            stream.close()
+        except Exception as e:
+            print(f"[audio] closing the mic stream failed: {e}", flush=True)
 
     @property
     def is_recording(self) -> bool:
