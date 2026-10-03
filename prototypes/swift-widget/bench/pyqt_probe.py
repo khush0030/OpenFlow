@@ -3,19 +3,32 @@
 Prints `FIRST_FRAME <epoch>` after the first FlowWidget paint and frame-interval
 stats on exit, the same lines the Swift prototype prints. Run it with HOME
 pointing at a scratch dir so it talks to a scratch socket and logs there,
-never to the live ~/.openflow.
+never to the live ~/.openflow, and with QT_QPA_PLATFORM=offscreen (enforced)
+so no window ever reaches the screen.
 """
 from __future__ import annotations
 
 import os
+import pwd
 import sys
 import time
+
+# Never show a window: only Qt's offscreen platform is allowed here.
+if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+    sys.exit("pyqt_probe: refusing to run without QT_QPA_PLATFORM=offscreen")
+_LIVE = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".openflow")
+if os.path.realpath(os.path.expanduser("~")) == os.path.realpath(os.path.dirname(_LIVE)):
+    sys.exit("pyqt_probe: HOME must be a scratch dir, not the real home")
 
 T_IMPORT0 = time.time()
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, REPO)
 
 import ui.flow_widget as fw  # noqa: E402
+import widget_channel  # noqa: E402
+
+assert not os.path.realpath(widget_channel.SOCKET_PATH).startswith(os.path.realpath(_LIVE)), \
+    "pyqt_probe: would talk to the live app's socket"
 
 _first = False
 _stamps: list[float] = []
@@ -35,12 +48,6 @@ def _paint(self, e):  # noqa: ANN001
 
 
 fw.FlowWidget.paintEvent = _paint
-
-if os.environ.get("BENCH_OFFSCREEN"):
-    # Lay out against a fake display far off every real one, so the widget
-    # never shows on the user's screen (Cocoa still composites the window).
-    fw.FlowApp._screen_rect = lambda self: fw.Rect(-30000, -30000, 1440, 900)
-
 
 def _report() -> None:
     iv = sorted((b - a) * 1000 for a, b in zip(_stamps, _stamps[1:]) if (b - a) < 0.5)

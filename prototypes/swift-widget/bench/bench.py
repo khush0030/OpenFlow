@@ -5,8 +5,13 @@ socket; the widget under test connects to it. Everything runs with HOME set
 to a scratch dir, so nothing touches the live app or ~/.openflow.
 
   HOME must not be your real home. Usage:
-    bench.py --home /tmp/ofb --target pyqt|swift|swift60|bundle startup --runs 5
-    bench.py --home /tmp/ofb --target pyqt full --idle 30 --record 30
+    bench.py --home /tmp/ofb --target pyqt|swift|swift60 startup --runs 5
+    bench.py --home /tmp/ofb --target pyqt full --runs 3 --idle 20 --record 20
+
+Nothing here ever shows a window: the PyQt widget runs on Qt's offscreen
+platform (QT_QPA_PLATFORM=offscreen) and the Swift prototype with
+--offscreen (no NSWindow is created). A guard thread still kills the child
+the moment the window server lists any on-screen window owned by it.
 """
 from __future__ import annotations
 
@@ -25,18 +30,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROTO = os.path.dirname(HERE)
 REPO = os.path.abspath(os.path.join(PROTO, "..", ".."))
 VENV_PY = "/Users/khush/Projects/OpenFlow/.venv/bin/python"
-BUNDLE = "/Applications/OpenFlow.app/Contents/MacOS/openflow"
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
     ap.add_argument("--home", required=True)
-    ap.add_argument("--target", required=True, choices=["pyqt", "swift", "swift60", "bundle"])
-    ap.add_argument("--allow-visible", action="store_true")
+    ap.add_argument("--target", required=True, choices=["pyqt", "swift", "swift60"])
     sub = ap.add_subparsers(dest="mode", required=True)
     s = sub.add_parser("startup")
     s.add_argument("--runs", type=int, default=5)
     f = sub.add_parser("full")
+    f.add_argument("--runs", type=int, default=3)
     f.add_argument("--idle", type=float, default=30)
     f.add_argument("--record", type=float, default=30)
     f.add_argument("--processing", type=float, default=10)
@@ -65,10 +69,7 @@ def command(target: str) -> list[str]:
     if target == "swift60":
         return [os.path.join(PROTO, ".build", "flow-widget-proto"), "--socket", SOCK, "--fps", "0",
                 "--offscreen"]
-    # The bundled binary can't be told to lay out off-screen, so it would show
-    # a second widget on the user's display. Only allowed with --allow-visible.
-    assert ARGS.allow_visible, "bundle target shows a visible window; pass --allow-visible"
-    return [BUNDLE, "flow-widget"]
+    raise ValueError(target)
 
 
 class Daemon:
@@ -95,25 +96,24 @@ class Daemon:
 
 class Child:
     def __init__(self, cmd: list[str]) -> None:
-        env = dict(os.environ, HOME=ARGS.home, PYTHONUNBUFFERED="1", BENCH_OFFSCREEN="1")
+        env = dict(os.environ, HOME=ARGS.home, PYTHONUNBUFFERED="1", QT_QPA_PLATFORM="offscreen")
         self.spawned_at = time.time()
         self.p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                   text=True, bufsize=1)
         self.lines: list[tuple[float, str]] = []
         self.first_frame = threading.Event()
         self.first_frame_at: float | None = None
+        self.windows_seen = 0
         threading.Thread(target=self._read, daemon=True).start()
-        if not ARGS.allow_visible:
-            threading.Thread(target=self._guard, daemon=True).start()
+        threading.Thread(target=self._guard, daemon=True).start()
 
     def _guard(self) -> None:
-        """Kill the widget at once if any of its windows touches a real display."""
+        """Kill the widget at once if the window server lists any on-screen window of it.
+
+        Both targets are expected to own no windows at all, so any window is
+        logged, and an on-screen one is fatal regardless of where it is.
+        """
         import Quartz  # type: ignore
-        displays = []
-        err, ids, n = Quartz.CGGetActiveDisplayList(16, None, None)
-        for did in ids[:n]:
-            b = Quartz.CGDisplayBounds(did)
-            displays.append((b.origin.x, b.origin.y, b.size.width, b.size.height))
         logged: set = set()
         while self.p.poll() is None:
             infos = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID) or []
@@ -121,20 +121,16 @@ class Child:
                 if w.get("kCGWindowOwnerPID") != self.p.pid:
                     continue
                 b = w.get("kCGWindowBounds") or {}
-                x, y, ww, hh = b.get("X", 0), b.get("Y", 0), b.get("Width", 0), b.get("Height", 0)
-                key = (w.get("kCGWindowNumber"), x, y, ww, hh)
+                key = (w.get("kCGWindowNumber"), b.get("X", 0), b.get("Y", 0), b.get("Width", 0), b.get("Height", 0))
                 if key not in logged:
                     logged.add(key)
-                    print(f"  window {key[0]}: x={x:.0f} y={y:.0f} {ww:.0f}x{hh:.0f} "
-                          f"onscreen={w.get('kCGWindowIsOnscreen')}", flush=True)
-                if ww <= 1 or hh <= 1:
-                    continue
-                for dx, dy, dw, dh in displays:
-                    if x < dx + dw and x + ww > dx and y < dy + dh and y + hh > dy and w.get("kCGWindowIsOnscreen"):
-                        print(f"GUARD: window {b} is on a display; killing the widget", flush=True)
-                        self.p.kill()
-                        return
-            time.sleep(0.05)
+                    self.windows_seen += 1
+                    print(f"  WINDOW {key} onscreen={w.get('kCGWindowIsOnscreen')}", flush=True)
+                if w.get("kCGWindowIsOnscreen"):
+                    print("GUARD: the widget put a window on screen; killing it", flush=True)
+                    self.p.kill()
+                    return
+            time.sleep(0.02)
 
     def _read(self) -> None:
         for line in self.p.stdout:
@@ -162,10 +158,13 @@ def rss_mb(pid: int) -> float:
     return int(out) / 1024 if out else float("nan")
 
 
-def footprint_mb(pid: int) -> str:
+def footprint_mb(pid: int) -> float:
+    """phys_footprint (what Activity Monitor's Memory column shows), in MB."""
     out = subprocess.run(["footprint", str(pid)], capture_output=True, text=True).stdout
-    m = re.search(r"Footprint:\s*([\d.]+\s*[KMG]B)", out)
-    return m.group(1) if m else "?"
+    m = re.search(r"Footprint:\s*([\d.]+)\s*([KMG])B", out)
+    if not m:
+        return float("nan")
+    return float(m.group(1)) * {"K": 1 / 1024, "M": 1, "G": 1024}[m.group(2)]
 
 
 def top_sample(pid: int, secs: int) -> str:
@@ -215,65 +214,85 @@ def startup() -> None:
     for i in range(ARGS.runs):
         d, c = start(ARGS.target)
         ok = d.connected.wait(30)
-        c.first_frame.wait(10 if ARGS.target != "bundle" else 2)
+        c.first_frame.wait(10)
         conn = (d.connected_at - c.spawned_at) * 1000 if ok else float("nan")
         ff = (c.first_frame_at - c.spawned_at) * 1000 if c.first_frame_at else float("nan")
         time.sleep(1.0)
         rss, fp, cpu = rss_mb(c.p.pid), footprint_mb(c.p.pid), cputime(c.p.pid)
         stop(d, c)
-        res.append((conn, ff))
+        res.append((conn, ff, rss, fp, cpu))
         print(f"run {i + 1}: spawn->connected {conn:.0f} ms, spawn->first frame {ff:.0f} ms, "
-              f"rss {rss:.1f} MB, footprint {fp}, cpu to here {cpu:.2f} s", flush=True)
+              f"rss {rss:.1f} MB, footprint {fp:.1f} MB, cpu to here {cpu:.2f} s", flush=True)
         time.sleep(1.0)
-    for name, idx in (("connected", 0), ("first frame", 1)):
+    for name, idx in (("connected", 0), ("first frame", 1), ("rss MB @1s", 2), ("footprint MB @1s", 3),
+                      ("cpu s to 1s", 4)):
         vals = sorted(r[idx] for r in res if not math.isnan(r[idx]))
         if vals:
-            print(f"{ARGS.target} spawn->{name}: median {vals[len(vals) // 2]:.0f} ms, "
-                  f"min {vals[0]:.0f}, max {vals[-1]:.0f} (n={len(vals)})", flush=True)
+            print(f"{ARGS.target} {name}: median {vals[len(vals) // 2]:.2f}, "
+                  f"min {vals[0]:.2f}, max {vals[-1]:.2f} (n={len(vals)})", flush=True)
 
 
-def full() -> None:
+def cpu_pct(pid: int, secs: float) -> float:
+    c0, t0 = cputime(pid), time.monotonic()
+    time.sleep(secs)
+    c1, t1 = cputime(pid), time.monotonic()
+    return 100 * (c1 - c0) / (t1 - t0)
+
+
+def idle_wakeups(pid: int, secs: int) -> str:
+    row = top_sample(pid, secs).split()
+    return row[2] if len(row) >= 3 else "?"
+
+
+def full_once() -> dict:
     d, c = start(ARGS.target)
     assert d.connected.wait(30), "widget never connected"
     c.first_frame.wait(10)
     pid = c.p.pid
-    time.sleep(5)  # settle
-    print(f"[{ARGS.target}] pid {pid}", flush=True)
-    # idle
-    c0, t0 = cputime(pid), time.monotonic()
-    top_idle = top_sample(pid, int(ARGS.idle))
-    c1, t1 = cputime(pid), time.monotonic()
-    print(f"idle: cpu {100 * (c1 - c0) / (t1 - t0):.2f}% over {t1 - t0:.0f} s "
-          f"(top pid/cpu/idlew/power: {top_idle}); rss {rss_mb(pid):.1f} MB; footprint {footprint_mb(pid)}",
-          flush=True)
-    # recording with a live level feed
-    d.send({"type": "state", "state": "recording"})
-    feeder = threading.Thread(target=feed_levels, args=(d, ARGS.record + 4), daemon=True)
-    feeder.start()
-    time.sleep(3)  # past the morph
-    c0, t0 = cputime(pid), time.monotonic()
-    top_rec = top_sample(pid, int(ARGS.record))
-    c1, t1 = cputime(pid), time.monotonic()
-    print(f"recording: cpu {100 * (c1 - c0) / (t1 - t0):.2f}% over {t1 - t0:.0f} s "
-          f"(top pid/cpu/idlew/power: {top_rec}); rss {rss_mb(pid):.1f} MB; footprint {footprint_mb(pid)}",
-          flush=True)
-    feeder.join()
-    # processing (travelling wave, no level feed)
-    d.send({"type": "state", "state": "processing"})
-    time.sleep(1)
-    c0, t0 = cputime(pid), time.monotonic()
-    time.sleep(ARGS.processing)
-    c1, t1 = cputime(pid), time.monotonic()
-    print(f"processing: cpu {100 * (c1 - c0) / (t1 - t0):.2f}% over {t1 - t0:.0f} s", flush=True)
-    d.send({"type": "state", "state": "idle"})
-    time.sleep(2)
-    c0, t0 = cputime(pid), time.monotonic()
-    time.sleep(10)
-    c1, t1 = cputime(pid), time.monotonic()
-    print(f"idle after a take: cpu {100 * (c1 - c0) / (t1 - t0):.2f}%; rss {rss_mb(pid):.1f} MB; "
-          f"footprint {footprint_mb(pid)}", flush=True)
-    stop(d, c)
-    print(c.frames_line() or "FRAMES ?", flush=True)
+    r: dict = {}
+    try:
+        time.sleep(5)  # settle
+        r["idle_cpu"] = cpu_pct(pid, ARGS.idle)
+        r["idle_wakeups"] = idle_wakeups(pid, 5)
+        r["idle_rss"], r["idle_fp"] = rss_mb(pid), footprint_mb(pid)
+        d.send({"type": "state", "state": "recording"})
+        feeder = threading.Thread(target=feed_levels, args=(d, ARGS.record + 8), daemon=True)
+        feeder.start()
+        time.sleep(2)  # past the morph
+        r["rec_cpu"] = cpu_pct(pid, ARGS.record)
+        r["rec_rss"], r["rec_fp"] = rss_mb(pid), footprint_mb(pid)
+        feeder.join()
+        d.send({"type": "state", "state": "processing"})
+        time.sleep(1)
+        r["proc_cpu"] = cpu_pct(pid, ARGS.processing)
+        d.send({"type": "state", "state": "idle"})
+        time.sleep(2)
+        r["after_cpu"] = cpu_pct(pid, 10)
+        r["after_rss"], r["after_fp"] = rss_mb(pid), footprint_mb(pid)
+    finally:
+        stop(d, c)
+    r["frames"] = c.frames_line()
+    r["windows"] = c.windows_seen
+    print(f"  run: {r}", flush=True)
+    return r
+
+
+def full() -> None:
+    runs = []
+    for i in range(ARGS.runs):
+        print(f"[{ARGS.target}] full run {i + 1}/{ARGS.runs}", flush=True)
+        runs.append(full_once())
+        time.sleep(1)
+
+    def med(k: str) -> float:
+        v = sorted(r[k] for r in runs)
+        return v[len(v) // 2]
+
+    for k in ("idle_cpu", "rec_cpu", "proc_cpu", "after_cpu", "idle_rss", "rec_rss", "after_rss",
+              "idle_fp", "rec_fp", "after_fp"):
+        print(f"{ARGS.target} {k}: median {med(k):.2f} (runs: {', '.join(f'{r[k]:.2f}' for r in runs)})",
+              flush=True)
+    print(f"{ARGS.target} windows seen: {sum(r['windows'] for r in runs)}", flush=True)
 
 
 if __name__ == "__main__":

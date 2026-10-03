@@ -13,7 +13,11 @@
 // Bench hooks (stdout): `FIRST_FRAME <epoch>` on the first draw, `CONNECTED
 // <epoch>` on connect, and frame-interval stats on exit.
 //
-// Build: ./build.sh   Run: .build/flow-widget-proto [--socket PATH] [--fps N] [--offscreen]
+// Build: ./build.sh   Run: .build/flow-widget-proto --socket PATH (--offscreen | --visible) [--fps N]
+//
+// --offscreen (the only mode the bench uses) creates no NSWindow at all; the
+// SwiftUI view is rendered into bitmaps with ImageRenderer. Window-server
+// compositing is therefore not measured (see the eval doc's caveats).
 
 import AppKit
 import SwiftUI
@@ -107,6 +111,7 @@ final class FrameStats {
     var firstFrameLogged = false
     var stamps: [CFTimeInterval] = []
     var draws = 0
+    var renders = 0  // offscreen ImageRenderer passes
 
     func frame(animating: Bool) {
         draws += 1
@@ -119,7 +124,7 @@ final class FrameStats {
 
     func report() {
         guard stamps.count > 2 else {
-            say("FRAMES draws=\(draws) animated=0")
+            say("FRAMES draws=\(draws) renders=\(renders) animated=0")
             return
         }
         var iv: [Double] = []
@@ -130,8 +135,10 @@ final class FrameStats {
         iv.sort()
         func pct(_ p: Double) -> Double { iv[min(iv.count - 1, Int(Double(iv.count - 1) * p))] }
         let mean = iv.reduce(0, +) / Double(iv.count)
-        say(String(format: "FRAMES draws=%d animated=%d mean_ms=%.2f p50_ms=%.2f p95_ms=%.2f p99_ms=%.2f max_ms=%.2f",
-                   draws, iv.count, mean, pct(0.5), pct(0.95), pct(0.99), iv.last ?? 0))
+        func f(_ x: Double) -> String { String(format: "%.2f", x) }
+        let p50 = f(pct(0.5)), p95 = f(pct(0.95)), p99 = f(pct(0.99)), mx = f(iv.last ?? 0)
+        say("FRAMES draws=\(draws) renders=\(renders) animated=\(iv.count) mean_ms=\(f(mean)) "
+            + "p50_ms=\(p50) p95_ms=\(p95) p99_ms=\(p99) max_ms=\(mx)")
     }
 }
 
@@ -143,6 +150,9 @@ struct WidgetView: View {
     @ObservedObject var model: Model
     let fps: Double
     let onClick: (String) -> Void
+    // Offscreen bench only: a new value per rendered frame, because a
+    // TimelineView doesn't tick inside ImageRenderer.
+    var tick = 0
 
     var body: some View {
         let size = model.shapeSize()
@@ -163,6 +173,7 @@ struct WidgetView: View {
             // Contents: redrawn by the timeline only while something animates.
             TimelineView(.animation(minimumInterval: fps > 0 ? 1 / fps : nil, paused: !model.animating)) { tl in
                 Canvas { ctx, csize in
+                    _ = tick
                     stats.frame(animating: model.animating)
                     let t = tl.date.timeIntervalSinceReferenceDate
                     draw(ctx, csize, t)
@@ -373,10 +384,12 @@ final class Channel {
 
 // MARK: - app
 
-final class App: NSObject, NSApplicationDelegate {
+@MainActor final class App: NSObject, NSApplicationDelegate {
     let model = Model()
-    var panel: Panel!
+    var panel: Panel?  // nil in offscreen mode, always
     var host: HostView!
+    var offRenderer: ImageRenderer<WidgetView>?
+    var offTimer: Timer?
     let channel: Channel
     let fps: Double
     var offscreen = false
@@ -389,8 +402,36 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        channel.onMessage = { [weak self] m in self?.dispatch(m) }
+        channel.onClose = { [weak self] in
+            self?.lostSince = CACurrentMediaTime()
+            self?.model.visible = false
+            self?.panel?.orderOut(nil)
+            self?.syncOffscreenTimer()
+        }
+        if offscreen {
+            // Bench mode: no NSWindow / NSPanel is ever created, so nothing
+            // can reach the window server or the user's screen. The view is
+            // rendered into a bitmap with ImageRenderer instead: once per
+            // state change, and at `fps` while something animates (the same
+            // job Qt's offscreen platform does for the PyQt widget).
+            offRenderer = ImageRenderer(content: makeView())
+            offRenderer?.scale = 2
+        } else {
+            makePanel()
+        }
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tryConnect() } }
+        tryConnect()
+    }
+
+    func makeView() -> WidgetView {
+        WidgetView(model: model, fps: fps, onClick: { [weak self] in self?.channel.send(["action": $0]) })
+    }
+
+    func makePanel() {
+        precondition(!offscreen, "offscreen mode must never create a window")
         let frame = NSRect(x: 0, y: 0, width: 120, height: 140)
-        panel = Panel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let panel = Panel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
@@ -399,19 +440,44 @@ final class App: NSObject, NSApplicationDelegate {
         panel.hasShadow = false  // the pill draws its own soft shadow
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
-        host = HostView(rootView: WidgetView(model: model, fps: fps, onClick: { [weak self] in self?.channel.send(["action": $0]) }))
+        host = HostView(rootView: makeView())
         host.onHover = { [weak self] on in self?.setHover(on) }
         host.onClickAt = { [weak self] p in self?.click(at: p) }
         panel.contentView = host
+        self.panel = panel
+    }
 
-        channel.onMessage = { [weak self] m in self?.dispatch(m) }
-        channel.onClose = { [weak self] in
-            self?.lostSince = CACurrentMediaTime()
-            self?.model.visible = false
-            self?.panel.orderOut(nil)
+    // MARK: offscreen rendering (bench only)
+
+    func renderOffscreen() {
+        guard offscreen, let r = offRenderer else { return }
+        let sz = panelSize()
+        r.proposedSize = ProposedViewSize(width: sz.width, height: sz.height)
+        // A fresh root view with a new tick makes SwiftUI redraw the Canvas.
+        stats.renders += 1
+        var v = makeView()
+        v.tick = stats.renders
+        r.content = v
+        _ = r.cgImage  // layout + Canvas draw into a bitmap
+        // Belt and braces: offscreen mode must own no windows at all.
+        if !NSApp.windows.isEmpty {
+            say("OFFSCREEN_VIOLATION windows=\(NSApp.windows.count)")
+            exit(3)
         }
-        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tryConnect() }
-        tryConnect()
+    }
+
+    func syncOffscreenTimer() {
+        guard offscreen else { return }
+        let want = model.visible && model.animating
+        if want && offTimer == nil {
+            let interval = fps > 0 ? 1 / fps : 1.0 / 60
+            offTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.renderOffscreen() }
+            }
+        } else if !want, let t = offTimer {
+            t.invalidate()
+            offTimer = nil
+        }
     }
 
     func tryConnect() {
@@ -449,26 +515,29 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func show() {
-        layoutPanel()
         model.visible = true
-        panel.orderFrontRegardless()
+        if offscreen {
+            renderOffscreen()
+            syncOffscreenTimer()
+            return
+        }
+        layoutPanel()
+        panel?.orderFrontRegardless()
     }
 
-    // The window is sized for the biggest view and only moves when the
-    // position changes, so a morph is pure SwiftUI animation inside a fixed
-    // window (no window resizes mid-animation).
-    func layoutPanel() {
-        guard var screen = NSScreen.main?.visibleFrame else { return }
-        if offscreen {
-            // Bench mode: lay out against a fake display far off every real
-            // one, so nothing ever shows on the user's screen.
-            screen = NSRect(x: -30000, y: -30000, width: 1440, height: 900)
-        }
+    // Big enough for the biggest view; a morph is pure SwiftUI animation
+    // inside a fixed window (no window resizes mid-animation).
+    func panelSize() -> CGSize {
         let big = baseSize("hover")
         let rec = baseSize("recording")
         let w = max(big.width, rec.width) + 2 * MARGIN
         let h = max(big.height, rec.height) + 2 * MARGIN
-        let size = model.vertical ? CGSize(width: w, height: h) : CGSize(width: h, height: w)
+        return model.vertical ? CGSize(width: w, height: h) : CGSize(width: h, height: w)
+    }
+
+    func layoutPanel() {
+        guard let panel = panel, let screen = NSScreen.main?.visibleFrame else { return }
+        let size = panelSize()
         let origin: CGPoint
         switch model.position {
         case "left":
@@ -503,25 +572,41 @@ final class App: NSObject, NSApplicationDelegate {
 
 // MARK: - main
 
-var socketPath = (NSHomeDirectory() as NSString).appendingPathComponent(".openflow/widget.sock")
-if let home = ProcessInfo.processInfo.environment["HOME"] {
-    socketPath = (home as NSString).appendingPathComponent(".openflow/widget.sock")
-}
+// No default socket: the prototype must never find the live app's
+// ~/.openflow/widget.sock by accident. One of --offscreen / --visible is
+// required, so a bare run can't put a window on the screen.
+var socketPath: String?
 var fps = 30.0
 var offscreen = false
+var visible = false
 var args = CommandLine.arguments.dropFirst().makeIterator()
 while let a = args.next() {
     switch a {
     case "--socket": if let v = args.next() { socketPath = v }
-    case "--fps": if let v = args.next(), let d = Double(v) { fps = d }  // 0 = display rate
+    case "--fps": if let v = args.next(), let d = Double(v) { fps = d }  // 0 = display rate (60 offscreen)
     case "--offscreen": offscreen = true
+    case "--visible": visible = true
     default: break
     }
+}
+func fail(_ msg: String) -> Never {
+    FileHandle.standardError.write((msg + "\n").data(using: .utf8)!)
+    exit(2)
+}
+guard let socketPath = socketPath else { fail("usage: flow-widget-proto --socket PATH (--offscreen | --visible) [--fps N]") }
+if offscreen == visible { fail("pass exactly one of --offscreen or --visible") }
+if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
+    let live = (String(cString: dir) as NSString).appendingPathComponent(".openflow")
+    let resolved = ((socketPath as NSString).deletingLastPathComponent as NSString).resolvingSymlinksInPath
+    if resolved.hasPrefix(live) { fail("refusing to use the live app's socket dir \(live)") }
 }
 
 let nsapp = NSApplication.shared
 nsapp.setActivationPolicy(.accessory)  // no Dock icon, never activates
-let delegate = App(socketPath: socketPath, fps: fps)
-delegate.offscreen = offscreen
+let delegate = MainActor.assumeIsolated { () -> App in
+    let d = App(socketPath: socketPath, fps: fps)
+    d.offscreen = offscreen
+    return d
+}
 nsapp.delegate = delegate
 nsapp.run()
