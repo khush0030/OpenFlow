@@ -32,6 +32,10 @@ from ui.hub.page import FOOTER_PAGES, PAGES
 
 load_fonts()
 
+# The real [widget] appearance reader; conftest pins hub.configured_appearance
+# to "paper" for every test, these tests point config at tmp and use the real one.
+REAL_CONFIGURED_APPEARANCE = hub.configured_appearance
+
 HUB_DIR = Path(__file__).resolve().parent.parent / "ui" / "hub"
 HEX = re.compile(r"#[0-9A-Fa-f]{3,8}\b")
 
@@ -74,6 +78,10 @@ def stubs(monkeypatch):
     monkeypatch.setattr(help_mod, "run_open", lambda args: None)
     monkeypatch.setattr(help_mod, "local_permissions",
                         lambda: {"microphone": None, "accessibility": None, "input_monitoring": None})
+    # Insights › Your voice resolves its cloud LLM, which reads the Keychain
+    # and copies keys into os.environ (that leaked a Groq key into test_llm).
+    import voice_profile
+    monkeypatch.setattr(voice_profile, "make_provider", lambda cfg=None: None)
 
 
 def make_window(tmp_path, appearance="paper", dark=False, watch=False):
@@ -144,10 +152,10 @@ def test_theme_follows_the_widget_rule(appearance, dark, theme):
 
 
 def test_configured_appearance_reads_config_without_writing(tmp_config):
-    assert hub.configured_appearance() == "paper"          # default, no file
+    assert REAL_CONFIGURED_APPEARANCE() == "paper"          # default, no file
     assert not (tmp_config / "config.toml").exists()
     cfg_mod.save_setting("widget", "appearance", "ink")
-    assert hub.configured_appearance() == "ink"
+    assert REAL_CONFIGURED_APPEARANCE() == "ink"
 
 
 # -- contrast (WCAG 2.x) -------------------------------------------------------------
@@ -197,6 +205,17 @@ def test_paper_text_contrast(fg, bg):
     p = S.PAPER_PALETTE
     floor = 3.0 if (fg, bg) in PAPER_KNOWN_LOW else 4.5
     assert contrast(p[fg], p[bg]) >= floor, (fg, bg, round(contrast(p[fg], p[bg]), 2))
+
+
+def test_ink_chart_colours_stand_off_the_card_at_least_as_well_as_paper():
+    """Chart ramps can't all reach 3:1 (they are ramps), but no Ink mark may
+    be fainter against its card than the same mark is in Paper."""
+    for key in ("STACK", "HEAT", "BAR_SOFT", "BAR_UNKNOWN", "GAUGE_TRACK", "BAR_TRACK"):
+        paper, ink = S.PAPER_PALETTE[key], S.INK_PALETTE[key]
+        pairs = zip(paper, ink) if isinstance(paper, tuple) else [(paper, ink)]
+        for i, (pc, ic) in enumerate(pairs):
+            assert contrast(ic, S.INK_PALETTE["CARD"]) >= contrast(pc, S.PAPER_PALETTE["CARD"]), \
+                (key, i, ic)
 
 
 @pytest.mark.parametrize("palette", [S.PAPER_PALETTE, S.INK_PALETTE])
@@ -347,6 +366,7 @@ def test_settings_appearance_switches_the_window(tmp_path, stubs, tmp_config):
     ctx = HubContext(history_path=tmp_path / "history.sqlite",
                      dictionary_path=tmp_path / "dictionary.json", control=FakeControl())
     win = hub.HubWindow(ctx, geometry_path=tmp_path / "hub.json",
+                        appearance=REAL_CONFIGURED_APPEARANCE,
                         system_dark=lambda: False, watch_config=False)   # real config source
     win.navigate("settings", section="widget")
     page = win._pages["settings"]
@@ -365,6 +385,7 @@ def test_config_change_from_the_widget_menu_switches_the_window(tmp_path, stubs,
     ctx = HubContext(history_path=tmp_path / "history.sqlite",
                      dictionary_path=tmp_path / "dictionary.json", control=FakeControl())
     win = hub.HubWindow(ctx, geometry_path=tmp_path / "hub.json",
+                        appearance=REAL_CONFIGURED_APPEARANCE,
                         system_dark=lambda: False, watch_config=True)
     win.navigate("home")
     assert win.theme == "paper"
@@ -383,4 +404,41 @@ def test_theme_switch_failure_is_logged_not_raised(tmp_path, stubs, tmp_config, 
     win._appearance = boom
     assert win.sync_theme() is False
     assert calls and win.theme == "paper"
+    win.deleteLater()
+
+
+class SlowControl:
+    """Answers `status` after a pause, from a worker thread."""
+    STATUS = {"state": "idle", "tone": "verbatim", "language": "auto", "hold_key": "cmd_r",
+              "paused": False, "permissions": {}}
+
+    def __init__(self):
+        self.calls = 0
+
+    def call(self, cmd, timeout=5.0, **args):
+        self.calls += 1
+        time.sleep(0.2)
+        if cmd == "status":
+            return dict(self.STATUS)
+        raise DaemonNotRunning("not in tests")
+
+
+@pytest.mark.real_workers
+def test_switch_while_a_daemon_call_is_in_flight(tmp_path, stubs, tmp_config):
+    """The old pages are deleted mid-call; their callbacks must be dropped,
+    and the rebuilt page asks again and shows the answer."""
+    state = {"appearance": "paper"}
+    ctl = SlowControl()
+    ctx = HubContext(history_path=tmp_path / "history.sqlite",
+                     dictionary_path=tmp_path / "dictionary.json", control=ctl)
+    win = hub.HubWindow(ctx, geometry_path=tmp_path / "hub.json",
+                        appearance=lambda: state["appearance"], system_dark=lambda: False,
+                        watch_config=False)
+    win.navigate("home")
+    state["appearance"] = "ink"
+    assert win.sync_theme() is True                  # old Home's call still running
+    time.sleep(0.5)
+    _app.processEvents()
+    assert spin_until(lambda: "Ready" in win._pages["home"].status_text.text())
+    assert ctl.calls >= 2 and win.theme == "ink"
     win.deleteLater()

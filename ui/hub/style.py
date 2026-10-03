@@ -114,7 +114,7 @@ INK_PALETTE: dict[str, object] = {
     "BAR_SOFT": "#9C4436",
     "BAR_UNKNOWN": "#4E4740",
     "HEAT": ("#2C2823", "#5C2A22", "#9C3B2C", "#E5402F", "#FF8F7E"),
-    "STACK": ("#FF8F7E", "#E5402F", "#A8402F", "#6E3127", "#5E564D", "#423C35"),
+    "STACK": ("#FF8F7E", "#E5402F", "#A8402F", "#7E392E", "#8A8075", "#5E564D"),
 }
 
 PALETTES = {"paper": PAPER_PALETTE, "ink": INK_PALETTE}
