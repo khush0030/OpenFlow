@@ -58,6 +58,16 @@ def _never_touch_real_launch_agents(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _hub_never_reads_the_real_appearance(monkeypatch):
+    # A HubWindow built without an appearance source reads [widget]
+    # appearance from the real config.toml (and macOS dark mode): tests would
+    # draw in whatever the user picked. Tests that need a source pass one.
+    from ui.hub import app as hub_app
+    monkeypatch.setattr(hub_app, "configured_appearance", lambda: "paper")
+    monkeypatch.setattr(hub_app, "system_is_dark", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _hub_theme_back_to_paper():
     # The hub's palette is module state (ui.hub.style.apply_theme); a test
     # that switches to Ink must not leave later tests drawing in Ink.
