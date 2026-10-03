@@ -43,6 +43,15 @@ def _never_open_real_websockets(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_talk_to_the_real_window(monkeypatch):
+    # The tray raises / quits a running OpenFlow window over hub.sock; with
+    # the user's real window open, tests would raise it (and reopen tests
+    # would take the "already open" path). Point it at a socket nobody has.
+    import tray
+    monkeypatch.setattr(tray, "HUB_SOCK", Path(tempfile.gettempdir()) / "openflow-test-no-hub.sock")
+
+
+@pytest.fixture(autouse=True)
 def _never_touch_real_launch_agents(monkeypatch, tmp_path):
     # Settings > General reads (and its toggle writes) the LaunchAgent plist.
     monkeypatch.setattr(login_item, "LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")

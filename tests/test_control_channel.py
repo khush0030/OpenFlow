@@ -243,3 +243,20 @@ def test_second_server_on_same_path_is_refused():
 
 def test_default_path_is_under_dot_openflow():
     assert cc.SOCKET_PATH.endswith(os.path.join(".openflow", "control.sock"))
+
+
+def test_refused_connect_is_retried_before_not_running(server, monkeypatch):
+    # A full listen queue refuses like a dead daemon; one refusal mustn't
+    # make the hub say "OpenFlow isn't running".
+    srv = server({"ping": lambda: {"pong": True}})
+    real = socket.socket.connect
+    attempts = {"n": 0}
+
+    def flaky(self, addr):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ConnectionRefusedError()
+        return real(self, addr)
+    monkeypatch.setattr(socket.socket, "connect", flaky)
+    assert ControlClient(srv.path).call("ping")["pong"] is True
+    assert attempts["n"] == 2
