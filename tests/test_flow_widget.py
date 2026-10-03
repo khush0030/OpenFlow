@@ -32,6 +32,7 @@ _prev_handler = qInstallMessageHandler(_quiet_offscreen)
 
 import ui.flow_widget as fw
 from ui.fonts import load_fonts
+from ui.widget_geometry import Display
 from ui.widget_theme import FONT_UI, INK, PAPER
 
 load_fonts()  # as main() does
@@ -507,30 +508,66 @@ def test_level_rises_fast_and_falls_slowly(fa):
     assert peak * 0.6 < w._level < peak  # decays, but not instantly
 
 
-class FakeScreen:
-    def __init__(self, r: fw.Rect) -> None:
-        self.r = r
+class FakeProbe:
+    """Stands in for ui.screens.SystemProbe (spec 2026-10-02-widget-placement)."""
+    def __init__(self, window: fw.Rect | None, cursor=None) -> None:
+        self.window, self.mouse = window, cursor
+        self.list = [Display("laptop", SCREEN, SCREEN, primary=True),
+                     Display("external", EXTERNAL, EXTERNAL)]
 
-    def availableGeometry(self):
-        from PyQt6.QtCore import QRect
-        return QRect(int(self.r.x), int(self.r.y), int(self.r.w), int(self.r.h))
+    def displays(self):
+        return self.list
+
+    def focused_window(self):
+        return self.window
+
+    def cursor(self):
+        return self.mouse
 
 
-def _cursor_on(monkeypatch, screen: fw.Rect | None) -> None:
-    monkeypatch.setattr(fw.QCursor, "pos", staticmethod(lambda: QPoint(0, 0)))
-    monkeypatch.setattr(fw.QGuiApplication, "screenAt",
-                        staticmethod(lambda p: FakeScreen(screen) if screen else None))
+def _probe(fa, monkeypatch, window, cursor=None) -> FakeProbe:
+    monkeypatch.setattr(fw.FlowApp, "_screen_rect", _real_screen_rect)
+    fa._screens.probe = FakeProbe(window, cursor)
+    return fa._screens.probe
 
 
-def test_screen_is_the_one_under_the_cursor(fa, monkeypatch):
-    _cursor_on(monkeypatch, EXTERNAL)
+def test_screen_is_the_one_with_the_focused_window(fa, monkeypatch):
+    _probe(fa, monkeypatch, fw.Rect(2000, 100, 800, 600), cursor=(10, 100))
     assert _real_screen_rect(fa) == EXTERNAL
 
 
-def test_cursor_between_displays_keeps_current_screen(fa, monkeypatch):
-    fa._screen = EXTERNAL
-    _cursor_on(monkeypatch, None)
+def test_no_focused_window_uses_the_mouse_and_a_gap_keeps_current(fa, monkeypatch):
+    probe = _probe(fa, monkeypatch, None, cursor=(2000, 100))
     assert _real_screen_rect(fa) == EXTERNAL
+    probe.mouse = (-500, -500)  # between displays
+    assert _real_screen_rect(fa) == EXTERNAL
+
+
+def test_widget_stays_on_its_display_for_the_whole_session(fa, monkeypatch):
+    probe = _probe(fa, monkeypatch, fw.Rect(100, 100, 800, 600))
+    monkeypatch.setattr(fa.widget, "isVisible", lambda: True)
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    probe.window = fw.Rect(2000, 100, 800, 600)
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget.target_rect.right == EXTERNAL.right - 4
+    assert fa.widget._anim.state() != fw.QAbstractAnimation.State.Running  # no fly-across
+    probe.window = fw.Rect(100, 100, 800, 600)
+    fa._follow_screen()
+    fa._on_message({"type": "state", "state": "processing", "text": ""})
+    fa._on_message({"type": "state", "state": "card", "text": "hi"})
+    assert fa.widget.target_rect.right == EXTERNAL.right - 4
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    assert fa.widget.target_rect.right == SCREEN.right - 4
+
+
+def test_unplugged_display_moves_the_widget_mid_session(fa, monkeypatch):
+    probe = _probe(fa, monkeypatch, fw.Rect(2000, 100, 800, 600))
+    monkeypatch.setattr(fa.widget, "isVisible", lambda: True)
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget.target_rect.right == EXTERNAL.right - 4
+    probe.list, probe.window = probe.list[:1], None
+    fa._screens._changed()  # what Qt's screenRemoved fires
+    assert fa.widget.target_rect.right == SCREEN.right - 4
 
 
 def test_widget_follows_cursor_to_other_display(fa, monkeypatch):
