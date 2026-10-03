@@ -12,11 +12,14 @@ Subprocess design:
   {"type": "show", "mode": "command", "selection": <context preview>,
   "note": <one line on what will be used>}; the preview card hides when
   there is no context
+- One step (Phase 5): the hotkey already listens, so a show carries
+  "phase": "listening" (then "working" once the take ends) and "hotkey"
+  ("⌘⇧E") for the caption. No phase = armed, waiting for the record key.
+  "mode": "pending" = listening while the selection is still being read.
 - {"type": "close"} (edit finished) or a dropped connection quits it
-- Esc or the 30s timeout just hangs up: the daemon reads the closed
-  connection as "edit cancelled" and disarms edit mode
-
-Keeps the existing record-then-rewrite flow in daemon.py unchanged.
+- Esc or the 30s timeout (armed only; while listening or working the
+  daemon closes it) just hangs up: the daemon reads the closed connection
+  as "edit cancelled" and disarms edit mode
 """
 from __future__ import annotations
 
@@ -37,13 +40,44 @@ from ui.fonts import load_fonts
 from ui.stylesheet import build_stylesheet
 from ui.tokens import Color, Font, Radius, Shadow, Space
 from ui.vibrancy import apply_vibrancy
+from ui.widget_theme import ACCENT
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetClient
 
 
 TIMEOUT_SECONDS = 30
+# Listening / working: the daemon ends the take (60 s at most) and closes
+# the overlay; this only catches an overlay it forgot.
+LIVE_TIMEOUT_SECONDS = 120
 
 EDIT_CAPTION = "Hold record key and speak your edit instruction."
 COMMAND_CAPTION = "Hold record key and say what to write."
+# One step: listening from the hotkey on.
+EDIT_LISTENING = "Listening: say how to change it."
+COMMAND_LISTENING = "Listening: say what to write."
+PENDING_LISTENING = "Listening…"   # edit or command not known yet
+EDIT_WORKING = "Rewriting…"
+COMMAND_WORKING = "Writing…"
+PHASES = ("armed", "listening", "working")
+
+
+def caption_for(mode: str, phase: str) -> str:
+    command = mode == "command"
+    if mode == "pending":
+        return PENDING_LISTENING
+    if phase == "listening":
+        return COMMAND_LISTENING if command else EDIT_LISTENING
+    if phase == "working":
+        return COMMAND_WORKING if command else EDIT_WORKING
+    return COMMAND_CAPTION if command else EDIT_CAPTION
+
+
+def hint_for(phase: str, hotkey: str = "") -> str:
+    """How a listening take ends, under the caption."""
+    if phase != "listening":
+        return ""
+    key = f"press {hotkey} " if hotkey else ""
+    return f"Pause or {key}when you're done · Esc cancels" if key \
+        else "Pause when you're done · Esc cancels"
 
 
 class _PulsingDot(QLabel):
@@ -63,7 +97,7 @@ class _PulsingDot(QLabel):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         alpha = 130 + int(125 * (0.5 + 0.5 * (1 if self._phase < 9 else -1) * (self._phase % 9) / 9))
-        c = QColor(Color.TERRACOTTA)
+        c = QColor(*ACCENT[:3])     # the one accent (widget red)
         c.setAlpha(alpha)
         p.setBrush(c)
         p.setPen(Qt.PenStyle.NoPen)
@@ -75,7 +109,8 @@ class EditOverlay(QWidget):
 
     def __init__(self, selection: str,
                  on_escape: Optional[Callable[[], None]] = None,
-                 mode: str = "edit", note: str = ""):
+                 mode: str = "edit", note: str = "", phase: str = "armed",
+                 hotkey: str = ""):
         super().__init__(None)
         self._on_escape = on_escape
 
@@ -99,7 +134,7 @@ class EditOverlay(QWidget):
         self._note.setStyleSheet(f"color: {Color.INK_MUTED};")
         outer.addWidget(self._note)
 
-        # Selected text card — terracotta-bordered, 8% terracotta fill
+        # Selected text card: accent border, a faint accent fill
         sel = self._sel = QLabel(self)
         sf = QFont(Font.BODY, Font.SIZE_BODY_SM)
         sf.setItalic(True)
@@ -107,9 +142,9 @@ class EditOverlay(QWidget):
         sel.setWordWrap(True)
         self.set_selection(selection)
         sel.setStyleSheet(
-            f"background-color: rgba(184, 73, 44, 0.10);"
+            f"background-color: rgba({ACCENT[0]}, {ACCENT[1]}, {ACCENT[2]}, 0.08);"
             f"color: {Color.INK_SOFT};"
-            f"border-left: 2px solid {Color.TERRACOTTA};"
+            f"border-left: 2px solid rgb({ACCENT[0]}, {ACCENT[1]}, {ACCENT[2]});"
             f"padding: 12px 16px;"
             f"border-top-right-radius: {Radius.MD}px;"
             f"border-bottom-right-radius: {Radius.MD}px;"
@@ -118,10 +153,13 @@ class EditOverlay(QWidget):
 
         # Input area — pulsing dot + caption
         input_card = QWidget(self)
+        # Scoped to the card: unscoped, the caption inside drew a box too.
+        input_card.setObjectName("editInput")
+        input_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         input_card.setStyleSheet(
-            f"background-color: #FFFFFF;"
-            f"border: 1px solid {Color.PAPER_DEEPER};"
-            f"border-radius: {Radius.LG + 2}px;"
+            f"QWidget#editInput {{ background-color: #FFFFFF;"
+            f" border: 1px solid {Color.PAPER_DEEPER};"
+            f" border-radius: {Radius.LG + 2}px; }}"
         )
         ic_lay = QHBoxLayout(input_card)
         ic_lay.setContentsMargins(14, 12, 14, 12)
@@ -132,10 +170,16 @@ class EditOverlay(QWidget):
         cf = QFont(Font.DISPLAY, Font.SIZE_BODY)
         cf.setItalic(True)
         caption.setFont(cf)
-        caption.setStyleSheet(f"color: {Color.INK_MUTED};")
+        caption.setStyleSheet(f"color: {Color.INK_MUTED}; background: transparent;")
         ic_lay.addWidget(caption, 1)
         outer.addWidget(input_card)
-        self.set_content(selection, mode, note)
+
+        # One step: how the listening take ends.
+        self._hint = QLabel(self)
+        self._hint.setFont(QFont(Font.BODY, Font.SIZE_BODY_SM))
+        self._hint.setStyleSheet(f"color: {Color.INK_MUTED};")
+        outer.addWidget(self._hint)
+        self.set_content(selection, mode, note, phase, hotkey)
 
         # Drop shadow
         shadow = QGraphicsDropShadowEffect(self)
@@ -155,17 +199,33 @@ class EditOverlay(QWidget):
         self._sel.setText(self._truncate(selection))
         self._sel.setToolTip(selection)
 
-    def set_content(self, selection: str, mode: str = "edit", note: str = "") -> None:
+    def set_content(self, selection: str, mode: str = "edit", note: str = "",
+                    phase: str = "armed", hotkey: str = "") -> None:
         """Edit: the selection. Command: the context preview (hidden when
-        there is none) under a note on what will be used."""
-        self.mode = "command" if mode == "command" else "edit"
+        there is none) under a note on what will be used. `phase`: armed
+        (waiting for the record key), listening or working (one step)."""
+        self.mode = mode if mode in ("command", "pending") else "edit"
+        self.phase = phase if phase in PHASES else "armed"
         self.set_selection(selection)
         command = self.mode == "command"
         self._note.setText(note if command else "")
         self._note.setVisible(command and bool(note))
-        self._sel.setVisible(not command or bool(selection.strip()))
-        self._caption.setText(COMMAND_CAPTION if command else EDIT_CAPTION)
-        self.adjustSize()
+        # Pending (one step, the selection still being read): no card yet.
+        self._sel.setVisible(self.mode == "edit" or (command and bool(selection.strip())))
+        self._caption.setText(caption_for(self.mode, self.phase))
+        hint = hint_for(self.phase, hotkey)
+        self._hint.setText(hint)
+        self._hint.setVisible(bool(hint))
+        self._fit()
+
+    def _fit(self) -> None:
+        """Height for the fixed width. adjustSize() alone sized the
+        word-wrapped note for a narrower width and left the window tall
+        once a line (the hint) was hidden."""
+        lay = self.layout()
+        lay.activate()
+        h = lay.heightForWidth(self.width()) if lay.hasHeightForWidth() else -1
+        self.resize(self.width(), h if h > 0 else lay.sizeHint().height())
 
     def selection_text(self) -> str:
         return self._sel.toolTip()
@@ -182,7 +242,7 @@ class EditOverlay(QWidget):
         geo = screen.availableGeometry()
         x = geo.left() + (geo.width() - self.width()) // 2
         y = geo.top() + int(geo.height() * 0.25)
-        self.adjustSize()
+        self._fit()
         self.move(x, y)
 
     def paintEvent(self, _ev):
@@ -221,7 +281,8 @@ class OverlayLink(QObject):
             on_disconnect=lambda: self.message.emit({"type": "_disconnected"}))
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
-        self._timeout.setInterval(TIMEOUT_SECONDS * 1000)
+        self.timeout_s = TIMEOUT_SECONDS            # armed
+        self.live_timeout_s = LIVE_TIMEOUT_SECONDS  # listening / working
         self._timeout.timeout.connect(self.finish)
 
     def open(self) -> bool:
@@ -233,13 +294,18 @@ class OverlayLink(QObject):
             selection = str(msg.get("selection") or "")
             mode = str(msg.get("mode") or "edit")
             note = str(msg.get("note") or "")
+            phase = str(msg.get("phase") or "armed")
+            hotkey = str(msg.get("hotkey") or "")
             if self.overlay is None:
                 self.overlay = EditOverlay(selection, on_escape=self.finish,
-                                           mode=mode, note=note)
+                                           mode=mode, note=note, phase=phase,
+                                           hotkey=hotkey)
                 self.overlay.show()
             else:
-                self.overlay.set_content(selection, mode, note)
-            self._timeout.start()  # a re-arm gets a fresh 30s
+                self.overlay.set_content(selection, mode, note, phase, hotkey)
+            # A re-arm gets a fresh 30 s; a live take is the daemon's to end.
+            live = self.overlay.phase != "armed"
+            self._timeout.start(int((self.live_timeout_s if live else self.timeout_s) * 1000))
         elif kind in ("close", "exit", "_disconnected"):
             self.finish()
 

@@ -265,3 +265,141 @@ def overlay_message(pending: Pending) -> dict:
     ctx = pending.result(0)
     return {"type": "show", "mode": "command", "selection": ctx.preview(),
             "note": note(ctx)}
+
+
+# -- One step: the hotkey starts listening (Phase 5) -------------------------
+# Spec: docs/superpowers/specs/2026-10-02-command-mode.md, "One step".
+# The edit hotkey opens the mic at once; the take ends on the hotkey again,
+# the record key, or a pause after speech (end-pointing on the recorder's
+# RMS, below). Esc cancels it like any recording.
+
+END_SILENCE_S = 1.5    # quiet this long after speech ends the take
+MIN_SPEECH_S = 0.3     # this much voiced audio (in one stretch) is speech; a key click is not
+SPEECH_GAP_S = 0.3     # a voiced stretch survives quiet gaps this short
+NO_SPEECH_S = 10.0     # nothing said this long: the take is dropped quietly
+MAX_TAKE_S = 60.0      # a take never listens longer than this
+NOISE_MARGIN = 3.0     # speech is this many times the quietest level heard...
+NOISE_CAP = 0.03       # ...up to this: speech at the very start can't set a deaf bar
+POLL_S = 0.05          # how often the watcher reads the level
+
+PAUSE, MAX, NO_SPEECH = "pause", "max", "no speech"
+
+# The overlay's mode while the selection is still being read (~0.3 s):
+# listening already, edit or command not known yet.
+OVERLAY_PENDING = "pending"
+
+
+class Endpointer:
+    """Decides when a hands-off take is over, from mic RMS levels.
+
+    Speech is a level at or above `threshold` (the [audio]
+    silence_threshold, raised in a noisy room to NOISE_MARGIN x the quietest
+    level seen, at most NOISE_CAP) for MIN_SPEECH_S in one stretch. After
+    speech, END_SILENCE_S of quiet returns PAUSE; with no speech for
+    NO_SPEECH_S it returns NO_SPEECH; MAX_TAKE_S returns MAX. Pure: the
+    caller supplies the clock."""
+
+    def __init__(self, threshold: float = 0.01, *, end_silence_s: float = END_SILENCE_S,
+                 min_speech_s: float = MIN_SPEECH_S, no_speech_s: float = NO_SPEECH_S,
+                 max_s: float = MAX_TAKE_S) -> None:
+        self.threshold = threshold
+        self.end_silence_s = end_silence_s
+        self.min_speech_s = min_speech_s
+        self.no_speech_s = no_speech_s
+        self.max_s = max_s
+        self.heard = False
+        self.loudest = 0.0
+        self._start: Optional[float] = None
+        self._last: Optional[float] = None
+        self._floor: Optional[float] = None
+        self._voiced = 0.0               # length of the current voiced stretch
+        self._quiet_since: Optional[float] = None
+
+    def level(self) -> float:
+        """The level that counts as voice right now."""
+        return max(self.threshold, min((self._floor or 0.0) * NOISE_MARGIN, NOISE_CAP))
+
+    def feed(self, rms: float, now: float) -> Optional[str]:
+        """One level reading. None: keep listening; else why the take ends."""
+        rms = max(0.0, float(rms))
+        if self._start is None:
+            self._start = self._last = now
+        dt = min(max(now - self._last, 0.0), 0.2)
+        self._last = now
+        self.loudest = max(self.loudest, rms)
+        if rms >= self.level():
+            self._voiced += dt
+            self._quiet_since = None
+            if self._voiced >= self.min_speech_s:
+                self.heard = True
+        else:
+            if self._quiet_since is None:
+                self._quiet_since = now
+            if now - self._quiet_since > SPEECH_GAP_S:
+                self._voiced = 0.0
+        # The quietest moment so far is the room (zero = no block yet or a
+        # muted mic, which says nothing about it). After the level check,
+        # so a reading never raises its own bar.
+        if rms > 0.0:
+            self._floor = rms if self._floor is None else min(self._floor, rms)
+        if self.heard and self._quiet_since is not None \
+                and now - self._quiet_since >= self.end_silence_s:
+            return PAUSE
+        if now - self._start >= self.max_s:
+            return MAX
+        if not self.heard and now - self._start >= self.no_speech_s:
+            return NO_SPEECH
+        return None
+
+
+class Take:
+    """A one-step edit / command take while it listens. `held`: the record
+    key took it over (the old two-step: press the hotkey, then hold the
+    key), so the key's release ends it and end-pointing stands aside."""
+
+    def __init__(self, endpointer: Endpointer, hotkey: str = "") -> None:
+        self.endpointer = endpointer
+        self.hotkey = hotkey       # shown on the overlay: "⌘⇧E"
+        self.held = False
+        self.phase = "listening"   # then "working" once the take ends
+
+    @property
+    def heard(self) -> bool:
+        return self.endpointer.heard
+
+    def overlay_fields(self) -> dict:
+        return {"phase": self.phase, "hotkey": self.hotkey}
+
+
+def watch(take: Take, read_rms: Callable[[], float], is_live: Callable[[], bool],
+          on_end: Callable[[str], None], *, clock: Callable[[], float] = None,
+          wait: Callable[[float], Any] = None, poll_s: float = POLL_S) -> None:
+    """Feed the take's end-pointer until it decides (on_end(why)) or the
+    take is over some other way (is_live() false). Held by the record key,
+    levels are still read (so a tap after speech ends the take) but the
+    key, not a pause, ends it."""
+    import time
+    clock = clock or time.monotonic
+    wait = wait or time.sleep
+    while is_live():
+        why = take.endpointer.feed(read_rms(), clock())
+        if why is not None and not take.held:
+            on_end(why)
+            return
+        wait(poll_s)
+
+
+_KEY_GLYPHS = {"cmd": "⌘", "command": "⌘", "shift": "⇧", "alt": "⌥", "option": "⌥",
+               "ctrl": "⌃", "control": "⌃", "fn": "fn "}
+
+
+def chord_label(chord: str) -> str:
+    """'<cmd>+<shift>+e' -> '⌘⇧E', for the overlay."""
+    out = []
+    for p in (chord or "").replace(" ", "").split("+"):
+        p = p.strip().lower()
+        if p.startswith("<") and p.endswith(">"):
+            p = p[1:-1]
+        if p:
+            out.append(_KEY_GLYPHS.get(p, p.upper() if len(p) <= 3 else p.capitalize()))
+    return "".join(out)

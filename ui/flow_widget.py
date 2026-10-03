@@ -31,6 +31,7 @@ from openflow_logger import get_logger, log_exception
 from ui import widget_copy as copy
 from ui.fonts import load_fonts
 from ui.hover_relay import HoverRelay
+from ui.screens import ScreenTracker
 from ui.vibrancy import pin_overlay
 from ui.widget_geometry import (DRAG_THRESHOLD, POSITIONS, Rect, clamp_to_screen,
                                 nearest_dock, popup_max_height, popup_rect, widget_rect)
@@ -61,7 +62,7 @@ def hands_free_breath(t: float) -> float:
 RECORDING_VIEWS = ("recording", "silent", "processing")
 HANDS_FREE_VIEWS = ("recording", "silent")  # where a hands-free session shows its ring
 ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
-FOLLOW_MS = 250  # how often the widget checks which display the cursor is on
+FOLLOW_MS = 250  # how often the widget re-checks its display (ui/screens.py)
 # Motion (user decision 2026-10-01): the widget morphs and its contents grow in
 # together; the hover tooltip follows once the mic is there; pop-ups slide out
 # from the widget and fade away when dismissed.
@@ -1002,6 +1003,7 @@ class FlowApp(QObject):
         self._pending_config: dict | None = None  # config that arrived mid-drag
         self.zones: dict[str, DockZone] = {}
         self._screen: Rect | None = None
+        self._screens = ScreenTracker(on_change=self._follow_screen)  # displays added/removed/resized
         # OpenFlow is never the active app, so Qt sends no hover events;
         # the relay feeds them from a global mouse monitor (ui/hover_relay.py).
         self._hover = HoverRelay(lambda: [w for w in (self.widget, self.popup) if w is not None])
@@ -1140,20 +1142,13 @@ class FlowApp(QObject):
             return False
 
     def _screen_rect(self) -> Rect:
-        """The display the cursor is on. A cursor in a gap between displays
-        keeps the widget where it is."""
-        screen = QGuiApplication.screenAt(QCursor.pos())
-        if screen is None:
-            return self._screen or self._rect_of(QGuiApplication.primaryScreen())
-        return self._rect_of(screen)
-
-    @staticmethod
-    def _rect_of(screen) -> Rect:
-        g = screen.availableGeometry()
-        return Rect(g.x(), g.y(), g.width(), g.height())
+        """Usable area of the focused window's display (ui/screens.py)."""
+        return self._screens.area(self.widget.view)
 
     def relayout(self, animate: bool = True) -> None:
-        self._screen = self._screen_rect()
+        screen = self._screen_rect()
+        animate = animate and screen == self._screen  # never fly between displays
+        self._screen = screen
         rect = widget_rect(self.widget.view, self.position, self._screen)
         self.widget.move_to(rect, animate)
         self._sync_popup(rect)

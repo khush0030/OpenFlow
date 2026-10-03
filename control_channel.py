@@ -78,7 +78,7 @@ class ControlServer:
             self._release_lock()
             raise
         self._ino = os.stat(self.path).st_ino
-        s.listen(8)
+        s.listen(64)   # the hub can fire several calls at once
         self._sock = s
         threading.Thread(target=self._accept_loop, name="control-accept",
                          daemon=True).start()
@@ -205,18 +205,38 @@ class ControlClient:
     def __init__(self, path: str = SOCKET_PATH) -> None:
         self.path = path
 
+    # A full listen queue also refuses a connection; retry briefly before
+    # calling the daemon gone. A missing socket file means gone at once.
+    CONNECT_RETRIES = (0.02, 0.05, 0.1)
+
+    def _connect(self, timeout: float) -> socket.socket:
+        delays = iter(self.CONNECT_RETRIES)
+        while True:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            try:
+                s.connect(self.path)
+                return s
+            except FileNotFoundError as exc:
+                s.close()
+                raise DaemonNotRunning() from exc
+            except ConnectionRefusedError as exc:
+                s.close()
+                delay = next(delays, None)
+                if delay is None:
+                    raise DaemonNotRunning() from exc
+                time.sleep(delay)
+            except OSError as exc:
+                s.close()
+                raise DaemonNotRunning() from exc
+
     def call(self, cmd: str, timeout: float = DEFAULT_TIMEOUT, **args: Any) -> dict:
         """Send one command; return the reply's fields (without id/ok).
         Raises DaemonNotRunning if nothing listens, ControlError otherwise."""
         rid = next(self._ids)
         data = _encode({**args, "id": rid, "cmd": cmd})
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
+        s = self._connect(timeout)
         try:
-            try:
-                s.connect(self.path)
-            except (FileNotFoundError, ConnectionRefusedError) as exc:
-                raise DaemonNotRunning() from exc
             s.sendall(data)
             buf = b""
             while b"\n" not in buf:

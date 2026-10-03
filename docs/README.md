@@ -17,6 +17,7 @@
 | [2026-09-30 Flow widget](superpowers/specs/2026-09-30-flow-widget-design.md) | Shipped |
 | [2026-10-01 App hub (the OpenFlow window)](superpowers/specs/2026-10-01-app-hub-design.md) | Shipped; redesigned 2026-10-02 (one accent, responsive pages, Your voice) |
 | [2026-10-01 Streaming STT](superpowers/specs/2026-10-01-streaming-stt.md) | Shipped |
-| [2026-10-02 Command mode](superpowers/specs/2026-10-02-command-mode.md) | Shipped |
+| [2026-10-02 Command mode](superpowers/specs/2026-10-02-command-mode.md) | Shipped (one step since 2026-10-02) |
+| [2026-10-02 Quality evals](superpowers/specs/2026-10-02-quality-evals.md) | Approved, not built |
 
 New behaviour or UI starts with a spec here, named `YYYY-MM-DD-topic.md`.
