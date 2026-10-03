@@ -888,3 +888,230 @@ def test_queued_card_names_an_earlier_dictation(fa):
     assert copy.CARD_NOT_PASTED_HINT not in labels   # the clipboard may hold a newer take
     fa.popup.copy_button.click()
     assert fa.client.sent[-1] == {"action": "copy"}
+
+
+# ── Widget 2.0: live text, tone chip, done actions (spec 2026-10-02-widget-2.md) ──
+from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6.QtTest import QTest  # noqa: E402
+
+from ui import widget_copy as wcopy  # noqa: E402
+
+LIVE_LONG = ("Hey team, quick update on the launch: the landing page is live, the "
+             "pricing copy is still with legal, and I'd like us to ship the onboarding "
+             "emails on Thursday if Priya signs off on the last two")
+
+
+def _state(fa, state, **kw):
+    fa._on_message({"type": "state", "state": state, "text": kw.pop("text", ""), **kw})
+
+
+def _sent(fa) -> list[dict]:
+    return [m for m in fa.client.sent if m.get("action") != "hover"]
+
+
+def _all_inside(popup) -> None:
+    """Every label and button sits fully inside the pop-up's painted shape."""
+    popup.layout().activate()
+    for w in popup.findChildren(fw.QLabel) + popup.findChildren(fw.PillButton):
+        if w.isVisible():
+            assert _inside(popup, w), (type(w).__name__, getattr(w, "text", lambda: "")())
+        if isinstance(w, fw.QLabel) and not w.wordWrap():
+            assert w.width() >= w.sizeHint().width(), f"clipped: {w.text()!r}"
+
+
+def test_chip_click_through_real_mouse_events(fa):
+    # PillButtons are painted by hand: a real press + release (not .click())
+    # must reach them, or the chip does nothing on screen.
+    _state(fa, "done", tone="casual")
+    fa.set_hover(True)
+    panel = fa.popup
+    panel.show()
+    panel.layout().activate()
+    QTest.mouseClick(panel.undo_button, Qt.MouseButton.LeftButton)
+    assert _sent(fa)[-1] == {"action": "undo_paste"}
+
+
+def test_tooltip_shows_tone_chip_and_opens_picker(fa):
+    fa._on_message({"type": "config", "tone": "professional", "language": "hi"})
+    _state(fa, "idle")
+    fa.set_hover(True)
+    assert isinstance(fa.popup, fw.Tooltip)
+    assert fa.popup.chip.text() == "Professional · Hindi"
+    fa.popup.chip.click()
+    assert isinstance(fa.popup, fw.Picker)
+    fa.popup.options[(0, "email")].click()
+    assert fa.client.sent[-1] == {"action": "set_tone", "value": "email"}
+    assert isinstance(fa.popup, fw.Tooltip)        # back to the tooltip
+    fa.popup.chip.click()
+    fa.popup.options[(1, "en")].click()
+    assert fa.client.sent[-1] == {"action": "set_language", "value": "en"}
+
+
+def test_config_relabels_chip_in_place(fa):
+    _state(fa, "idle")
+    fa.set_hover(True)
+    tip = fa.popup
+    fa._on_message({"type": "config", "tone": "slack"})
+    assert fa.popup is tip and tip.chip.text() == "Slack"
+
+
+def test_flash_on_red_chip_is_visible(fa):
+    # On the red tooltip a "pulse to red" would vanish into the red behind it.
+    _state(fa, "idle")
+    fa.set_hover(True)
+    chip = fa.popup.chip
+    rest_bg, rest_fg = chip.colors()
+    chip.flash_level = 1.0
+    bg, fg = chip.colors()
+    accent = fw.qc(fa.theme.accent)
+    assert bg.alpha() > 200 and abs(bg.red() - accent.red()) + abs(bg.green() - accent.green()) > 150
+    assert fg != rest_fg
+
+
+def test_flash_without_chip_shows_chip_popup_then_hides(fa, monkeypatch):
+    monkeypatch.setattr(fa, "_pointer_over_us", lambda: False)
+    _state(fa, "idle")
+    fa._on_message({"type": "config", "tone": "email"})
+    fa._on_message({"type": "flash"})
+    assert isinstance(fa.popup, fw.ChipPopup) and fa.popup.chip.text() == "Email"
+    assert fa.popup.chip._flash.state() == fw.QAbstractAnimation.State.Running
+    assert fa.widget.target_rect.w == 7      # the widget doesn't move or resize
+    fa._flash_timer.stop()
+    fa._end_flash()
+    assert fa.popup is None
+
+
+def test_flash_with_chip_on_screen_pulses_it(fa):
+    _state(fa, "recording")
+    fa._on_message({"type": "live", "text": "hello there"})
+    panel = fa.popup
+    fa._on_message({"type": "flash"})
+    assert fa.popup is panel
+    assert panel.chip._flash.state() == fw.QAbstractAnimation.State.Running
+
+
+def test_live_text_panel_only_with_words_and_fixed_size(fa):
+    _state(fa, "recording")
+    assert fa.popup is None                       # waveform only, as before
+    fa._on_message({"type": "live", "text": "Hey team"})
+    panel = fa.popup
+    assert isinstance(panel, fw.LivePanel)
+    size = (panel.target_rect.w, panel.target_rect.h)
+    fa._on_message({"type": "live", "text": LIVE_LONG})
+    assert fa.popup is panel
+    assert (panel.target_rect.w, panel.target_rect.h) == size   # never resizes
+    lines = panel.view.lines
+    assert len(lines) > fw.LIVE_LINES and lines[-1] in LIVE_LONG
+    _all_inside(panel)
+
+
+def test_live_text_frozen_while_processing_then_gone(fa):
+    _state(fa, "recording")
+    fa._on_message({"type": "live", "text": "Hey team"})
+    panel = fa.popup
+    _state(fa, "processing")
+    assert fa.popup is panel
+    fa._on_message({"type": "live", "text": "late partial"})   # ignored
+    assert panel.view.lines == ["Hey team"]
+    _state(fa, "done", tone="casual")
+    assert fa.popup is None
+    _state(fa, "recording")
+    assert fa.popup is None and fa.live_text == ""            # a new take starts empty
+
+
+def test_cant_hear_keeps_priority_over_live_text(fa):
+    _state(fa, "recording")
+    fa._on_message({"type": "live", "text": "Hey team"})
+    _state(fa, "silent")
+    assert isinstance(fa.popup, fw.Toast)
+
+
+def test_recording_hover_shows_chip_only_without_live_text(fa):
+    _state(fa, "recording")
+    fa.set_rec_hover(True)
+    assert isinstance(fa.popup, fw.ChipPopup)
+    fa._on_message({"type": "live", "text": "Hey team"})
+    assert isinstance(fa.popup, fw.LivePanel)
+
+
+def test_done_rests_like_idle_and_hover_shows_actions(fa):
+    _state(fa, "done", tone="casual")
+    assert fa.widget.view == "done" and fa.popup is None
+    assert (fa.widget.target_rect.w, fa.widget.target_rect.h) == (7, 40)
+    fa.set_hover(True)
+    assert fa.client.sent[-1] == {"action": "hover", "value": "on"}
+    panel = fa.popup
+    assert isinstance(panel, fw.DonePanel)
+    assert panel.title.text() == wcopy.PASTED and panel.chip.text() == "Casual"
+    panel.copy_button.click()
+    assert _sent(fa)[-1] == {"action": "copy_last"}
+    assert panel.copy_button.text() == wcopy.COPIED
+    panel.undo_button.click()
+    assert _sent(fa)[-1] == {"action": "undo_paste"}
+    _all_inside(panel)
+    fa.widget.click(QPointF(fw.M + 13, fw.M + 20))      # the pill still dictates
+    assert _sent(fa)[-1] == {"action": "start"}
+    fa.set_hover(False)
+    assert fa.client.sent[-1] == {"action": "hover", "value": "off"}
+    assert fa.widget.view == "done" and fa.popup is None
+
+
+def test_done_rewrite_picks_a_tone(fa):
+    _state(fa, "done", tone="casual")
+    fa.set_hover(True)
+    fa.popup.chip.click()
+    picker = fa.popup
+    assert isinstance(picker, fw.Picker)
+    assert picker.options[(0, "casual")].style == "picked"
+    picker.options[(0, "professional")].click()
+    assert _sent(fa)[-1] == {"action": "redo", "value": "professional"}
+    _state(fa, "processing")
+    assert fa.widget.view == "processing"
+
+
+def test_done_cant_undo_note(fa):
+    _state(fa, "done", tone="casual", note="cant_undo")
+    fa.set_hover(True)
+    assert fa.popup.title.text() == wcopy.CANT_UNDO
+
+
+@pytest.mark.parametrize("appearance", ["paper", "ink"])
+@pytest.mark.parametrize("reason", ["not_replaced", "not_pasted", "queued", ""])
+def test_card_footer_hint_is_not_clipped(fa, appearance, reason):
+    fa.choose("appearance", appearance)
+    _state(fa, "card", text="Hi Priya, could you sign off?", reason=reason)
+    card = fa.popup
+    card.layout().activate()
+    hints = [l for l in card.findChildren(fw.QLabel)
+             if l.text() in (wcopy.CARD_NOT_REPLACED_HINT, wcopy.CARD_NOT_PASTED_HINT,
+                             wcopy.CARD_QUEUED_HINT, wcopy.CARD_HINT)]
+    assert hints and hints[0].width() >= hints[0].sizeHint().width()
+
+
+@pytest.mark.parametrize("appearance", ["paper", "ink"])
+def test_widget2_popups_fit_their_shapes(fa, appearance):
+    fa.choose("appearance", appearance)
+    fa._on_message({"type": "config", "tone": "professional", "language": "hi_to_en"})
+    _state(fa, "idle")
+    fa.set_hover(True)
+    _all_inside(fa.popup)
+    fa.open_picker("modes")
+    _all_inside(fa.popup)
+    fa.set_hover(False)
+    _state(fa, "done", tone="bullets", note="cant_undo")
+    fa.set_hover(True)
+    _all_inside(fa.popup)
+
+
+def test_hover_grace_keeps_popup_while_crossing(fa, monkeypatch):
+    _state(fa, "done", tone="casual")
+    fa.set_hover(True)
+    fa.widget.leaveEvent(None)
+    assert fa._grace.isActive() and isinstance(fa.popup, fw.DonePanel)
+    monkeypatch.setattr(fa, "_pointer_over_us", lambda: True)   # reached the pop-up
+    fa._grace.stop()
+    fa._check_hover_end()
+    assert isinstance(fa.popup, fw.DonePanel)
+    monkeypatch.setattr(fa, "_pointer_over_us", lambda: False)
+    fa._check_hover_end()
+    assert fa.popup is None and fa.widget.view == "done"

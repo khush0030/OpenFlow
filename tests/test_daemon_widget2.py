@@ -242,3 +242,12 @@ def test_no_stream_no_live_messages(env):
     d._open_stream()
     pump_once(d)
     assert not any(m.get("type") == "live" for m in d._widget.sent)
+
+
+def test_widget_picker_order_matches_f6_cycle():
+    # The chip's picker lists tones / languages in the order F6 cycles them.
+    import daemon as d
+    from ui import widget_copy as wc
+    assert tuple(m.value for m in d._TONE_CYCLE) == wc.TONE_ORDER
+    assert tuple(m.value for m in d._LANG_CYCLE) == wc.LANGUAGE_ORDER
+    assert set(wc.LANGUAGE_ORDER) <= set(wc.LANGUAGE_LABELS)

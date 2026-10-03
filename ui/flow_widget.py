@@ -578,7 +578,10 @@ class Card(Surface):
 
         foot = QHBoxLayout()
         foot.setSpacing(7)
-        foot.addWidget(PulseDot(theme))
+        # The pulsing dot means "waiting for you to click a text box"; the
+        # clipboard cards aren't waiting, and their hint needs the room.
+        if not (queued or not_replaced or not_pasted):
+            foot.addWidget(PulseDot(theme))
         hint = QLabel(copy.CARD_QUEUED_HINT if queued else
                       copy.CARD_NOT_REPLACED_HINT if not_replaced else
                       copy.CARD_NOT_PASTED_HINT if not_pasted else copy.CARD_HINT)
@@ -725,8 +728,13 @@ class PillButton(QWidget):
                 bg = _mix(bg, qc(th.text), 0.08)
             fg = qc(th.secondary_text)
         if self.flash_level > 0:
-            bg = _mix(bg, qc(th.accent), self.flash_level)
-            fg = _mix(fg, white, self.flash_level)
+            if self.style == "on_red":
+                # Already on red: the pulse turns the chip white, red letters.
+                bg = _mix(bg, white, self.flash_level)
+                fg = _mix(fg, qc(th.accent), self.flash_level)
+            else:
+                bg = _mix(bg, qc(th.accent), self.flash_level)
+                fg = _mix(fg, white, self.flash_level)
         return bg, fg
 
     def paintEvent(self, _e) -> None:
