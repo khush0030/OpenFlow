@@ -866,6 +866,22 @@ class HistoryPage(Page):
         if query is None:
             self.setFocus(Qt.FocusReason.OtherFocusReason)     # ↑/↓ work straight away
 
+    def view_state(self) -> dict:
+        """Search, filter chip and selected take, for a theme switch."""
+        return {"query": self.search.text(), "filter": self._filter,
+                "selected": self._selected_id}
+
+    def restore_view(self, state: dict) -> None:
+        self.search.blockSignals(True)
+        self.search.setText(str(state.get("query") or ""))
+        self.search.blockSignals(False)
+        self._search_timer.stop()
+        self._query = self.search.text().strip()
+        self.set_filter(str(state.get("filter") or "all"))
+        if state.get("selected") is not None and any(
+                r.entry.id == state["selected"] for r in self.rows):
+            self.select(state["selected"])
+
     def flush_search(self) -> None:
         self._search_timer.stop()
         q = self.search.text().strip()
