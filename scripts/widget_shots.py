@@ -2,6 +2,7 @@
 
     QT_QPA_PLATFORM=offscreen python scripts/widget_shots.py OUT_DIR [scene ...]
     QT_SCALE_FACTOR=2 QT_QPA_PLATFORM=offscreen python scripts/widget_shots.py OUT_DIR
+    python scripts/widget_shots.py --sheet OUT_DIR     # contact sheet per theme / scale
 
 Each scene is drawn in Paper and Ink, on a light / dark app backdrop, with
 the widget and its pop-up at their final positions (animations settled).
@@ -17,13 +18,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QPoint, QRect  # noqa: E402
+from PyQt6.QtCore import QPoint, QRect, qInstallMessageHandler  # noqa: E402
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 import ui.flow_widget as fw  # noqa: E402
 from ui.fonts import load_fonts  # noqa: E402
 from ui.widget_theme import FONT_UI  # noqa: E402
+
+# The offscreen platform can't raise windows or set opacity; that's expected.
+qInstallMessageHandler(lambda _m, _c, msg: None if msg.startswith("This plugin does not support")
+                       else sys.stderr.write(msg + "\n"))
 
 SCREEN = fw.Rect(0, 0, 760, 420)
 BACKDROP = {"paper": QColor("#F3F2EF"), "ink": QColor("#1F1F22")}
@@ -137,6 +142,28 @@ def flash_idle_settled(fa):
 
 
 @scene
+def hover_tooltip_flash(fa):
+    # F6 while the Dictate tooltip is up: its chip pulses (peak shown).
+    fa._on_message({"type": "config", "tone": "email"})
+    _state(fa, "idle")
+    fa.set_hover(True)
+    fa._flash()
+    fa.popup.chip._flash.stop()
+    fa.popup.chip.flash_level = 1.0
+
+
+@scene
+def recording_live_flash(fa):
+    # F6 while speaking: the live panel's chip pulses (peak shown).
+    fa._on_message({"type": "config", "tone": "professional", "language": "hi"})
+    _state(fa, "recording")
+    fa._on_message({"type": "live", "text": "Hey team, quick update on the"})
+    fa._flash()
+    fa.popup.chip._flash.stop()
+    fa.popup.chip.flash_level = 1.0
+
+
+@scene
 def done_rest(fa):
     _state(fa, "done", tone="casual")
 
@@ -171,6 +198,13 @@ def picker_rewrite(fa):
 def card_not_replaced(fa):
     _state(fa, "card", text="Hi Priya, could you sign off on the last two onboarding "
                             "emails by Thursday? Thanks!", reason="not_replaced")
+
+
+@scene
+def card_not_pasted(fa):
+    # Not new; shown because its footer was clipped before this round.
+    _state(fa, "card", text="Hi Priya, could you sign off on the last two onboarding "
+                            "emails by Thursday? Thanks!", reason="not_pasted")
 
 
 def settle(fa, app):
@@ -221,7 +255,49 @@ def render(fa, app, theme: str, path: Path) -> None:
     img.save(str(path))
 
 
+def contact_sheet(files: list[Path], path: Path) -> None:
+    """Every render of one theme on one PNG, labelled, two columns."""
+    imgs = [(f.stem, QImage(str(f))) for f in files]
+    if not imgs:
+        return
+    pad, label, cols = 16, 22, 2
+    cw = max(i.width() for _, i in imgs)
+    rows = [imgs[k:k + cols] for k in range(0, len(imgs), cols)]
+    h = pad + sum(max(i.height() for _, i in r) + label + pad for r in rows)
+    sheet = QImage(cols * (cw + pad) + pad, h, QImage.Format.Format_ARGB32)
+    sheet.fill(QColor("#9A968F"))
+    p = QPainter(sheet)
+    f = QFont(FONT_UI)
+    f.setPixelSize(13)
+    p.setFont(f)
+    y = pad
+    for r in rows:
+        x = pad
+        for name, img in r:
+            p.setPen(QColor("#111111"))
+            p.drawText(x, y + 15, name)
+            p.drawImage(x, y + label, img)
+            x += cw + pad
+        y += max(i.height() for _, i in r) + label + pad
+    p.end()
+    sheet.save(str(path))
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--sheet":
+        # python scripts/widget_shots.py --sheet OUT_DIR: one sheet per theme
+        # and scale from the PNGs already in OUT_DIR.
+        out = Path(argv[1])
+        app = QApplication.instance() or QApplication([])
+        load_fonts()
+        for theme in ("paper", "ink"):
+            for scale in ("1x", "2x"):
+                files = sorted(f for f in out.glob(f"*-{theme}@{scale}.png"))
+                if files:
+                    path = out / f"contact-sheet-{theme}@{scale}.png"
+                    contact_sheet(files, path)
+                    print(path)
+        return 0
     out = Path(argv[0])
     out.mkdir(parents=True, exist_ok=True)
     names = argv[1:] or list(SCENES)
