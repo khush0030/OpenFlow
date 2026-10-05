@@ -268,7 +268,13 @@ def run_daemon_child(home: Path, speed: float, stream: bool) -> None:
     daemon.capture_paste_target = lambda *a, **k: None
 
     widget_pid = {}
-    real_spawn = daemon._spawn_flow_widget
+    if getattr(sys, "frozen", False):
+        # Never through LaunchServices (that would be a real, visible app):
+        # the bundle's own binary, directly, offscreen like us.
+        def real_spawn():
+            return subprocess.Popen([sys.executable, "flow-widget"], env=daemon._child_env())
+    else:
+        real_spawn = daemon._spawn_flow_widget
 
     def spawn_widget():
         p = real_spawn()          # dev path: python ui/flow_widget.py, our env
@@ -371,11 +377,26 @@ def run_hub_child(home: Path) -> None:
 
 # -- parent -------------------------------------------------------------------
 
+EXE: str | None = None    # --exe: run the children inside a built bundle
+
+
+def _child_cmd(args: list[str]) -> list[str]:
+    if EXE is None:
+        return [sys.executable, __file__, *args]
+    # launcher.py runs `<exe> -c CODE` when CODE mentions multiprocessing
+    # (PyInstaller's helper hook): load this file into the frozen app.
+    code = ("import multiprocessing, sys; "
+            f"sys.argv = {[__file__, *args]!r}; "
+            f"exec(compile(open({__file__!r}).read(), {__file__!r}, 'exec'), "
+            f"{{'__name__': '__main__', '__file__': {__file__!r}}})")
+    return [EXE, "-c", code]
+
+
 class Child:
     def __init__(self, args: list[str], env: dict):
         env = dict(env, OPENFLOW_BENCH_T0=str(time.time()))
         self.t0 = time.time()
-        self.p = subprocess.Popen([sys.executable, __file__, *args], cwd=REPO, env=env,
+        self.p = subprocess.Popen(_child_cmd(args), cwd=REPO, env=env,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   text=True, bufsize=1)
         self.events: list[dict] = []
@@ -522,12 +543,15 @@ def bench_hub(env: dict, home: Path, args) -> dict:
 
 
 def main() -> int:
+    frozen = getattr(sys, "frozen", False)
     if len(sys.argv) > 1 and sys.argv[1] == "_daemon":
-        sys.path.insert(0, str(REPO))
+        if not frozen:
+            sys.path.insert(0, str(REPO))
         run_daemon_child(Path(sys.argv[2]), float(sys.argv[3]), sys.argv[4] == "1")
         return 0
     if len(sys.argv) > 1 and sys.argv[1] == "_hub":
-        sys.path.insert(0, str(REPO))
+        if not frozen:
+            sys.path.insert(0, str(REPO))
         run_hub_child(Path(sys.argv[2]))
         return 0
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -544,12 +568,20 @@ def main() -> int:
                     help="experiment: malloc_zone_pressure_relief in the daemon after the takes")
     ap.add_argument("--venv", action="store_true",
                     help="load whatever the venv has (default: block what the bundle excludes)")
+    ap.add_argument("--exe", help="run inside a built bundle: path to "
+                    "OpenFlow.app/Contents/MacOS/openflow (never the installed one)")
     ap.add_argument("--home", help="scratch HOME (default: a new temp dir)")
     ap.add_argument("--keep", action="store_true", help="keep the temp HOME")
     ap.add_argument("--json", help="also write the results here")
     ap.add_argument("--live", nargs="+", type=int, metavar="PID",
                     help="read-only: sample these running pids for --idle seconds")
     args = ap.parse_args()
+    if args.exe:
+        global EXE
+        EXE = str(Path(args.exe).resolve())
+        if EXE.startswith("/Applications/"):
+            raise SystemExit("--exe: build a scratch bundle; never run the installed app")
+        args.venv = True      # the bundle has exactly what it has
     if args.live:
         res = idle_window({str(p): p for p in args.live}, args.idle)
     else:

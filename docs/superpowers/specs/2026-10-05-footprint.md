@@ -115,11 +115,16 @@ bench total.
    otherwise, woken at once by any widget state change, so recording, Undo /
    Retry timers and card paste behave as before. Config reload stays ≤ 2 s.
 5. **Widget follows the screen on events.** App activation and Space changes
-   (NSWorkspace notifications) and mouse-up (end of a window drag) re-check
-   the display immediately; the poll drops from 250 ms to 2 s as a safety net
-   for in-app window moves via keyboard. Display add / remove / resize were
-   already signals. Small hunks: `ui/screens.py` (owner: placement work, merged)
-   and the `FOLLOW_MS` constant in `ui/flow_widget.py`.
+   (NSWorkspace notifications), mouse-up (end of a window drag) and the
+   cursor crossing to another display (compared against cached frames)
+   re-check the display at once, coalesced 120 ms; the poll drops from
+   250 ms to 2 s as a safety net for in-app window moves via keyboard.
+   Display add / remove / resize were already signals. Small hunks:
+   `ui/screens.py` (owner: placement work, merged) and the `FOLLOW_MS`
+   constant in `ui/flow_widget.py`.
+   5b. The window list is read with `CGWindowListCopyWindowInfo` bound
+   straight from CoreGraphics instead of `from Quartz import …`, which
+   loaded the whole Quartz umbrella (ImageKit, PDFKit, QuickLookUI …).
 6. **Socket readers block.** The widget socket's 1 s timeout exists for
    `sendall`; set it as a kernel send timeout (`SO_SNDTIMEO`) so `recv`
    blocks without waking each second, in both processes.
@@ -138,3 +143,53 @@ defaults. Hub (owned by feat/dark-hub) already returns its memory by quitting
 - Latency: bench key-up → idle and `on_record_start` time before / after;
   `audio_to_wav_bytes` timing; the daemon's import doesn't move work onto
   the dictation path (nothing is lazy-imported there).
+
+## Results (2026-10-05)
+
+Built bundles (unsigned PyInstaller builds of `main` and this branch, in a
+scratch dir) run through the bench with `--exe`: the frozen app's own
+modules, the PyQt6 runtime hook and the bundle's exclusions, offscreen.
+Two runs each; 30 s idle, 10 warm-up + 50 takes.
+
+| | before | after |
+|---|---|---|
+| daemon footprint, idle | 64.0 / 63.8 MB | **50.2 / 50.2 MB** |
+| daemon CPU, idle | 0.17 / 0.18 % | **0.02 / 0.017 %** |
+| daemon wakeups/s | 18.8 / 18.7 | **1.0 / 1.0** |
+| widget footprint, idle | 47.2 / 47.4 MB | **45.2 / 45.2 MB** |
+| widget CPU, idle | 0.62 / 0.69 % | **0.086 / 0.092 %** |
+| widget wakeups/s | 5.1 / 5.1 | **1.13 / 1.17** |
+| growth over 50 takes (after warm-up) | daemon +2 objects; widget +0.1 MB | daemon +2 objects; widget +0.1 MB |
+| daemon cold start (spawn → ready) | 2.5 (first) / 1.0 s, 1.05 / 0.85 s CPU | 0.85 / 0.84 s, 0.68 s CPU |
+| widget cold start | 0.59 / 0.58 s | 0.52 / 0.57 s |
+| hub (window open) | 52.4 MB, 0.39 % | 52.2–52.3 MB, 0.38 % (unchanged) |
+| key-up → idle, local work (median / p90) | 16.1–17.9 / 24–25 ms | 15.6–17.4 / 23–24 ms |
+| `on_record_start` without PortAudio | 1.32 / 1.34 ms | 1.24 / 1.44 ms |
+| bundle size (unsigned) | 171 MB | **129 MB** |
+
+Daemon + widget idle: 111 → 95 MB, 0.85 → 0.11 % CPU, 24 → 2.2 wakeups/s.
+Applied to the live app (the bench's import and timer savings carry over;
+the tray, hotkey monitors and Cocoa windows don't run in the bench), expect
+roughly 117 → ~103 MB for the daemon and 60 → ~57 MB for the widget, i.e.
+~160 MB total, and idle CPU from ~0.95 % to ~0.15 %. The live widget gains
+more CPU than the bench shows: on Cocoa its 250 ms window-list poll was
+~0.9 % on its own.
+
+The 110 MB total target needs structural work (below); this pass gets
+the CPU target and flat memory, and about a quarter of the memory gap.
+
+Found and fixed on the way: the direct CoreGraphics binding (change 5b)
+first leaked ~7 KB per display check (a Copy function's +1 array); the
+growth check caught it before it left the branch.
+
+## Further wins not taken
+
+| idea | est. saving | cost / risk |
+|---|---|---|
+| Daemon without Qt: the PyInstaller PyQt6 runtime hook imports QtCore in every bundled process (`create_embedded_qt_conf`). A second, Qt-less executable for the daemon (or a custom hook that skips it outside UI subcommands) | ~3–4 MB daemon | build change (two EXEs or patched rthook), re-sign; medium |
+| Drop the widget's 1 s reconnect `QTimer` while connected (restart on disconnect) | ~1 wakeup/s widget, negligible CPU | small hunk in `ui/flow_widget.py` (feat/widget-2's file) |
+| Daemon pump rest wait 1 s → 2 s (config cadence) | ~0.5 wakeup/s | widget respawn up to 1 s later |
+| PIL out of the bundle (tray fallback drawn with AppKit, or ship only PNGs) | 11 MB bundle | small; the fallback never runs with bundled PNGs |
+| QtPdf + imageformats/qpdf plugin out of the bundle (no PDF use) | ~7 MB bundle | spec excludes; check no SVG/PDF icon path needs it |
+| Native shell (Swift: menu bar, hotkeys, mic, paste, widget) with Python only for the pipeline — ROADMAP Phase 7, SwiftUI eval 2026-10-02 | widget 45 → ~11 MB, daemon −20–30 MB (no PyObjC/AppKit/rumps) | weeks; second toolchain |
+| `gc.freeze()` after start-up | none in memory; shorter GC pauses per take | trivial; only worth it if frame hitches show |
