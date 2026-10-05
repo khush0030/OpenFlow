@@ -14,7 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, ImageDraw
+# PIL is imported where it draws (the fallback only): the always-on daemon
+# imports this module for the tray and must not carry PIL (~4 MB) for it.
 
 Status = Literal["idle", "recording", "processing"]
 
@@ -90,6 +91,7 @@ def render_tray_icon(status: Status, size: int = 22) -> Image.Image:
     light and dark menu bars; the interior fill keeps the mark from
     "ghosting out" on dark menus.
     """
+    from PIL import Image, ImageDraw
     px = size * 2  # render at 2x for retina crispness
     img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -127,6 +129,7 @@ def render_tray_icon(status: Status, size: int = 22) -> Image.Image:
 
 def tray_icon_image(status: Status, size: int = 22) -> Image.Image:
     """Return a PIL.Image for status, preferring a bundled PNG if present."""
+    from PIL import Image
     p = tray_icon_path(status)
     if p is not None:
         try:
