@@ -107,7 +107,14 @@ def idle_window(pids: dict[str, int], seconds: float) -> dict[str, dict]:
 
 # -- the daemon child ---------------------------------------------------------
 
+# openflow.spec keeps these out of the bundle; the children block them so the
+# venv run loads what the bundled app loads (--venv: don't).
+BUNDLE_EXCLUDES = ("scipy", "rich", "click", "pygments")
+
+
 def _child_guard(home: Path) -> None:
+    for name in filter(None, os.environ.get("OPENFLOW_BENCH_BLOCK", "").split(",")):
+        sys.modules[name] = None
     if Path(os.path.expanduser("~")).resolve() != home.resolve():
         raise SystemExit("bench child: HOME is not the scratch home")
     if home.resolve() == REAL_HOME:
@@ -438,7 +445,10 @@ def bench(args) -> dict:
         cfg.write_text("")
     (home / ".openflow" / "onboarded.flag").write_text("bench")
     env = _env(home)
-    res: dict = {"home": str(home), "idle_s": args.idle, "takes": args.takes}
+    if not args.venv:
+        env["OPENFLOW_BENCH_BLOCK"] = ",".join(BUNDLE_EXCLUDES)
+    res: dict = {"home": str(home), "idle_s": args.idle, "takes": args.takes,
+                 "bundle_like": not args.venv}
 
     d = Child(["_daemon", str(home), str(args.speed), "1" if args.stream else "0"], env)
     try:
@@ -516,6 +526,8 @@ def main() -> int:
     ap.add_argument("--hub", action="store_true", help="also measure the hub window")
     ap.add_argument("--relief", action="store_true",
                     help="experiment: malloc_zone_pressure_relief in the daemon after the takes")
+    ap.add_argument("--venv", action="store_true",
+                    help="load whatever the venv has (default: block what the bundle excludes)")
     ap.add_argument("--home", help="scratch HOME (default: a new temp dir)")
     ap.add_argument("--keep", action="store_true", help="keep the temp HOME")
     ap.add_argument("--json", help="also write the results here")
