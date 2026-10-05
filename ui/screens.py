@@ -44,6 +44,31 @@ def _key(r: Rect) -> tuple:
     return (round(r.x), round(r.y), round(r.w), round(r.h))
 
 
+# CGWindowListCopyWindowInfo options (CGWindow.h).
+_ON_SCREEN_ONLY = 1 << 0
+_EXCLUDE_DESKTOP = 1 << 4
+_cg: dict = {}
+
+
+def _window_list():
+    """CGWindowListCopyWindowInfo(on screen, no desktop), front to back.
+    Bound straight from CoreGraphics: `import Quartz` would load the whole
+    umbrella (ImageKit, PDFKit, QuickLookUI, ...; ~3 MB) for this one call."""
+    fn = _cg.get("CGWindowListCopyWindowInfo")
+    if fn is None:
+        try:
+            import objc  # type: ignore
+            from Foundation import NSBundle  # type: ignore
+            objc.loadBundleFunctions(
+                NSBundle.bundleWithIdentifier_("com.apple.CoreGraphics"), _cg,
+                [("CGWindowListCopyWindowInfo", b"^{__CFArray=}II")])
+            fn = _cg["CGWindowListCopyWindowInfo"]
+        except Exception:
+            from Quartz import CGWindowListCopyWindowInfo as fn  # type: ignore
+            _cg["CGWindowListCopyWindowInfo"] = fn
+    return fn(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP, 0)   # 0: kCGNullWindowID
+
+
 class SystemProbe:
     """Reads the real system. Every call degrades to "don't know" on error."""
 
@@ -88,16 +113,10 @@ class SystemProbe:
     def focused_window() -> Rect | None:
         try:
             from AppKit import NSWorkspace  # type: ignore
-            from Quartz import (CGWindowListCopyWindowInfo,  # type: ignore
-                                kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-                                kCGWindowListOptionOnScreenOnly)
             app = NSWorkspace.sharedWorkspace().frontmostApplication()
             if app is None:
                 return None
-            entries = CGWindowListCopyWindowInfo(
-                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-                kCGNullWindowID)
-            return front_window(entries, int(app.processIdentifier()))
+            return front_window(_window_list(), int(app.processIdentifier()))
         except Exception:
             return None
 

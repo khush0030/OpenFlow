@@ -113,3 +113,28 @@ def test_handlers_never_raise():
 def test_cocoa_point_maps_to_qt_coordinates():
     # NSEvent.mouseLocation is bottom-left origin on the primary display.
     assert screens.cocoa_to_qt(100.0, 900.0, primary_h=982.0) == (100.0, 82.0)
+
+
+def test_window_list_without_the_quartz_umbrella(tmp_path):
+    """focused_window() reads the window list through CoreGraphics directly:
+    `import Quartz` loads ImageKit, PDFKit, QuickLookUI, QuartzComposer...
+    (~3 MB in the always-on widget) for one function."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    code = ("import sys, json\n"
+            "from PyQt6.QtWidgets import QApplication; app = QApplication([])\n"
+            "from ui.screens import SystemProbe\n"
+            "w = SystemProbe.focused_window()\n"
+            "entries = __import__('ui.screens', fromlist=['x'])._window_list()\n"
+            "print(json.dumps({'quartz': 'Quartz' in sys.modules,"
+            " 'list': entries is not None, 'rect': w is None or w.w > 0}))")
+    env = dict(os.environ, HOME=str(tmp_path), QT_QPA_PLATFORM="offscreen")
+    r = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out == {"quartz": False, "list": True, "rect": True}
