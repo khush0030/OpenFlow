@@ -62,7 +62,8 @@ def hands_free_breath(t: float) -> float:
 RECORDING_VIEWS = ("recording", "silent", "processing")
 HANDS_FREE_VIEWS = ("recording", "silent")  # where a hands-free session shows its ring
 ANIMATED_VIEWS = ("recording", "processing")  # views that need the frame timer
-FOLLOW_MS = 250  # how often the widget re-checks its display (ui/screens.py)
+FOLLOW_MS = 2000  # safety-net re-check of its display; focus events do the rest
+                  # at once (ui/screens.py FocusWatch, spec 2026-10-05-footprint)
 # Motion (user decision 2026-10-01): the widget morphs and its contents grow in
 # together; the hover tooltip follows once the mic is there; pop-ups slide out
 # from the widget and fade away when dismissed.
