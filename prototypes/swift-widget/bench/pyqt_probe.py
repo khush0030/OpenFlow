@@ -24,11 +24,26 @@ T_IMPORT0 = time.time()
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, REPO)
 
+import openflow_logger  # noqa: E402
 import ui.flow_widget as fw  # noqa: E402
 import widget_channel  # noqa: E402
 
-assert not os.path.realpath(widget_channel.SOCKET_PATH).startswith(os.path.realpath(_LIVE)), \
-    "pyqt_probe: would talk to the live app's socket"
+
+def _assert_scratch_paths() -> None:
+    """Log files and socket must resolve under the scratch HOME; daemon.py is never imported
+    (it mirrors print() into the log at import time)."""
+    scratch = os.path.realpath(os.path.expanduser("~"))
+    live = os.path.realpath(_LIVE)
+    for path in (openflow_logger._LOG_DIR, openflow_logger._MAIN_LOG, openflow_logger._ERROR_LOG,
+                 widget_channel.SOCKET_PATH):
+        real = os.path.realpath(str(path))
+        if not real.startswith(scratch + os.sep) or real.startswith(live):
+            sys.exit(f"pyqt_probe: {real} is outside the scratch HOME {scratch}")
+    if "daemon" in sys.modules:
+        sys.exit("pyqt_probe: daemon.py was imported")
+
+
+_assert_scratch_paths()
 
 _first = False
 _stamps: list[float] = []
@@ -67,4 +82,5 @@ if __name__ == "__main__":
     print(f"IMPORTED {time.time()} import_s={time.time() - T_IMPORT0:.3f}", flush=True)
     code = fw.main()
     _report()
+    _assert_scratch_paths()
     sys.exit(code)

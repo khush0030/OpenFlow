@@ -32,6 +32,11 @@ following and the notch, hands-free, live text, the tone chip.
 on a scratch socket under a scratch `HOME` (`/tmp/ofb`), then spawns the
 widget under test. Nothing touches `~/.openflow` or the live app. Both
 targets refuse to start against the live socket.
+The bench sets `HOME` before importing any app module. It then asserts that
+the log files and the socket resolve under the scratch dir, and that
+`daemon.py` was never imported (`daemon.py` mirrors `print()` into the log
+as soon as it is imported). It checks again on exit. `bench.py … selfcheck`
+runs only these checks.
 
 **No window is ever shown:**
 - PyQt runs on Qt's `offscreen` platform (`QT_QPA_PLATFORM=offscreen`; the

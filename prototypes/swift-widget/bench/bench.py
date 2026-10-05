@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import os
+import pwd
 import random
 import re
 import subprocess
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--home", required=True)
     ap.add_argument("--target", required=True, choices=["pyqt", "swift", "swift60"])
     sub = ap.add_subparsers(dest="mode", required=True)
+    sub.add_parser("selfcheck", help="verify every app path resolves under --home; spawns nothing")
     s = sub.add_parser("startup")
     s.add_argument("--runs", type=int, default=5)
     f = sub.add_parser("full")
@@ -48,16 +50,42 @@ def parse_args() -> argparse.Namespace:
 
 
 ARGS = parse_args()
-REAL_HOME = os.path.expanduser("~")
-assert os.path.realpath(ARGS.home) != os.path.realpath(REAL_HOME), "use a scratch HOME"
-os.environ["HOME"] = ARGS.home  # before importing app modules: their paths derive from HOME
+# The real home comes from the password database, not $HOME, so a caller's
+# exported HOME can't hide it.
+REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir
+LIVE_DIR = os.path.realpath(os.path.join(REAL_HOME, ".openflow"))
+SCRATCH = os.path.realpath(ARGS.home)
+assert SCRATCH != os.path.realpath(REAL_HOME) and not SCRATCH.startswith(LIVE_DIR), "use a scratch HOME"
+# Before ANY app import: openflow_logger, widget_channel etc. resolve
+# ~/.openflow at import time. Children inherit this HOME too.
+os.environ["HOME"] = ARGS.home
 os.makedirs(os.path.join(ARGS.home, ".openflow"), exist_ok=True)
 sys.path.insert(0, REPO)
 
+import openflow_logger  # noqa: E402
+import widget_channel  # noqa: E402
 from widget_channel import WidgetServer  # noqa: E402
 
+
+def assert_scratch_paths() -> None:
+    """Every path the bench (and its children) can write must be under --home.
+
+    daemon.py must never be imported here: it installs a print() mirror into
+    the log at import time (that is what wrote a "--- daemon start ---"
+    header into the live log on 2026-10-03, from another agent's `python -c
+    "import daemon"`).
+    """
+    for name, path in (("log dir", openflow_logger._LOG_DIR), ("main log", openflow_logger._MAIN_LOG),
+                       ("error log", openflow_logger._ERROR_LOG), ("widget socket", widget_channel.SOCKET_PATH)):
+        real = os.path.realpath(str(path))
+        assert real.startswith(SCRATCH + os.sep), f"{name} {real} is not under the scratch HOME {SCRATCH}"
+        assert not real.startswith(LIVE_DIR), f"{name} {real} is in the live ~/.openflow"
+    assert "daemon" not in sys.modules, "the bench must not import daemon.py"
+
+
+assert_scratch_paths()
 SOCK = os.path.join(ARGS.home, ".openflow", "widget.sock")
-assert not SOCK.startswith(os.path.join(REAL_HOME, ".openflow"))
+assert os.path.realpath(os.path.dirname(SOCK)).startswith(SCRATCH)
 
 
 def command(target: str) -> list[str]:
@@ -296,4 +324,11 @@ def full() -> None:
 
 
 if __name__ == "__main__":
-    startup() if ARGS.mode == "startup" else full()
+    if ARGS.mode == "selfcheck":
+        print(f"ok: log {openflow_logger._MAIN_LOG}, socket {widget_channel.SOCKET_PATH}, "
+              f"daemon imported: {'daemon' in sys.modules}")
+    elif ARGS.mode == "startup":
+        startup()
+    else:
+        full()
+    assert_scratch_paths()
