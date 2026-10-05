@@ -1,0 +1,179 @@
+"""Footprint guards (spec 2026-10-05-footprint): what the always-on daemon
+loads at import, and that the lighter replacements behave identically."""
+from __future__ import annotations
+
+import io
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+def _modules_after(code: str, tmp_path) -> set[str]:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONSTARTUP"}
+    env.update(HOME=str(home), QT_QPA_PLATFORM="offscreen")
+    r = subprocess.run(
+        [sys.executable, "-c", code + "\nimport sys, json; print(json.dumps(sorted(sys.modules)))"],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    return set(json.loads(r.stdout.strip().splitlines()[-1]))
+
+
+@pytest.fixture(scope="module")
+def daemon_modules(tmp_path_factory) -> set[str]:
+    return _modules_after("import daemon", tmp_path_factory.mktemp("imp"))
+
+
+def test_daemon_does_not_load_scipy(daemon_modules):
+    # scipy.io.wavfile pulled in scipy.sparse, scipy._lib and numpy.testing
+    # (~16 MB resident) to write a 44-byte WAV header.
+    assert not {m for m in daemon_modules if m == "scipy" or m.startswith("scipy.")}
+
+
+def test_daemon_does_not_load_pil(daemon_modules):
+    # PIL only draws the tray icon when the bundled PNG is missing.
+    assert "PIL" not in daemon_modules
+
+
+# -- wavio: byte-for-byte what scipy.io.wavfile wrote -------------------------
+
+def _scipy_bytes(sr: int, pcm: np.ndarray) -> bytes:
+    wavfile = pytest.importorskip("scipy.io.wavfile")
+    buf = io.BytesIO()
+    wavfile.write(buf, sr, pcm)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("n", [0, 1, 1601, 16000 * 3])
+def test_wav_bytes_match_scipy(n):
+    import wavio
+    rng = np.random.default_rng(n)
+    pcm = rng.integers(-32768, 32767, n).astype(np.int16)
+    buf = io.BytesIO()
+    wavio.write_pcm16(buf, 16000, pcm)
+    assert buf.getvalue() == _scipy_bytes(16000, pcm)
+
+
+def test_audio_to_wav_bytes_matches_scipy():
+    from transcribe import audio_to_wav_bytes
+    audio = (0.3 * np.sin(np.linspace(0, 200, 12345))).astype(np.float32)
+    audio[5] = 1.7   # clipped
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+    assert audio_to_wav_bytes(audio, 16000) == _scipy_bytes(16000, pcm)
+
+
+def test_take_store_round_trip_and_reads_scipy_files(tmp_path):
+    from takes import TakeStore
+    store = TakeStore(tmp_path)
+    audio = (0.25 * np.sin(np.linspace(0, 50, 4000))).astype(np.float32)
+    path = store.save(audio, 16000)
+    got, sr = TakeStore.load(path)
+    assert sr == 16000 and got.dtype == np.float32
+    assert np.allclose(got, audio, atol=1 / 32767)
+    # A take saved by an older build (scipy) loads the same way.
+    old = tmp_path / "old.wav"
+    old.write_bytes(_scipy_bytes(16000, (audio * 32767).astype(np.int16)))
+    got2, sr2 = TakeStore.load(old)
+    assert sr2 == 16000 and np.array_equal(got2, got)
+
+
+def test_save_wav(tmp_path):
+    from audio import save_wav
+    from takes import TakeStore
+    audio = np.linspace(-1, 1, 800, dtype=np.float32)
+    save_wav(str(tmp_path / "a.wav"), audio, 8000)
+    got, sr = TakeStore.load(tmp_path / "a.wav")
+    assert sr == 8000 and np.allclose(got, audio, atol=1 / 32767)
+
+
+# -- bundle: modules the app never uses stay out of the build ------------------
+
+# httpx imports its optional CLI (rich, click, pygments: ~7 MB resident) only
+# when they are installed; scipy is gone (wavio). openflow.spec excludes them,
+# so the bundled processes never load them.
+BUNDLE_EXCLUDES = ("scipy", "rich", "click", "pygments")
+
+
+def test_spec_excludes_unused_modules():
+    spec = (REPO / "openflow.spec").read_text()
+    excludes = spec.split("excludes=[", 1)[1].split("]", 1)[0]
+    for name in BUNDLE_EXCLUDES:
+        assert f'"{name}"' in excludes, name
+    assert 'collect_submodules("scipy' not in spec
+
+
+def test_app_runs_without_the_excluded_modules(tmp_path):
+    block = "; ".join(f"sys.modules[{m!r}] = None" for m in BUNDLE_EXCLUDES)
+    mods = _modules_after(
+        f"import sys; {block}\n"
+        "import daemon, httpx, takes, transcribe\n"
+        "import ui.flow_widget, ui.edit_overlay, ui.first_run, ui.hub.app, cli, doctor\n"
+        "import importlib, pkgutil, ui.hub.pages as P\n"
+        "[importlib.import_module('ui.hub.pages.' + m.name) for m in pkgutil.iter_modules(P.__path__)]\n"
+        "httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))).get('http://x/')\n",
+        tmp_path)
+    assert "daemon" in mods and "ui.hub.app" in mods
+
+
+# -- widget socket: reads block, sends still time out --------------------------
+
+def test_widget_socket_reader_sleeps_until_data(tmp_path):
+    """The reader used to wake every second (the socket's 1 s timeout was for
+    sendall); now recv blocks and the send timeout lives in SO_SNDTIMEO."""
+    import socket
+    import struct
+    import tempfile
+    import time
+
+    from widget_channel import SEND_TIMEOUT, WidgetClient, WidgetServer
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp", prefix="ofw"), "w.sock")
+    srv = WidgetServer(path)
+    srv.start()
+    cli = WidgetClient(path)
+    try:
+        assert cli.connect()
+        end = time.monotonic() + 2
+        while not srv.connected and time.monotonic() < end:
+            time.sleep(0.01)
+        for conn in (srv._conn, cli._conn):
+            assert conn.sock.gettimeout() is None          # recv blocks
+            raw = conn.sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, 16)
+            sec, usec = struct.unpack("ll", raw)
+            assert sec + usec / 1e6 == SEND_TIMEOUT
+    finally:
+        cli.close()
+        srv.stop()
+
+
+# -- many takes: nothing accumulates ------------------------------------------
+
+def test_memory_flat_over_many_fake_takes(tmp_path):
+    """The real daemon pipeline (fake mic, mocked network) and the real
+    widget process, offscreen: after warm-up, 40 more takes add no Python
+    objects to the daemon and no memory to either process (tolerance for
+    allocator noise)."""
+    import shutil
+    import tempfile
+    out = tmp_path / "bench.json"
+    home = tempfile.mkdtemp(dir="/tmp", prefix="ofb")   # short: Unix socket paths
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "footprint_bench.py"),
+         "--idle", "1", "--settle", "0.5", "--warmup", "5", "--takes", "40",
+         "--speed", "50", "--home", home, "--json", str(out)],
+        cwd=REPO, capture_output=True, text=True, timeout=300)
+    shutil.rmtree(home, ignore_errors=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    res = json.loads(out.read_text())
+    assert res["takes_ok"] == 40
+    g = res["growth"]
+    assert g["daemon_objects"] < 200, g
+    assert g["daemon_mb"] < 3.0, g
+    assert g["widget_mb"] < 3.0, g

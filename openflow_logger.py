@@ -32,11 +32,22 @@ _DATEFMT = "%Y-%m-%d %H:%M:%S"
 _configured = False
 
 
+class _LazyRotatingFileHandler(RotatingFileHandler):
+    """Opens (and creates the log dir) on the first record, not at set-up:
+    importing a module that calls get_logger() must not touch ~/.openflow."""
+
+    def __init__(self, filename, **kwargs) -> None:
+        super().__init__(filename, delay=True, **kwargs)
+
+    def _open(self):
+        Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
+        return super()._open()
+
+
 def _ensure_configured() -> None:
     global _configured
     if _configured:
         return
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger("openflow")
     root.setLevel(logging.DEBUG)
@@ -48,13 +59,13 @@ def _ensure_configured() -> None:
     fmt = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
 
     # Main rotating handler — all levels
-    main_h = RotatingFileHandler(_MAIN_LOG, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    main_h = _LazyRotatingFileHandler(_MAIN_LOG, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
     main_h.setLevel(logging.DEBUG)
     main_h.setFormatter(fmt)
     root.addHandler(main_h)
 
     # Error-only handler — easy triage
-    err_h = RotatingFileHandler(_ERROR_LOG, maxBytes=1 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    err_h = _LazyRotatingFileHandler(_ERROR_LOG, maxBytes=1 * 1024 * 1024, backupCount=5, encoding="utf-8")
     err_h.setLevel(logging.ERROR)
     err_h.setFormatter(fmt)
     root.addHandler(err_h)

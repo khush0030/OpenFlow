@@ -64,7 +64,8 @@ def _install_file_logger() -> None:
     builtins.print = print_and_log
 
 
-_install_file_logger()
+# Installed by main() (the daemon's start-up), never at import: a one-off
+# `import daemon` (tests, dev tools) must not write to ~/.openflow.
 
 import json
 import subprocess
@@ -106,6 +107,7 @@ from tray import _spawn_ui_subprocess as spawn_ui
 from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
 from flow_state import OFFLINE as FLOW_OFFLINE, SAVED as FLOW_SAVED
 from flow_state import PROCESSING as FLOW_PROCESSING
+from flow_state import IDLE as FLOW_IDLE, RECORDING as FLOW_RECORDING, SILENT as FLOW_SILENT
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
@@ -133,6 +135,16 @@ HOLD_CUE_DELAY_S = 0.2
 # A tap's mic stays open this much past the double-tap window, so a second
 # press whose handler runs a little late still reuses it (audio.cancel).
 TAP_LINGER_SLACK_S = 0.15
+
+
+# Widget pump cadence (spec 2026-10-05-footprint). The mic level only
+# matters while recording; Undo / Retry / card timers need a few ticks a
+# second; at rest the pump only checks config.toml (every CFG_CHECK_S) and
+# the widget watchdog, and any widget state change wakes it at once.
+PUMP_LEVEL_S = 0.05
+PUMP_TICK_S = 0.25
+PUMP_IDLE_S = 1.0
+CFG_CHECK_S = 2.0
 
 
 def _after(delay_s: float, fn) -> None:
@@ -407,6 +419,7 @@ class Daemon:
         self._edit_take = None      # command_mode.Take: the edit hotkey's listening take
         self._tray: TrayApp | None = None
         self._stop_evt = threading.Event()
+        self._pump_wake = threading.Event()   # widget state changed: pump now
         self._cancel_pending = False
         self._build_flow_widget()
         # Last non-OpenFlow frontmost app — paste target (Wispr-style).
@@ -454,6 +467,7 @@ class Daemon:
 
     def shutdown(self) -> None:
         self._stop_evt.set()
+        self._wake_pump()
 
     def close_ui(self) -> None:
         """Quitting from the Dock / ⌘Q ends the process inside AppKit, so the
@@ -945,6 +959,7 @@ class Daemon:
                                             hands_free=hands_free)
             self._last_flow_state = new
             self._last_hands_free = bool(msg.get("hands_free"))
+            self._wake_pump()     # its cadence follows the state
             if cue == "start" and getattr(getattr(self, "_hold", None), "holding", False):
                 _after(HOLD_CUE_DELAY_S, self._hold_cue)
             elif cue:
@@ -1200,6 +1215,30 @@ class Daemon:
         print(f"[daemon] WARNING: {msg}", flush=True)
         _log.warning(msg)
 
+    def _wake_pump(self) -> None:
+        wake = getattr(self, "_pump_wake", None)
+        if wake is not None:
+            wake.set()
+
+    def _pump_sleep(self, last_cfg_check: float) -> None:
+        """Sleep until the pump has work: see PUMP_*_S. Daemons built without
+        __init__ (tests) have no wake event and sleep on the stop event."""
+        flow = getattr(self, "_flow", None)
+        state = getattr(flow, "state", FLOW_IDLE)
+        if self.recorder.is_recording or state in (FLOW_RECORDING, FLOW_SILENT):
+            timeout = PUMP_LEVEL_S
+        elif state != FLOW_IDLE:
+            timeout = PUMP_TICK_S
+        else:
+            until_cfg = last_cfg_check + CFG_CHECK_S - time.monotonic()
+            timeout = min(PUMP_IDLE_S, max(PUMP_LEVEL_S, until_cfg))
+        wake = getattr(self, "_pump_wake", None)
+        if wake is None:
+            self._stop_evt.wait(timeout)
+            return
+        wake.wait(timeout)
+        wake.clear()
+
     def _widget_pump(self) -> None:
         """Streams mic level, runs the Undo/Retry timers, does click-to-paste
         for the card, and keeps the widget process alive."""
@@ -1228,7 +1267,7 @@ class Daemon:
                         print("[daemon] text box focused — pasting card text", flush=True)
                         paste(text)
                         self._flow.dismiss()  # no-op if a new recording replaced the card
-                if now - last_cfg_check >= 2.0:
+                if now - last_cfg_check >= CFG_CHECK_S:
                     # Settings window writes config.toml from another process.
                     last_cfg_check = now
                     mtime = _config_mtime()
@@ -1240,7 +1279,11 @@ class Daemon:
                 watchdog.poll(self._widget.connected)
             except Exception as e:
                 print(f"[daemon] widget pump error: {e}", flush=True)
-            self._stop_evt.wait(0.05)
+            try:
+                self._pump_sleep(last_cfg_check)
+            except Exception as e:
+                print(f"[daemon] widget pump error: {e}", flush=True)
+                self._stop_evt.wait(PUMP_LEVEL_S)
 
     def on_record_stop(self) -> None:
         # Under the flow lock, like every widget action: a key-up and a ✕ /
@@ -2149,5 +2192,6 @@ class Daemon:
 
 
 def main() -> None:
+    _install_file_logger()
     _maybe_run_onboarding_blocking()
     Daemon().run()

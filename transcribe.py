@@ -7,7 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.io import wavfile
+
+import wavio
 
 import groq_stt
 import stream_stt
@@ -70,7 +71,7 @@ def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
     pcm = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
     pcm_i16 = (pcm * 32767).astype(np.int16)
     buf = io.BytesIO()
-    wavfile.write(buf, sample_rate, pcm_i16)
+    wavio.write_pcm16(buf, sample_rate, pcm_i16)
     return buf.getvalue()
 
 
