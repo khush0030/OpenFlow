@@ -27,15 +27,14 @@ def write_pcm16(f: BinaryIO, sample_rate: int, pcm: np.ndarray) -> None:
 
 def read(path) -> tuple[int, np.ndarray]:
     """(sample rate, samples) like scipy.io.wavfile.read: int16 for 16-bit
-    PCM (mono 1-D, else frames × channels)."""
+    PCM (mono 1-D, else frames × channels). OpenFlow only ever writes
+    16-bit PCM; anything else raises ValueError."""
     try:
         with wave.open(str(path), "rb") as w:
             if w.getsampwidth() != 2:
-                raise wave.Error("not 16-bit PCM")
+                raise ValueError(f"{path}: not a 16-bit PCM WAV")
             sr, ch = w.getframerate(), w.getnchannels()
             data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.int16)
-    except wave.Error:
-        # Some other WAV flavour (float, 24-bit): only scipy reads those.
-        from scipy.io import wavfile
-        return wavfile.read(str(path))
+    except wave.Error as e:
+        raise ValueError(f"{path}: {e}") from e
     return sr, (data if ch == 1 else data.reshape(-1, ch))

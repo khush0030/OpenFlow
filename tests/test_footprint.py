@@ -92,3 +92,32 @@ def test_save_wav(tmp_path):
     save_wav(str(tmp_path / "a.wav"), audio, 8000)
     got, sr = TakeStore.load(tmp_path / "a.wav")
     assert sr == 8000 and np.allclose(got, audio, atol=1 / 32767)
+
+
+# -- bundle: modules the app never uses stay out of the build ------------------
+
+# httpx imports its optional CLI (rich, click, pygments: ~7 MB resident) only
+# when they are installed; scipy is gone (wavio). openflow.spec excludes them,
+# so the bundled processes never load them.
+BUNDLE_EXCLUDES = ("scipy", "rich", "click", "pygments")
+
+
+def test_spec_excludes_unused_modules():
+    spec = (REPO / "openflow.spec").read_text()
+    excludes = spec.split("excludes=[", 1)[1].split("]", 1)[0]
+    for name in BUNDLE_EXCLUDES:
+        assert f'"{name}"' in excludes, name
+    assert 'collect_submodules("scipy' not in spec
+
+
+def test_app_runs_without_the_excluded_modules(tmp_path):
+    block = "; ".join(f"sys.modules[{m!r}] = None" for m in BUNDLE_EXCLUDES)
+    mods = _modules_after(
+        f"import sys; {block}\n"
+        "import daemon, httpx, takes, transcribe\n"
+        "import ui.flow_widget, ui.edit_overlay, ui.first_run, ui.hub.app, cli, doctor\n"
+        "import importlib, pkgutil, ui.hub.pages as P\n"
+        "[importlib.import_module('ui.hub.pages.' + m.name) for m in pkgutil.iter_modules(P.__path__)]\n"
+        "httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))).get('http://x/')\n",
+        tmp_path)
+    assert "daemon" in mods and "ui.hub.app" in mods
