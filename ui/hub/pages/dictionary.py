@@ -147,9 +147,9 @@ class Segmented(QFrame):
         super().__init__()
         self.setObjectName("seg")
         self.setStyleSheet(
-            f"QFrame#seg{{background:{C.SEG_TRACK};border-radius:9px;}}"
+            f"QFrame#seg{{background:{S.SEG_TRACK};border-radius:9px;}}"
             f"QPushButton{{border:none;border-radius:7px;padding:0 12px;background:transparent;color:{S.MUTED};}}"
-            f"QPushButton:checked{{background:{S.PAPER};color:{S.INK};}}")
+            f"QPushButton:checked{{background:{S.SEG_ON};color:{S.INK};}}")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(3, 3, 3, 3)
         lay.setSpacing(2)
@@ -184,7 +184,7 @@ class Segmented(QFrame):
                 sh = QGraphicsDropShadowEffect(b)
                 sh.setBlurRadius(4)
                 sh.setOffset(0, 1)
-                sh.setColor(QColor(26, 24, 20, 40))
+                sh.setColor(QColor(S.SHADOW))
                 b.setGraphicsEffect(sh)
             else:
                 b.setGraphicsEffect(None)
@@ -205,11 +205,11 @@ class Segmented(QFrame):
         self.buttons[v].click()
 
 
-SCROLLBAR_QSS = (
-    "QScrollBar:vertical{background:transparent;width:8px;margin:4px 0 4px 0;}"
-    f"QScrollBar::handle:vertical{{background:{S.DISABLED};border-radius:3px;min-height:30px;}}"
-    "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-    "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
+def scrollbar_qss() -> str:
+    return ("QScrollBar:vertical{background:transparent;width:8px;margin:4px 0 4px 0;}"
+            f"QScrollBar::handle:vertical{{background:{S.SCROLL_HANDLE_LIST};border-radius:3px;min-height:30px;}}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+            "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
 
 
 def transparent_scroll() -> tuple[QScrollArea, QWidget]:
@@ -223,13 +223,14 @@ def transparent_scroll() -> tuple[QScrollArea, QWidget]:
     content = QWidget()
     content.setObjectName("hubcontent")
     scroll.setStyleSheet("QScrollArea#hubscroll,QWidget#hubviewport,QWidget#hubcontent"
-                         "{background:transparent;border:none;}" + SCROLLBAR_QSS)
+                         "{background:transparent;border:none;}" + scrollbar_qss())
     scroll.setWidget(content)
     return scroll, content
 
 
-def search_icon(color: str = S.MUTED, size: int = 15) -> QIcon:
+def search_icon(color: str | None = None, size: int = 15) -> QIcon:
     """The mockup's magnifier (circle r6 at 11,11 + handle), drawn at 2x."""
+    color = color or S.MUTED
     pm = QPixmap(size * 2, size * 2)
     pm.fill(Qt.GlobalColor.transparent)
     pm.setDevicePixelRatio(2)

@@ -26,6 +26,9 @@ class HubContext:
     navigate: Callable[..., None] = lambda page, **kw: None
     # The window sets this: re-applies Settings › Show in Dock while open.
     apply_dock: Callable[[], None] = lambda: None
+    # The window sets this: re-checks the theme after Settings › Appearance
+    # changes (deferred; the window and its pages are rebuilt).
+    apply_theme: Callable[[], None] = lambda: None
 
     def call(self, cmd: str, timeout: float = 5.0, **args: Any) -> dict:
         """Daemon control call. Raises DaemonNotRunning / ControlError;

@@ -52,7 +52,8 @@ def _big(text: str = "") -> QLabel:
     return l
 
 
-def _text(size: float = S.T_BODY, color: str = S.INK, rich: bool = True) -> QLabel:
+def _text(size: float = S.T_BODY, color: str | None = None, rich: bool = True) -> QLabel:
+    color = color or S.INK
     l = QLabel()
     l.setTextFormat(Qt.TextFormat.RichText if rich else Qt.TextFormat.PlainText)
     l.setFont(S.sans(size))
@@ -107,7 +108,7 @@ def _fill_bars(grid: QGridLayout, rows: Sequence[tuple[str, float, str, bool]],
         name.setStyleSheet(f"color:{S.INK};background:transparent;")
         grid.addWidget(name, i, 0)
         grid.addWidget(C.Bar(pct, strong=strong,
-                             color=C.BAR_UNKNOWN if label in dim else None), i, 1)
+                             color=S.BAR_UNKNOWN if label in dim else None), i, 1)
         val = QLabel(value)
         val.setFont(S.mono(11, 400))
         val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -201,6 +202,13 @@ class InsightsPage(Page):
     def show_tab(self, i: int) -> None:
         self.tabs.set_index(i)
         self._tab_changed(i)
+
+    def view_state(self) -> dict:
+        return {"tab": self.tab}
+
+    def restore_view(self, state: dict) -> None:
+        if state.get("tab"):
+            self.show_tab(int(state["tab"]))
 
     def _tab_changed(self, i: int) -> None:
         try:
@@ -804,7 +812,7 @@ class InsightsPage(Page):
         _clear(self.rel_stage_grid)
         self.rel_stage_rows = []
         for i, s in enumerate(stages):
-            sw = V.Swatch(V.STACK_COLORS[i % len(V.STACK_COLORS)])
+            sw = V.Swatch(S.STACK[i % len(S.STACK)])
             self.rel_stage_grid.addWidget(sw, i, 0, Qt.AlignmentFlag.AlignVCenter)
             name = V.ElideLabel(s.label)
             name.setFont(S.sans(S.T_UI))

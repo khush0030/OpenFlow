@@ -31,3 +31,11 @@ class Page(QWidget):
 
     def shown(self, **kwargs) -> None:
         """Called on navigation, with any arguments (e.g. query="…")."""
+
+    def view_state(self) -> dict:
+        """Where the user is on this page (tab, section), so a theme switch,
+        which rebuilds every page, can put them back. See restore_view()."""
+        return {}
+
+    def restore_view(self, state: dict) -> None:
+        """Undo view_state() on a freshly built page (after shown())."""

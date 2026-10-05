@@ -26,8 +26,9 @@ _ICONS = {
 }
 
 
-def icon_pixmap(name: str, size: int = 18, color: str = S.INK, sw: float = 1.7,
+def icon_pixmap(name: str, size: int = 18, color: str | None = None, sw: float = 1.7,
                 scale: float = 2.0) -> QPixmap:
+    color = color or S.INK
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" '
            f'fill="none" stroke="{color}" stroke-width="{sw}" stroke-linecap="round" '
            f'stroke-linejoin="round">{_ICONS[name]}</svg>')
@@ -43,7 +44,7 @@ def icon_pixmap(name: str, size: int = 18, color: str = S.INK, sw: float = 1.7,
     return pm
 
 
-def icon(name: str, size: int = 18, color: str = S.INK, sw: float = 1.7) -> QIcon:
+def icon(name: str, size: int = 18, color: str | None = None, sw: float = 1.7) -> QIcon:
     return QIcon(icon_pixmap(name, size, color, sw))
 
 
@@ -74,20 +75,13 @@ def first_name() -> str | None:
     return parts[0] if parts else None
 
 
-SCROLLBAR = ("QScrollBar:vertical{background:transparent;width:10px;margin:2px 2px 2px 0;}"
-             "QScrollBar::handle:vertical{background:#D6CDBF;border-radius:4px;min-height:30px;}"
-             "QScrollBar::handle:vertical:hover{background:#BFB4A5;}"
-             "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-             "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}")
-
-
 def scroll_page(content: QWidget) -> QScrollArea:
     """Vertical-only scroll area for a page body on the Paper panel."""
     sa = QScrollArea()
     sa.setWidgetResizable(True)
     sa.setFrameShape(QFrame.Shape.NoFrame)
     sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    sa.setStyleSheet(f"QScrollArea{{background:{S.PAPER};border:none;}}" + SCROLLBAR)
+    sa.setStyleSheet(f"QScrollArea{{background:{S.PAPER};border:none;}}" + S.scrollbar_qss())
     sa.viewport().setObjectName("pageviewport")
     sa.viewport().setStyleSheet(f"QWidget#pageviewport{{background:{S.PAPER};}}")
     content.setObjectName("pagebody")
@@ -122,9 +116,6 @@ def _font(family: str, size: float, weight: int = 400) -> QFont:
 
 
 # ── gauge ────────────────────────────────────────────────────────────────
-GAUGE_TRACK = "#E7DFD3"
-
-
 class Gauge(QWidget):
     """Half-ring gauge (the mockup's 120×68 SVG drawn at 180×104)."""
 
@@ -145,7 +136,7 @@ class Gauge(QWidget):
         r = 50 * k
         cx, cy = 60 * k, 60 * k
         rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
-        pen = QPen(QColor(GAUGE_TRACK), sw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        pen = QPen(QColor(S.GAUGE_TRACK), sw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.drawArc(rect, 180 * 16, -180 * 16)
         if self.fraction > 0:
@@ -156,11 +147,6 @@ class Gauge(QWidget):
 
 
 # ── horizontal bars ──────────────────────────────────────────────────────
-BAR_TRACK = "#EDE7DD"
-BAR_SOFT = "#F2A99E"
-BAR_UNKNOWN = "#D6CDBF"          # "Not recorded" rows: present, not highlighted
-
-
 class Bar(QWidget):
     """One rounded bar (22 high): a track with a fill of `pct` percent."""
 
@@ -169,7 +155,7 @@ class Bar(QWidget):
         super().__init__(parent)
         self.pct = pct
         self.strong = strong
-        self.color = color or (S.ACCENT if strong else BAR_SOFT)
+        self.color = color or (S.ACCENT if strong else S.BAR_SOFT)
         self.setFixedHeight(22)
         self.setMinimumWidth(60)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -179,7 +165,7 @@ class Bar(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
         r = QRectF(self.rect())
-        p.setBrush(QColor(BAR_TRACK))
+        p.setBrush(QColor(S.BAR_TRACK))
         p.drawRoundedRect(r, 6, 6)
         w = r.width() * max(self.pct, 3) / 100.0
         p.setBrush(QColor(self.color))
@@ -207,7 +193,7 @@ class SplitBar(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(r, 7, 7)
         p.setClipPath(clip)
-        p.fillRect(r, QColor(S.ACCENT_SOFT if self.label else "#EDE7DD"))
+        p.fillRect(r, QColor(S.ACCENT_SOFT if self.label else S.BAR_TRACK))
         if not self.label:
             p.end()
             return
@@ -215,7 +201,7 @@ class SplitBar(QWidget):
         p.fillRect(QRectF(0, 0, w, r.height()), QColor(S.ACCENT))
         p.setFont(_font(S.SANS, 12.5))
         fm = QFontMetricsF(p.font())
-        p.setPen(QColor(S.PAPER))
+        p.setPen(QColor(S.ON_ACCENT))
         p.drawText(QRectF(10, 0, max(0.0, w - 12), r.height()),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
                    fm.elidedText(f"{self.label} · {self.pct}%", Qt.TextElideMode.ElideRight, max(0.0, w - 14)))
@@ -227,7 +213,6 @@ class SplitBar(QWidget):
 
 
 # ── heatmap ──────────────────────────────────────────────────────────────
-HEAT_COLORS = ("#ECE6DC", "#F8D5CE", "#F09484", "#E5402F", "#A82A1A")
 WEEKS = 22
 CELL, GAP, LABEL_W = 13, 4, 34
 
@@ -325,7 +310,7 @@ class Heatmap(QWidget):
             r = self.cell_rect(day)
             if r is None:
                 continue
-            p.setBrush(QColor(HEAT_COLORS[heat_level(self.per_day.get(day, 0))]))
+            p.setBrush(QColor(S.HEAT[heat_level(self.per_day.get(day, 0))]))
             p.drawRoundedRect(r, 3, 3)
             if day in self.streak:
                 ring.append(r)
@@ -342,7 +327,7 @@ class Heatmap(QWidget):
         p.drawText(QRectF(x, y, 60, 14), int(Qt.AlignmentFlag.AlignVCenter), "More")
         x += fm.horizontalAdvance("More") + 6
         p.setPen(Qt.PenStyle.NoPen)
-        for c in reversed(HEAT_COLORS[1:]):
+        for c in reversed(S.HEAT[1:]):
             p.setBrush(QColor(c))
             p.drawRoundedRect(QRectF(x, y + 1, 12, 12), 3, 3)
             x += 18
