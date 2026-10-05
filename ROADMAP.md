@@ -5,7 +5,7 @@ Hinglish: faster than typing, trustworthy enough that you never check its
 work, and personal enough that it writes like you. Later: a live sales-call
 copilot built on the same engine.
 
-Status legend: ✅ done · 🟡 in progress · ⬜ not started · Last reviewed 2026-10-02
+Status legend: ✅ done · 🟡 in progress · ⬜ not started · Last reviewed 2026-10-05
 
 ## Principles (apply to every phase)
 
@@ -118,29 +118,35 @@ provider misbehaves.
 Done when: two weeks of daily use with no lost dictation, and a forced
 Sarvam outage still produces text.
 
-### Phase 5: Widget 2.0 (feel) ⬜
+### Phase 5: Widget, hub and footprint ✅ shipped 2026-10-05
 
-Goal: the widget feels alive and every useful action is one hover away.
+Goal: the widget and window feel finished, and the app stays light on the laptop.
 
-- **Live text while speaking**, from the streaming partials already received.
-- **Tone / language chip** on the widget: click to switch, shows what F6 did.
-- **Hover actions on "done"**: copy, redo in another tone, undo.
-- **Command mode in one step**: the edit hotkey starts listening immediately.
-- Notch-aware placement; follows the active screen.
-- **Dark (Ink) hub** following the widget's Paper / Ink / Auto setting; the
-  tokens are already in place.
-- Decide on a native SwiftUI `NSPanel` widget (measure memory, start time and
-  animation smoothness) vs. staying on PyQt.
+- ✅ **Command mode in one step**: the edit hotkey starts listening immediately (#9).
+- ✅ **Placement**: notch-aware; follows the active screen (#9), now on focus
+  events instead of a poll (#11). Spec: `docs/superpowers/specs/2026-10-02-widget-placement.md`.
+- ✅ **Dark (Ink) hub** following the widget's Paper / Ink / Match system
+  setting, switching live (#11). Spec: `docs/superpowers/specs/2026-10-02-dark-hub.md`.
+- ✅ **Footprint**: idle CPU ~8× lower, no memory growth per take, smaller
+  bundle (171 → 132 MB) (#11). Spec: `docs/superpowers/specs/2026-10-05-footprint.md`.
+- ✅ **Native widget decision**: stay on PyQt; revisit only with a Phase 7
+  native shell. Eval: `docs/superpowers/specs/2026-10-02-swiftui-widget-eval.md`.
+- ✖ **Widget 2.0** (live text while speaking, tone chip, hover actions on
+  "done"): built on `feat/widget-2`, not shipped by decision 2026-10-05.
 
-Done when: dictating, correcting and changing tone never need the hub open.
+Follow-ups: Insights › Reliability "Wait over time" labels overlap for the
+latest week; Tone & language rows stretch on very tall windows.
 
-### Phase 6: Sounds like you (intelligence) ⬜
+### Phase 6: Sounds like you (intelligence) 🟡
 
 Goal: output you would have typed yourself, and quality you can measure.
 
 - **Quality eval set.** About 100 of the user's real dictations (with consent)
   with expected outputs; score STT word errors and cleanup faithfulness per
   provider and prompt. Every prompt or model change runs against it.
+  ✅ Cleanup evals built (#11): `scripts/build_eval_set.py`,
+  `scripts/eval_cleanup.py`; baselines recorded for Sarvam and Groq. STT
+  word-error scoring still needs opt-in saved audio.
 - **Personal style.** Feed the voice profile (Insights › Your voice) and
   accepted edits into cleanup: vocabulary, punctuation habits, sign-offs.
 - **Voice commands** inside dictation: "scratch that", "make that a list",
@@ -190,7 +196,7 @@ the call, write the summary, next steps and a follow-up email.
 - **Constraints:** consent (two-party US states, EU, India DPDP): a reminder,
   local storage by default, retention controls. Open questions: which call
   apps, English vs Hinglish calls, which CRM, cost per call hour.
-- **Depends on:** Phase 4 failover, Phase 5 panel work, streaming STT.
+- **Depends on:** Phase 4 failover, streaming STT, a side panel (not built; Widget 2.0 was dropped).
 
 ---
 
@@ -202,6 +208,10 @@ the call, write the summary, next steps and a follow-up email.
 - 2026-10-02: OpenFlow is a Dock app while it runs; quitting it closes everything.
 - 2026-10-02: Sarvam stays the main cleanup model; Groq is a backup only.
 - 2026-10-02: one accent (widget red `#E5402F`) across widget and hub.
+- 2026-10-05: Groq backup cleanup model is `openai/gpt-oss-120b` (`llama-3.3-70b-versatile` was retired).
+- 2026-10-05: the widget stays on PyQt; a native SwiftUI widget is revisited only as part of a Phase 7 native shell.
+- 2026-10-05: Widget 2.0 (live text, tone chip, hover actions) is not shipping; `feat/widget-2` kept unmerged.
+- 2026-10-05: hub Ink text matches the widget's Ink text (`#FAF7F2`).
 
 ## Working agreement
 
