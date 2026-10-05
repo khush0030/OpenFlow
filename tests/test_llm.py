@@ -48,7 +48,7 @@ def test_auto_without_fast_keys_is_sarvam():
 def test_auto_prefers_groq_then_anthropic():
     p = llm.make_cleanup_provider(
         {}, find_key=keys(OPENFLOW_GROQ_API_KEY="g", OPENFLOW_ANTHROPIC_API_KEY="a"))
-    assert (p.name, p.model) == ("groq", "llama-3.3-70b-versatile")
+    assert (p.name, p.model) == ("groq", "openai/gpt-oss-120b")
     p = llm.make_cleanup_provider({}, find_key=keys(OPENFLOW_ANTHROPIC_API_KEY="a"))
     assert (p.name, p.model) == ("anthropic", "claude-haiku-4-5-20251001")
 
@@ -111,10 +111,57 @@ def test_groq_sends_openai_chat_and_reads_the_reply(http):
     assert str(req.url) == "https://api.groq.com/openai/v1/chat/completions"
     assert req.headers["authorization"] == "Bearer gk"
     body = json.loads(req.content)
-    assert body["model"] == "llama-3.3-70b-versatile"
+    assert body["model"] == "openai/gpt-oss-120b"
     assert body["messages"] == [{"role": "system", "content": "SYS"},
                                 {"role": "user", "content": "ok"}]
-    assert body["max_tokens"] == 64
+    assert body["max_tokens"] == 64 + llm.REASONING_HEADROOM_TOKENS
+    assert body["reasoning_effort"] == "low" and body["include_reasoning"] is False
+
+
+def test_gpt_oss_reply_never_includes_the_reasoning(http):
+    """Groq puts gpt-oss thinking in message.reasoning; only content is pasted."""
+    http["handler"] = lambda r: httpx.Response(200, json={"choices": [{
+        "finish_reason": "stop",
+        "message": {"role": "assistant", "content": "Send it today.",
+                    "reasoning": "The user wants punctuation. Let me think..."}}]})
+    p = llm.OpenAICompatChat("groq", "https://x.test", "openai/gpt-oss-120b", "k")
+    assert p.complete("s", "send it today", max_tokens=8) == "Send it today."
+
+
+def test_gpt_oss_reply_cut_off_by_the_token_limit_raises(http):
+    http["handler"] = lambda r: httpx.Response(200, json={"choices": [{
+        "finish_reason": "length", "message": {"content": "Send it"}}]})
+    p = llm.OpenAICompatChat("groq", "https://x.test", "openai/gpt-oss-120b", "k")
+    with pytest.raises(llm.LLMError, match="cut off"):
+        p.complete("s", "send it today", max_tokens=8)
+
+
+def test_non_reasoning_model_sends_no_reasoning_params(http):
+    http["handler"] = lambda r: httpx.Response(200, json={
+        "choices": [{"message": {"content": "Hi."}}]})
+    llm.OpenAICompatChat("groq", "https://x.test", "llama-x", "k").complete(
+        "s", "hi", max_tokens=8)
+    body = json.loads(http["requests"][0].content)
+    assert body["max_tokens"] == 8
+    assert "reasoning_effort" not in body and "include_reasoning" not in body
+
+
+def test_retired_model_404_fails_over_with_one_clear_log_line(http, monkeypatch, capsys):
+    """Groq retired llama-3.3-70b-versatile for this account: a 404 must name
+    provider + model and fall through to the next provider, not crash."""
+    http["handler"] = lambda r: httpx.Response(404, json={"error": {
+        "message": "The model `gone-model` does not exist or you do not have access to it.",
+        "type": "invalid_request_error", "code": "model_not_found"}})
+    groq = llm.OpenAICompatChat("groq", "https://x.test", "gone-model", "k")
+    nxt = Recorder("anthropic")
+    monkeypatch.setattr(llm, "fallback_providers", lambda cfg, exclude, find_key: [nxt])
+    chat = llm.FailoverChat(groq, {}, call=lambda fn, limit, name: fn())
+    llm.trace_start()
+    assert chat.complete("s", "hello", max_tokens=8) == "<anthropic>hello"
+    assert llm.trace_result() == "anthropic"
+    assert len(http["requests"]) == 1          # a 404 is not retried
+    lines = [l for l in capsys.readouterr().out.splitlines() if "not found" in l]
+    assert len(lines) == 1 and "groq" in lines[0] and "'gone-model'" in lines[0]
 
 
 def test_anthropic_sends_messages_api_and_joins_text_blocks(http):
