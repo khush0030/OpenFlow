@@ -64,7 +64,8 @@ def _install_file_logger() -> None:
     builtins.print = print_and_log
 
 
-_install_file_logger()
+# Installed by main() (the daemon's start-up), never at import: a one-off
+# `import daemon` (tests, dev tools) must not write to ~/.openflow.
 
 import json
 import subprocess
@@ -2149,5 +2150,6 @@ class Daemon:
 
 
 def main() -> None:
+    _install_file_logger()
     _maybe_run_onboarding_blocking()
     Daemon().run()
