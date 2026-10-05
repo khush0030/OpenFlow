@@ -129,6 +129,17 @@ def test_paper_keeps_todays_values():
         ("#FAF7F2", "#F2EEE5", "#F6F2EB", "#1A1814", "#8A7F73", "#E8E2D9")
 
 
+def test_ink_text_is_the_widgets_ink_text():
+    """User decision 2026-10-05: hub and widget Ink text match exactly, from
+    one source (ui/widget_theme.INK.text)."""
+    from ui.widget_theme import INK as WIDGET_INK
+    r, g, b, _a = WIDGET_INK.text
+    widget_text = f"#{r:02X}{g:02X}{b:02X}"
+    assert widget_text == "#FAF7F2"
+    for key in ("INK", "BANNER_TEXT", "TOGGLE_THUMB"):
+        assert S.INK_PALETTE[key].upper() == widget_text, key
+
+
 def test_one_accent_in_both_themes():
     assert S.PAPER_PALETTE["ACCENT"] == S.INK_PALETTE["ACCENT"] == "#E5402F"
 

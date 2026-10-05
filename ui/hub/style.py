@@ -13,6 +13,17 @@ from PyQt6.QtWidgets import (QBoxLayout, QFrame, QLabel, QLineEdit, QPushButton,
                              QVBoxLayout, QWidget)
 
 from ui.tokens import Color
+from ui.widget_theme import INK as _WIDGET_INK
+
+
+def _hex(rgba: tuple) -> str:
+    """'#RRGGBB' from a widget_theme (r, g, b, a) colour (alpha dropped)."""
+    r, g, b = rgba[:3]
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+# Ink text is the widget's Ink text, one source (user decision 2026-10-05).
+_INK_TEXT = _hex(_WIDGET_INK.text)
 
 # ── colours ───────────────────────────────────────────────────────────────
 # Two palettes with the same token names. Paper is the brand book's light
@@ -78,7 +89,7 @@ INK_PALETTE: dict[str, object] = {
     "ROW_ON": "#2F2A25",
     "ROW_HOVER": "#26231F",
     "HAIR": "#302B26",
-    "INK": "#F3EEE6",                # Paper, a touch softer against the dark
+    "INK": _INK_TEXT,                # the widget's Ink text (#FAF7F2)
     "INK_SOFT": "#D3CBBF",
     "MUTED": "#A39A8E",              # the widget's Ink muted
     "ACCENT": "#E5402F",             # one accent, both themes
@@ -96,13 +107,13 @@ INK_PALETTE: dict[str, object] = {
     "DISABLED_TEXT": "#857C71",
     "SHADOW": "#73000000",
     "BANNER": "#2A2520",             # brand book's dark stage, raised off the panel
-    "BANNER_TEXT": "#F3EEE6",
+    "BANNER_TEXT": _INK_TEXT,
     "BANNER_BODY": "#BDB4A8",
     "BANNER_BUTTON_HOVER": "#DDD6CB",
     "SEG_TRACK": "#12100E",
     "SEG_ON": "#332E28",
     "TOGGLE_OFF": "#4A443D",
-    "TOGGLE_THUMB": "#F3EEE6",
+    "TOGGLE_THUMB": _INK_TEXT,
     "SLIDER_TRACK": "#3A352F",
     "KEYCAP_BORDER": "#4A443D",
     "SCROLL_HANDLE": "#3D3832",
