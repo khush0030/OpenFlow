@@ -943,6 +943,10 @@ class DonePanel(ActiveSurface):
         self.undo_button = PillButton(copy.UNDO, theme, on_undo, style="ghost", weight=500)
         for b in (self.chip, self.copy_button, self.undo_button):
             lay.addWidget(b, 0, Qt.AlignmentFlag.AlignVCenter)
+        # Undo can't work here (user decision 2026-10-05): don't offer it.
+        # The longer title takes about the room Undo leaves, so the pill
+        # stays close to its usual width.
+        self.undo_button.setVisible(not cant)
         self._on_copy = on_copy
         self._copied = QTimer(self)
         self._copied.setSingleShot(True)

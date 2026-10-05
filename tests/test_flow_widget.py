@@ -1075,6 +1075,29 @@ def test_done_cant_undo_note(fa):
     assert fa.popup.title.text() == wcopy.CANT_UNDO
 
 
+def _shown(panel) -> list[str]:
+    panel.layout().activate()
+    return [b.text() for b in panel.findChildren(fw.PillButton)
+            if not b.isHidden() and _inside(panel, b)]
+
+
+def test_cant_undo_hides_undo_keeps_copy_and_chip(fa):
+    # User decision 2026-10-05: a button that can't work is confusing.
+    _state(fa, "done", tone="casual")
+    fa.set_hover(True)
+    ok_w = fa.popup.target_rect.w
+    assert _shown(fa.popup) == ["Casual", wcopy.COPY, wcopy.UNDO]
+    fa.set_hover(False)
+    _state(fa, "done", tone="casual", note="cant_undo")
+    fa.set_hover(True)
+    panel = fa.popup
+    assert _shown(panel) == ["Casual", wcopy.COPY]
+    assert panel.undo_button.isHidden()
+    _all_inside(panel)
+    # No awkward jump: the longer title roughly takes Undo's place.
+    assert abs(panel.target_rect.w - ok_w) <= 40
+
+
 @pytest.mark.parametrize("appearance", ["paper", "ink"])
 @pytest.mark.parametrize("reason", ["not_replaced", "not_pasted", "queued", ""])
 def test_card_footer_hint_is_not_clipped(fa, appearance, reason):
