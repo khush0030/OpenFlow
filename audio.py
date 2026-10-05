@@ -341,7 +341,8 @@ def heard_nothing(audio: np.ndarray, sample_rate: int = 16000,
 
 
 def save_wav(path: str, audio: np.ndarray, sample_rate: int = 16000) -> None:
-    from scipy.io import wavfile
+    import wavio
     pcm = np.clip(audio, -1.0, 1.0)
     pcm_i16 = (pcm * 32767).astype(np.int16)
-    wavfile.write(path, sample_rate, pcm_i16)
+    with open(path, "wb") as f:
+        wavio.write_pcm16(f, sample_rate, pcm_i16)

@@ -21,11 +21,6 @@ from PyQt6.QtWidgets import (
 from ui.hub import style as S
 from ui.widget_copy import key_name
 
-KEYCAP_BORDER = "#D9D1C5"
-SEG_TRACK = "#ECE6DC"
-TOGGLE_OFF = "#D9D1C5"
-SLIDER_TRACK = "#DDD5C9"
-
 
 # ── icons ───────────────────────────────────────────────────────────────
 def check_pixmap(color: str, size: int = 14, width: float = 2.0) -> QPixmap:
@@ -87,11 +82,11 @@ class Toggle(QAbstractButton):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = QPainterPath()
         track.addRoundedRect(QRectF(0, 0, self.W, self.H), self.H / 2, self.H / 2)
-        p.fillPath(track, QColor(S.ACCENT if self.isChecked() else TOGGLE_OFF))
+        p.fillPath(track, QColor(S.ACCENT if self.isChecked() else S.TOGGLE_OFF))
         x = self.W - self.THUMB - 2 if self.isChecked() else 2
         thumb = QPainterPath()
         thumb.addEllipse(QRectF(x, 2, self.THUMB, self.THUMB))
-        p.fillPath(thumb, QColor("#FFFFFF"))
+        p.fillPath(thumb, QColor(S.TOGGLE_THUMB))
         p.end()
 
 
@@ -106,7 +101,7 @@ class Segmented(QFrame):
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("seg")
-        self.setStyleSheet(f"QFrame#seg{{background:{SEG_TRACK};border-radius:{S.CONTROL_H // 2}px;}}")
+        self.setStyleSheet(f"QFrame#seg{{background:{S.SEG_TRACK};border-radius:{S.CONTROL_H // 2}px;}}")
         self.setFixedHeight(S.CONTROL_H)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         lay = QHBoxLayout(self)
@@ -126,7 +121,7 @@ class Segmented(QFrame):
                 f"QPushButton{{border:none;border-radius:{r}px;padding:0 14px;"
                 f"background:transparent;color:{S.MUTED};}}"
                 f"QPushButton:hover{{color:{S.INK};}}"
-                f"QPushButton:checked{{background:{S.PAPER};color:{S.ACCENT_TEXT};}}")
+                f"QPushButton:checked{{background:{S.SEG_ON};color:{S.ACCENT_TEXT};}}")
             self.group.addButton(b)
             lay.addWidget(b)
             self.buttons[val] = b
@@ -146,7 +141,7 @@ class Segmented(QFrame):
                 fx = QGraphicsDropShadowEffect(b)
                 fx.setBlurRadius(6)
                 fx.setOffset(0, 1)
-                fx.setColor(QColor(26, 24, 20, 38))
+                fx.setColor(QColor(S.SHADOW))
                 b.setGraphicsEffect(fx)
             else:
                 b.setGraphicsEffect(None)
@@ -323,7 +318,7 @@ def keycap(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setFont(S.mono(12.5, 500))
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    lbl.setStyleSheet(f"background:{S.PAPER};color:{S.INK};border:1px solid {KEYCAP_BORDER};"
+    lbl.setStyleSheet(f"background:{S.PAPER};color:{S.INK};border:1px solid {S.KEYCAP_BORDER};"
                       f"border-bottom-width:2px;border-radius:6px;padding:2px 8px;")
     return lbl
 

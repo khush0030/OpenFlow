@@ -578,3 +578,27 @@ def test_selecting_a_normal_row_after_a_failed_one_restores_sections(hist, tmp_p
     d = page.detail
     assert d.pasted_section.isVisibleTo(page) and d.paste_btn.isVisibleTo(page)
     assert not d.failed_section.isVisibleTo(page) and not d.transcribe_btn.isVisibleTo(page)
+
+
+# ── theme switch (spec 2026-10-02-dark-hub): a rebuilt page keeps the place ──
+def test_view_state_round_trips_search_filter_and_selection(hist):
+    page = make_page(hist)
+    page.set_filter("today")
+    page.search.setText("size")
+    page.flush_search()
+    page.select(page.rows[0].entry.id)
+    state = page.view_state()
+
+    fresh = make_page(hist)                 # what the window builds after a switch
+    fresh.restore_view(state)
+    assert fresh.search.text() == "size"
+    assert fresh.chips["today"].isChecked()
+    assert finals(fresh) == ["Maybe increase the size."]
+    assert fresh.selected().final == "Maybe increase the size."
+
+
+def test_restore_view_ignores_a_selection_that_is_gone(hist):
+    page = make_page(hist)
+    page.restore_view({"query": "", "filter": "bogus", "selected": 999999})
+    assert page.chips["all"].isChecked()
+    assert page.selected() is not None       # falls back to the first row

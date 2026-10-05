@@ -16,7 +16,7 @@ import sys
 block_cipher = None
 is_macos = sys.platform == "darwin"
 
-# httpx is used for Sarvam STT + chat; scipy.io writes WAV payloads
+# httpx is used for Sarvam STT + chat (WAV payloads: wavio.py, stdlib)
 hidden = []
 hidden += collect_submodules("httpx")
 # websockets: Sarvam realtime (streaming) STT, imported lazily by stream_stt
@@ -26,7 +26,6 @@ hidden += collect_submodules("rumps")
 hidden += collect_submodules("darkdetect")
 hidden += collect_submodules("PIL")
 hidden += collect_submodules("rapidfuzz")
-hidden += collect_submodules("scipy.io")
 hidden += collect_submodules("AppKit")
 hidden += collect_submodules("ui")
 hidden += ["sarvam", "transcribe", "stream_stt", "ai", "llm", "permissions", "httpcore", "h11", "anyio", "certifi"]
@@ -54,7 +53,11 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "pandas", "IPython"],
+    # scipy: no longer used (wavio.py). rich / click / pygments: httpx's
+    # optional CLI, which it imports at start-up whenever they are present
+    # (~7 MB in every process that uses httpx); the app never calls it.
+    excludes=["tkinter", "matplotlib", "pandas", "IPython",
+              "scipy", "rich", "click", "pygments"],
     cipher=block_cipher,
     noarchive=False,
 )

@@ -22,8 +22,8 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 import numpy as np
-from scipy.io import wavfile
 
+import wavio
 from openflow_logger import log_exception
 
 TAKES_DIR = Path(os.path.expanduser("~/.openflow")) / "takes"
@@ -52,7 +52,7 @@ class TakeStore:
             tmp = self.root / (name + _TMP)
             pcm = np.clip(np.asarray(audio, dtype=np.float32).reshape(-1), -1.0, 1.0)
             with open(tmp, "wb") as f:
-                wavfile.write(f, int(sample_rate), (pcm * 32767).astype(np.int16))
+                wavio.write_pcm16(f, int(sample_rate), (pcm * 32767).astype(np.int16))
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, final)
@@ -64,7 +64,7 @@ class TakeStore:
     @staticmethod
     def load(path: str | Path) -> tuple[np.ndarray, int]:
         """(float32 mono audio, sample rate). Raises if the file is gone."""
-        sr, data = wavfile.read(str(path))
+        sr, data = wavio.read(path)
         if data.dtype == np.int16:
             audio = data.astype(np.float32) / 32767.0
         else:

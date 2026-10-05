@@ -28,16 +28,6 @@ from ui.hub.pages._charts import first_name  # noqa: F401  (tests patch home.fir
 from ui.hub.pages._controls import check_pixmap, cross_pixmap
 
 
-def _mix(fg: str, bg: str, alpha: float) -> str:
-    """`fg` laid over `bg` at `alpha`, as a hex colour."""
-    a, b = QColor(fg), QColor(bg)
-    return QColor(round(a.red() * alpha + b.red() * (1 - alpha)),
-                  round(a.green() * alpha + b.green() * (1 - alpha)),
-                  round(a.blue() * alpha + b.blue() * (1 - alpha))).name().upper()
-
-
-AMBER = S.AMBER                          # processing dot
-BANNER_BODY = _mix(S.PAPER, S.INK, 0.72)  # secondary copy on the Ink banner
 POLL_MS = 2000
 MAX_ROWS = 8          # today's newest; the rest are a click away in History
 SIDE_W = 296          # Right now column when it sits beside the list
@@ -48,8 +38,11 @@ LANGUAGE_LABELS = {
 }
 PERMISSIONS = (("microphone", "Microphone"), ("accessibility", "Accessibility"),
                ("input_monitoring", "Input Monitoring"))
-# Status pill fill for each dot colour (the widget's soft-fill pill).
-PILL_FILL = {S.ACCENT: S.ACCENT_SOFT, S.DANGER: S.ACCENT_SOFT, S.SAGE: S.SAGE_SOFT}
+
+
+def pill_fill(dot: str) -> str:
+    """Status pill fill for a dot colour (the widget's soft-fill pill)."""
+    return {S.ACCENT: S.ACCENT_SOFT, S.DANGER: S.ACCENT_SOFT, S.SAGE: S.SAGE_SOFT}.get(dot, S.ROW_ON)
 
 
 def greeting_for(now: datetime, name: str | None) -> str:
@@ -67,7 +60,8 @@ def key_glyph(hold_key: str) -> str:
     return widget_copy.key_name(hold_key).split(" ")[0] or "⌘"
 
 
-def _mono_span(text: str, color: str = S.INK, size: float = 12) -> str:
+def _mono_span(text: str, color: str | None = None, size: float = 12) -> str:
+    color = color or S.INK
     return (f'<span style="font-family:\'{S.MONO}\',Menlo,monospace;font-size:{size}pt;'
             f'color:{color};">{html.escape(text)}</span>')
 
@@ -242,7 +236,8 @@ class EntryRow(QFrame):
         self.more.setText(S.link_html(link, "more"))
         self.more.show()
 
-    def show_note(self, text: str, color: str = S.MUTED, ms: int = 0) -> None:
+    def show_note(self, text: str, color: str | None = None, ms: int = 0) -> None:
+        color = color or S.MUTED
         self.note.setText(text)
         self.note.setStyleSheet(f"color:{color};")
         self.note.show()
@@ -433,7 +428,7 @@ class HomePage(Page):
     def _banner(self) -> QFrame:
         f = QFrame()
         f.setObjectName("banner")
-        f.setStyleSheet(f"QFrame#banner{{background:{S.INK};border-radius:{S.RADIUS_CARD}px;}}"
+        f.setStyleSheet(f"QFrame#banner{{background:{S.BANNER};border-radius:{S.RADIUS_CARD}px;}}"
                         "QFrame#banner QLabel{background:transparent;}")
         lay = QBoxLayout(QBoxLayout.Direction.LeftToRight, f)
         self._banner_layout = lay
@@ -446,13 +441,13 @@ class HomePage(Page):
         h.setFont(S.serif(S.T_H2))
         h.setWordWrap(True)
         h.setMinimumWidth(1)
-        h.setStyleSheet(f"color:{S.PAPER};")
+        h.setStyleSheet(f"color:{S.BANNER_TEXT};")
         text.addWidget(h)
         p = S.body("Seven language modes, from Hindi in Devanagari to English out of anything.",
-                   S.T_SMALL, BANNER_BODY)
+                   S.T_SMALL, S.BANNER_BODY)
         text.addWidget(p)
         lay.addLayout(text, 1)
-        self.language_button = S.button("Choose language")
+        self.language_button = S.button("Choose language", kind="banner")
         self.language_button.clicked.connect(self._safe(lambda *_a: self.ctx.navigate("tones")))
         lay.addWidget(self.language_button, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         return f
@@ -529,7 +524,7 @@ class HomePage(Page):
     def _set_dot(self, color: str) -> None:
         self.status_dot_color = color
         self.status_dot.setStyleSheet(f"background:{color};border-radius:4px;")
-        fill = PILL_FILL.get(color, S.ROW_ON)
+        fill = pill_fill(color)
         self.status_pill.setStyleSheet(
             f"QFrame#statuspill{{background:{fill};border-radius:15px;}}"
             f"QFrame#statuspill QLabel#statustext{{color:{S.INK_SOFT};background:transparent;}}")
@@ -686,7 +681,7 @@ class HomePage(Page):
             self.status_text.setText(f'<span style="color:{S.ACCENT_TEXT};font-weight:600;">'
                                      f'Recording</span>')
         elif state == "processing":
-            self._set_dot(AMBER)
+            self._set_dot(S.AMBER)
             self.status_text.setText(f'<span style="color:{S.INK};">Processing</span>')
         elif any(perms.get(k) is False for k, _l in PERMISSIONS):
             self._set_dot(S.DANGER)

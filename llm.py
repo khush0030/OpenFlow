@@ -1,7 +1,7 @@
 """Cleanup LLM providers behind one interface, chosen by [cleanup] in config.
 
 Sarvam (sarvam-105b) is the default, but it is a reasoning model and takes
-~2s even for "ok". Groq (Llama) and Claude Haiku answer a cleanup prompt in
+~2s even for "ok". Groq (gpt-oss-120b, low reasoning effort) and Claude Haiku answer a cleanup prompt in
 a few hundred ms. Everything is a cloud call; nothing runs on the laptop.
 
 Keys are looked up like the Sarvam key (env → Keychain → ~/.openflow/.env)
@@ -27,6 +27,14 @@ class LLMError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+
+    @property
+    def model_missing(self) -> bool:
+        """The provider says the model doesn't exist / isn't available to
+        this key (Groq retires models: llama-3.3-70b-versatile went 404)."""
+        msg = str(self).lower()
+        return self.status_code == 404 or "model_not_found" in msg or \
+            "does not exist" in msg
 
 
 class ChatProvider(Protocol):
@@ -85,6 +93,17 @@ def _post_json(label: str, url: str, headers: dict[str, str],
     raise LLMError(f"{label} request failed after retries: {last}")
 
 
+# Reasoning models on Groq (gpt-oss): think briefly, keep the thinking out of
+# the reply, and leave room for it, since reasoning tokens are counted in the
+# completion budget. Only message.content is ever read, never .reasoning.
+REASONING_MODEL_PREFIXES = ("openai/gpt-oss",)
+REASONING_HEADROOM_TOKENS = 512
+
+
+def is_reasoning_model(model: str) -> bool:
+    return str(model).lower().startswith(REASONING_MODEL_PREFIXES)
+
+
 class OpenAICompatChat:
     """Any OpenAI-style /chat/completions endpoint (Groq)."""
 
@@ -97,25 +116,34 @@ class OpenAICompatChat:
         self.timeout = timeout
 
     def complete(self, system: str, user: str, *, max_tokens: int) -> str:
+        reasoning = is_reasoning_model(self.model)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+        }
+        if reasoning:
+            payload.update(max_tokens=max_tokens + REASONING_HEADROOM_TOKENS,
+                           reasoning_effort="low", include_reasoning=False)
         body = _post_json(
             self.name, self.url,
             {"Authorization": f"Bearer {self._api_key}",
              "Content-Type": "application/json"},
-            {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.2,
-            },
+            payload,
             self.timeout,
         )
         try:
-            text = body["choices"][0]["message"]["content"] or ""
+            choice = body["choices"][0]
+            text = choice["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"Unexpected {self.name} response: {body!r}"[:400]) from e
+        if reasoning and choice.get("finish_reason") == "length":
+            # Thinking ate the budget: the reply may stop mid-sentence.
+            raise LLMError(f"{self.name} reply cut off at the token limit")
         text = text.strip()
         if not text:
             raise LLMError(f"{self.name} returned empty content")
@@ -331,6 +359,11 @@ class FailoverChat:
                                  limit, p.name)
             except Exception as e:
                 errors.append(f"{p.name}: {e}")
+                if isinstance(e, LLMError) and e.model_missing:
+                    print(f"[llm] {p.name} model {getattr(p, 'model', '?')!r} not found or "
+                          f"not available to this key ({e.status_code or 'error'}) "
+                          "— trying the next provider", flush=True)
+                    continue
                 print(f"[llm] {p.name} failed (budget {limit:.1f}s; {str(e)[:120]}) "
                       "— trying the next provider", flush=True)
                 continue

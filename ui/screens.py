@@ -44,6 +44,34 @@ def _key(r: Rect) -> tuple:
     return (round(r.x), round(r.y), round(r.w), round(r.h))
 
 
+# CGWindowListCopyWindowInfo options (CGWindow.h).
+_ON_SCREEN_ONLY = 1 << 0
+_EXCLUDE_DESKTOP = 1 << 4
+_cg: dict = {}
+
+
+def _window_list():
+    """CGWindowListCopyWindowInfo(on screen, no desktop), front to back.
+    Bound straight from CoreGraphics: `import Quartz` would load the whole
+    umbrella (ImageKit, PDFKit, QuickLookUI, ...; ~3 MB) for this one call."""
+    fn = _cg.get("CGWindowListCopyWindowInfo")
+    if fn is None:
+        try:
+            import objc  # type: ignore
+            from Foundation import NSBundle  # type: ignore
+            objc.loadBundleFunctions(
+                NSBundle.bundleWithIdentifier_("com.apple.CoreGraphics"), _cg,
+                # A Copy function: the array comes back +1, so PyObjC must
+                # take over that reference (else every call leaks ~7 KB).
+                [("CGWindowListCopyWindowInfo", b"^{__CFArray=}II", "",
+                  {"retval": {"already_cfretained": True}})])
+            fn = _cg["CGWindowListCopyWindowInfo"]
+        except Exception:
+            from Quartz import CGWindowListCopyWindowInfo as fn  # type: ignore
+            _cg["CGWindowListCopyWindowInfo"] = fn
+    return fn(_ON_SCREEN_ONLY | _EXCLUDE_DESKTOP, 0)   # 0: kCGNullWindowID
+
+
 class SystemProbe:
     """Reads the real system. Every call degrades to "don't know" on error."""
 
@@ -88,16 +116,10 @@ class SystemProbe:
     def focused_window() -> Rect | None:
         try:
             from AppKit import NSWorkspace  # type: ignore
-            from Quartz import (CGWindowListCopyWindowInfo,  # type: ignore
-                                kCGNullWindowID, kCGWindowListExcludeDesktopElements,
-                                kCGWindowListOptionOnScreenOnly)
             app = NSWorkspace.sharedWorkspace().frontmostApplication()
             if app is None:
                 return None
-            entries = CGWindowListCopyWindowInfo(
-                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-                kCGNullWindowID)
-            return front_window(entries, int(app.processIdentifier()))
+            return front_window(_window_list(), int(app.processIdentifier()))
         except Exception:
             return None
 
@@ -111,6 +133,120 @@ class SystemProbe:
             return None
 
 
+def cocoa_to_qt(x: float, y: float, primary_h: float) -> tuple[float, float]:
+    """A Cocoa global point (origin bottom-left of the primary display) in
+    Qt's global coordinates (origin top-left)."""
+    return (x, primary_h - y)
+
+
+def _qt_frames() -> list[Rect]:
+    from PyQt6.QtGui import QGuiApplication
+    return [_qrect(s.geometry()) for s in QGuiApplication.screens()]
+
+
+class FocusWatch:
+    """Moments after which the focused window may be on another display:
+    another app activated, the Space changed, a mouse-up (the end of a
+    window drag or a click into another window), the cursor crossing to
+    another display. Each calls `on_event` (spec 2026-10-05-footprint: these
+    replace most of the 250 ms poll of the window list). Handlers never
+    raise: they run inside AppKit callbacks."""
+
+    def __init__(self, on_event: Callable[[], None],
+                 frames: Callable[[], list[Rect]] = _qt_frames) -> None:
+        self._on_event = on_event
+        self._frames_fn = frames
+        self._frames: list[Rect] | None = None
+        self._display: int | None = None
+        self._tokens: list = []       # NSEvent monitors / workspace observers
+
+    def _fire(self) -> None:
+        try:
+            self._on_event()
+        except Exception as e:
+            log_exception("screens", "display re-check failed", e)
+
+    def mouse_up(self) -> None:
+        self._fire()
+
+    def activated(self) -> None:
+        self._fire()
+
+    def _index(self, x: float, y: float) -> int | None:
+        for i, f in enumerate(self._frames or ()):
+            if f.x <= x < f.right and f.y <= y < f.bottom:
+                return i
+        return None
+
+    def mouse_at(self, x: float, y: float) -> None:
+        """Cursor at (x, y), Qt global coordinates. Cheap: compares against
+        cached display frames, re-read only when the point is on none."""
+        try:
+            i = self._index(x, y) if self._frames is not None else None
+            if i is None:
+                self._frames = list(self._frames_fn())
+                i = self._index(x, y)
+            if i is None or i == self._display:
+                return
+            first, self._display = self._display is None, i
+        except Exception as e:
+            log_exception("screens", "cursor display check failed", e)
+            return
+        if not first:
+            self._fire()
+
+    def screens_changed(self) -> None:
+        self._frames = None
+        self._display = None
+
+    def install(self) -> bool:
+        """Register with AppKit (the real app only). Returns success."""
+        try:
+            from AppKit import (NSEvent, NSEventMaskLeftMouseUp,  # type: ignore
+                                NSEventMaskMouseMoved, NSEventTypeLeftMouseUp,
+                                NSOperationQueue, NSWorkspace,
+                                NSWorkspaceActiveSpaceDidChangeNotification,
+                                NSWorkspaceDidActivateApplicationNotification)
+        except Exception:
+            return False
+
+        def on_mouse(event) -> None:
+            try:
+                if event.type() == NSEventTypeLeftMouseUp:
+                    self.mouse_up()
+                    return
+                p = NSEvent.mouseLocation()
+                frames = self._frames or self._frames_fn()
+                primary_h = frames[0].h if frames else 0.0
+                self.mouse_at(*cocoa_to_qt(p.x, p.y, primary_h))
+            except Exception as e:
+                log_exception("screens", "mouse monitor failed", e)
+
+        def on_note(_note) -> None:
+            self.activated()
+
+        try:
+            mon = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskMouseMoved | NSEventMaskLeftMouseUp, on_mouse)
+            if mon is not None:
+                self._tokens.append(mon)
+            center = NSWorkspace.sharedWorkspace().notificationCenter()
+            queue = NSOperationQueue.mainQueue()
+            for name in (NSWorkspaceDidActivateApplicationNotification,
+                         NSWorkspaceActiveSpaceDidChangeNotification):
+                self._tokens.append(center.addObserverForName_object_queue_usingBlock_(
+                    name, None, queue, on_note))
+        except Exception as e:
+            log_exception("screens", "could not watch focus changes", e)
+            return False
+        return True
+
+
+# Events come in bursts (activate + mouse-up + Space change): one re-check
+# a moment after the last, once the window server has settled.
+FOCUS_SETTLE_MS = 120
+
+
 class ScreenTracker:
     """Remembers the widget's display and decides when it may change."""
 
@@ -119,8 +255,11 @@ class ScreenTracker:
         self.display_id: str | None = None
         self._prev_view: str | None = None
         self._on_change = on_change
+        self._focus: FocusWatch | None = None
+        self._soon = None
         if on_change is not None:
             self._watch()
+            self._watch_focus()
 
     def area(self, view: str) -> Rect:
         """The usable area of the display the widget should be on for `view`."""
@@ -161,7 +300,38 @@ class ScreenTracker:
             log_exception("screens", "could not watch a new display", e)
         self._changed()
 
+    def _watch_focus(self) -> None:
+        """Re-check the display on focus events (FocusWatch), coalesced.
+        Cocoa only: offscreen and in tests nothing global is installed."""
+        try:
+            from PyQt6.QtCore import QTimer
+            from PyQt6.QtGui import QGuiApplication
+            self._soon = QTimer()
+            self._soon.setSingleShot(True)
+            self._soon.setInterval(FOCUS_SETTLE_MS)
+            self._soon.timeout.connect(self._refollow)
+            if QGuiApplication.platformName() != "cocoa":
+                return
+            focus = FocusWatch(self.focus_event)
+            if focus.install():
+                self._focus = focus
+            else:
+                _log.warning("focus events unavailable; the widget follows on its slow poll")
+        except Exception as e:
+            log_exception("screens", "could not watch focus changes", e)
+
+    def focus_event(self) -> None:
+        """Something moved focus: re-check the display shortly (coalesced)."""
+        if self._soon is not None:
+            self._soon.start()
+
     def _changed(self) -> None:
+        # A Qt slot: never raise (PyQt6 aborts the process).
+        if self._focus is not None:
+            self._focus.screens_changed()
+        self._refollow()
+
+    def _refollow(self) -> None:
         # A Qt slot: never raise (PyQt6 aborts the process).
         try:
             if self._on_change is not None:
