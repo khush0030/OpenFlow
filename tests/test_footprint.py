@@ -151,3 +151,29 @@ def test_widget_socket_reader_sleeps_until_data(tmp_path):
     finally:
         cli.close()
         srv.stop()
+
+
+# -- many takes: nothing accumulates ------------------------------------------
+
+def test_memory_flat_over_many_fake_takes(tmp_path):
+    """The real daemon pipeline (fake mic, mocked network) and the real
+    widget process, offscreen: after warm-up, 40 more takes add no Python
+    objects to the daemon and no memory to either process (tolerance for
+    allocator noise)."""
+    import shutil
+    import tempfile
+    out = tmp_path / "bench.json"
+    home = tempfile.mkdtemp(dir="/tmp", prefix="ofb")   # short: Unix socket paths
+    r = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "footprint_bench.py"),
+         "--idle", "1", "--settle", "0.5", "--warmup", "5", "--takes", "40",
+         "--speed", "50", "--home", home, "--json", str(out)],
+        cwd=REPO, capture_output=True, text=True, timeout=300)
+    shutil.rmtree(home, ignore_errors=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    res = json.loads(out.read_text())
+    assert res["takes_ok"] == 40
+    g = res["growth"]
+    assert g["daemon_objects"] < 200, g
+    assert g["daemon_mb"] < 3.0, g
+    assert g["widget_mb"] < 3.0, g

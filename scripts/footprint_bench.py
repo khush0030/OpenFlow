@@ -319,7 +319,10 @@ def run_daemon_child(home: Path, speed: float, stream: bool) -> None:
                 lat.append(time.perf_counter() - t_up if ok else float("nan"))
                 time.sleep(0.05)
             _FakeInputStream.source = None
-            _emit(event="takes_done", n=n,
+            import gc
+            gc.collect()
+            _emit(event="takes_done", n=n, objects=len(gc.get_objects()),
+                  footprint_mb=footprint_mb(os.getpid()),
                   keyup_to_idle_ms=[round(1000 * x, 1) for x in lat],
                   record_start_ms=[round(1000 * x, 2) for x in opened],
                   widget_connected=bool(d._widget and d._widget.connected))
@@ -472,8 +475,19 @@ def bench(args) -> dict:
         res["idle"] = idle_window(pids, args.idle)
 
         if args.takes:
+            # Warm-up takes first (first-use imports, caches, connection
+            # pools), so growth is measured on a steady state.
+            d.send(f"takes {args.warmup}")
+            warm = d.wait("takes_done", 60 + args.warmup * 10)
+            w_fp = footprint_mb(wpid)
             d.send(f"takes {args.takes}")
             done = d.wait("takes_done", 60 + args.takes * 10)
+            res["growth"] = {
+                "daemon_objects": done["objects"] - warm["objects"],
+                "daemon_mb": round(done["footprint_mb"] - warm["footprint_mb"], 2),
+                "widget_mb": round((footprint_mb(wpid) or 0) - (w_fp or 0), 2),
+                "after_warmup_takes": args.warmup,
+            }
             lat = [x for x in done["keyup_to_idle_ms"] if x == x]
             res["takes_ok"] = len(lat)
             res["keyup_to_idle_ms_median"] = round(statistics.median(lat), 1) if lat else None
@@ -520,6 +534,8 @@ def main() -> int:
     ap.add_argument("--idle", type=float, default=30.0, help="idle window, seconds")
     ap.add_argument("--settle", type=float, default=5.0, help="wait before measuring")
     ap.add_argument("--takes", type=int, default=50, help="simulated dictations")
+    ap.add_argument("--warmup", type=int, default=10,
+                    help="takes before the measured ones (growth is measured after)")
     ap.add_argument("--speed", type=float, default=8.0, help="fake mic speed-up")
     ap.add_argument("--no-stream", dest="stream", action="store_false",
                     help="batch STT only (no realtime session)")
