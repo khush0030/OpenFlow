@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import socket
+import struct
 import threading
 import time
 from pathlib import Path
@@ -23,9 +24,17 @@ SOCKET_PATH = str(Path(os.path.expanduser("~/.openflow")) / "widget.sock")
 EDIT_OVERLAY_SOCKET_PATH = str(Path(os.path.expanduser("~/.openflow")) / "edit-overlay.sock")
 
 # send() may run under the FlowController lock, so a hung peer must never
-# stall it for long. The timeout is per-socket; the reader treats a recv
-# timeout as "idle" and keeps waiting.
+# stall it for long. It is a kernel send timeout (SO_SNDTIMEO), so the
+# reader's recv blocks instead of waking every second (spec 2026-10-05-footprint).
 SEND_TIMEOUT = 1.0
+
+
+def _send_timeout(sock: socket.socket, seconds: float) -> None:
+    """Blocking socket whose sends (only) give up after `seconds`."""
+    sock.settimeout(None)
+    sec = int(seconds)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO,
+                    struct.pack("ll", sec, int(round((seconds - sec) * 1e6))))
 
 Handler = Callable[[dict], None]
 
@@ -35,7 +44,7 @@ class _Conn:
 
     def __init__(self, sock: socket.socket, on_message: Handler,
                  on_close: Callable[["_Conn"], None]) -> None:
-        sock.settimeout(SEND_TIMEOUT)
+        _send_timeout(sock, SEND_TIMEOUT)
         self.sock = sock
         self.alive = True
         self._on_message = on_message
@@ -79,10 +88,7 @@ class _Conn:
         buf = b""
         try:
             while self.alive:
-                try:
-                    chunk = self.sock.recv(4096)
-                except socket.timeout:
-                    continue  # idle; no data is lost on a recv timeout
+                chunk = self.sock.recv(4096)   # blocks; close() shuts it down
                 if not chunk:
                     break
                 buf += chunk

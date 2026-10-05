@@ -121,3 +121,33 @@ def test_app_runs_without_the_excluded_modules(tmp_path):
         "httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))).get('http://x/')\n",
         tmp_path)
     assert "daemon" in mods and "ui.hub.app" in mods
+
+
+# -- widget socket: reads block, sends still time out --------------------------
+
+def test_widget_socket_reader_sleeps_until_data(tmp_path):
+    """The reader used to wake every second (the socket's 1 s timeout was for
+    sendall); now recv blocks and the send timeout lives in SO_SNDTIMEO."""
+    import socket
+    import struct
+    import tempfile
+    import time
+
+    from widget_channel import SEND_TIMEOUT, WidgetClient, WidgetServer
+    path = os.path.join(tempfile.mkdtemp(dir="/tmp", prefix="ofw"), "w.sock")
+    srv = WidgetServer(path)
+    srv.start()
+    cli = WidgetClient(path)
+    try:
+        assert cli.connect()
+        end = time.monotonic() + 2
+        while not srv.connected and time.monotonic() < end:
+            time.sleep(0.01)
+        for conn in (srv._conn, cli._conn):
+            assert conn.sock.gettimeout() is None          # recv blocks
+            raw = conn.sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDTIMEO, 16)
+            sec, usec = struct.unpack("ll", raw)
+            assert sec + usec / 1e6 == SEND_TIMEOUT
+    finally:
+        cli.close()
+        srv.stop()
