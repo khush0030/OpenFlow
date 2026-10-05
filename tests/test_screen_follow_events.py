@@ -138,3 +138,30 @@ def test_window_list_without_the_quartz_umbrella(tmp_path):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout.strip().splitlines()[-1])
     assert out == {"quartz": False, "list": True, "rect": True}
+
+
+def test_window_list_does_not_leak(tmp_path):
+    """CGWindowListCopyWindowInfo returns a +1 array: bound by hand, PyObjC
+    must be told so (already_cfretained) or every call leaks ~7 KB."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    code = ("import ctypes\n"
+            "from ui.screens import _window_list\n"
+            "class R(ctypes.Structure):\n"
+            "    _fields_ = [('u', ctypes.c_uint8 * 16)] + [(f'f{i}', ctypes.c_uint64) for i in range(18)]\n"
+            "lib = ctypes.CDLL('/usr/lib/libproc.dylib')\n"
+            "def fp():\n"
+            "    r = R(); lib.proc_pid_rusage(__import__('os').getpid(), 2, ctypes.byref(r)); return r.f7\n"
+            "for _ in range(50): _window_list()\n"
+            "a = fp()\n"
+            "for _ in range(1000): _window_list()\n"
+            "print((fp() - a) / 2**20)")
+    env = dict(os.environ, HOME=str(tmp_path))
+    r = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    grew_mb = float(r.stdout.strip().splitlines()[-1])
+    assert grew_mb < 3.0, f"{grew_mb:.1f} MB over 1000 calls"

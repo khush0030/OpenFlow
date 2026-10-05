@@ -61,7 +61,10 @@ def _window_list():
             from Foundation import NSBundle  # type: ignore
             objc.loadBundleFunctions(
                 NSBundle.bundleWithIdentifier_("com.apple.CoreGraphics"), _cg,
-                [("CGWindowListCopyWindowInfo", b"^{__CFArray=}II")])
+                # A Copy function: the array comes back +1, so PyObjC must
+                # take over that reference (else every call leaks ~7 KB).
+                [("CGWindowListCopyWindowInfo", b"^{__CFArray=}II", "",
+                  {"retval": {"already_cfretained": True}})])
             fn = _cg["CGWindowListCopyWindowInfo"]
         except Exception:
             from Quartz import CGWindowListCopyWindowInfo as fn  # type: ignore
