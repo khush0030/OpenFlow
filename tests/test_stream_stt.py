@@ -443,3 +443,19 @@ def test_no_key_means_no_stream(monkeypatch):
 ])
 def test_streaming_policy(value, policy):
     assert tr.streaming_policy(value) == policy
+
+
+# -- small mic blocks go out in ~64 ms messages ----------------------------------
+
+def test_16ms_blocks_are_sent_in_64ms_messages_and_the_rest_at_end():
+    ws = FakeWS()
+    s = session(ws)
+    small = np.full(256, 0.1, dtype=np.float32)
+    for _ in range(10):                         # 160 ms
+        s.feed(small)
+    s.finish()
+    sizes = [len(base64.b64decode(m["audio"])) // 2 for m in ws.sent
+             if m["event"] == "audio_input"]
+    assert sizes == [1024, 1024, 512]          # the remainder goes with the flush
+    assert [m["event"] for m in ws.sent][-2:] == ["flush", "end"]
+    assert ws.audio_samples() == 10 * 256

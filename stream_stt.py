@@ -36,6 +36,11 @@ FINISH_TIMEOUT_S = 2.0
 PING_EVERY_S = 5.0
 # Leading silence held back before the first loud block (transcribe.TRIM_PAD_S).
 GATE_PAD_S = 0.25
+# Mic blocks are 16 ms (audio.RecorderConfig.blocksize = 256); they go out in
+# messages of at least this many samples (64 ms, the old block size), so
+# Sarvam sees the same message rate as before. What is left at end() goes
+# out at once with the flush.
+SEND_MIN_SAMPLES = 1024
 
 # Error codes / close codes that won't fix themselves on the next take:
 # bad parameter or account not enabled (4000), bad key (HTTP 401/403).
@@ -238,21 +243,38 @@ class StreamingSession:
             return
         threading.Thread(target=self._receive, args=(ws,), name="stt-stream-rx",
                          daemon=True).start()
+        pending: list[np.ndarray] = []
+        pending_n = 0
+
+        def send_pending() -> None:
+            nonlocal pending, pending_n
+            if not pending:
+                return
+            audio = pending[0] if len(pending) == 1 else np.concatenate(
+                [np.asarray(b, dtype=np.float32).reshape(-1) for b in pending])
+            pending, pending_n = [], 0
+            ws.send(json.dumps({"event": "audio_input",
+                                "audio": base64.b64encode(_pcm16(audio)).decode("ascii")}))
+            self._sent += 1
+
         try:
             while not self._ended.is_set():
                 try:
                     item = self._q.get(timeout=PING_EVERY_S)
                 except queue.Empty:
+                    send_pending()
                     ws.send(json.dumps({"event": "ping"}))
                     continue
                 if item is _END:
                     if not self._ended.is_set():
+                        send_pending()
                         ws.send(json.dumps({"event": "flush"}))
                         ws.send(json.dumps({"event": "end"}))
                     return
-                ws.send(json.dumps({"event": "audio_input",
-                                    "audio": base64.b64encode(_pcm16(item)).decode("ascii")}))
-                self._sent += 1
+                pending.append(item)
+                pending_n += int(np.size(item))
+                if pending_n >= SEND_MIN_SAMPLES:
+                    send_pending()
         except Exception as e:
             self._fail(self._closed_error(e, "send failed"))
             self._close_quietly(ws)
