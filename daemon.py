@@ -143,6 +143,13 @@ EVENT_TIME_MAX_AGE_S = 60.0
 TAP_LINGER_SLACK_S = 0.15
 
 
+# Hands-free safety stop: a double-tap session (or the edit hotkey's take)
+# still recording after this long is stopped through the normal ✓ path, so
+# its text is transcribed and pasted. An accidental toggle used to record
+# until noticed (longest take in the log: 158.7 s).
+HANDS_FREE_MAX_S = 6 * 60.0
+
+
 # Widget pump cadence (spec 2026-10-05-footprint). The mic level only
 # matters while recording; Undo / Retry / card timers need a few ticks a
 # second; at rest the pump only checks config.toml (every CFG_CHECK_S) and
@@ -866,6 +873,7 @@ class Daemon:
             self._flow.no_audio(None, None)
             return
         t_mic = time.monotonic()
+        self._recording_since = t_mic      # the hands-free cap counts from here
         remembered = capture_paste_target()
         self._keydown_target = remembered   # this take's own read (on_edit_mode)
         if remembered is not None:
@@ -1360,6 +1368,7 @@ class Daemon:
                     rms = self.recorder.current_rms
                     self._send_widget({"type": "level", "rms": rms})
                     self._flow.level(rms)
+                    self._check_hands_free_cap(now)
                 if now - last_tick >= 0.25:
                     last_tick = now
                     self._flow.tick()
@@ -1395,6 +1404,20 @@ class Daemon:
     def _on_hold_release(self) -> None:
         """The hold key stopped the take: time it from the key event."""
         self.on_record_stop(event_ms=getattr(self._hold, "last_event_ms", None))
+
+    def _check_hands_free_cap(self, now: float) -> None:
+        """Stop a hands-free take that has run HANDS_FREE_MAX_S, the way the
+        widget's ✓ does (transcribe + paste). Once per take."""
+        since = getattr(self, "_recording_since", None)
+        if since is None or now - since < HANDS_FREE_MAX_S or not self._flow.hands_free:
+            return
+        take_id = getattr(self, "_take_id", 0)
+        if getattr(self, "_capped_take", None) == take_id:
+            return
+        self._capped_take = take_id
+        print(f"[daemon] hands-free take reached {HANDS_FREE_MAX_S / 60:.0f} min — "
+              "stopping it (it will be transcribed and pasted)", flush=True)
+        self._flow.handle_action({"action": "confirm"})
 
     def on_record_stop(self, event_ms: float | None = None) -> None:
         # Under the flow lock, like every widget action: a key-up and a ✕ /
