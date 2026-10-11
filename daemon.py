@@ -1943,6 +1943,7 @@ class Daemon:
     def _control_handlers(self) -> dict:
         return {
             "status": self._ctl_status,
+            "ping": self._ctl_ping,
             "set_tone": self._ctl_set_tone,
             "set_language": self._ctl_set_language,
             "paste_text": self._ctl_paste_text,
@@ -2007,6 +2008,20 @@ class Daemon:
                 "microphone": probe("microphone_granted"),
             },
         }
+
+    _PING_LOCK_WAIT_S = 2.0   # under supervisor.PING_TIMEOUT_S
+
+    def _ctl_ping(self) -> dict:
+        """Liveness probe for the supervisors (supervisor.ping). Answered on
+        the control thread; flow_ok is False when the widget state lock has
+        been held past _PING_LOCK_WAIT_S (a stuck handler)."""
+        lock = getattr(getattr(self, "_flow", None), "lock", None)
+        ok = True
+        if lock is not None:
+            ok = lock.acquire(timeout=self._PING_LOCK_WAIT_S)
+            if ok:
+                lock.release()
+        return {"pid": os.getpid(), "flow_ok": ok}
 
     def _ctl_set_tone(self, value: str) -> dict:
         self.set_tone(self._parse_tone(value))   # same path as the tray menu
@@ -2175,6 +2190,8 @@ class Daemon:
                         self._stop_evt.wait(timeout=1.0)
         except KeyboardInterrupt:
             print("\n[daemon] shutting down.", flush=True)
+            import supervisor
+            supervisor.mark_user_quit()   # Ctrl-C is a quit: don't relaunch
         finally:
             self._stop_evt.set()
             self._send_widget({"type": "exit"})

@@ -58,6 +58,24 @@ def _never_touch_real_launch_agents(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _never_supervise_the_real_daemon(monkeypatch, tmp_path_factory):
+    # Supervision reads and writes ~/.openflow (daemon.lock, the user-quit
+    # marker) and starts daemons: point it at a throwaway dir and make any
+    # real launch fail the test. First-run setup counts as done.
+    import supervisor
+    d = tmp_path_factory.mktemp("openflow-supervisor")  # not in tmp_path: tests list it
+    (d / "onboarded.flag").write_text("test")
+    monkeypatch.setattr(supervisor, "USER_QUIT", d / "user-quit")
+    monkeypatch.setattr(supervisor, "LAUNCH_STAMP", d / "launching")
+    monkeypatch.setattr(supervisor, "DAEMON_LOCK", d / "daemon.lock")
+    monkeypatch.setattr(supervisor, "ONBOARD_FLAG", d / "onboarded.flag")
+
+    def refuse(*a, **k):
+        raise AssertionError("tests never launch a real daemon")
+    monkeypatch.setattr(supervisor, "_popen", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _hub_never_reads_the_real_appearance(monkeypatch):
     # A HubWindow built without an appearance source reads [widget]
     # appearance from the real config.toml (and macOS dark mode): tests would
