@@ -20,6 +20,8 @@ sound set can live outside the repo (and never ship with the app).
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -97,10 +99,66 @@ def _load(cue: Cue):
     return snd
 
 
+# -[NSSound play] is synchronous until the output device starts: when it
+# can't (a monitor's display audio asleep or flapping, HAL error 'stop'), each
+# call blocks ~10 s and calls from other threads queue behind it in CoreAudio.
+# Played on the key handler's thread (NSApp main, under the flow lock), that
+# froze the whole app until force-quit (2026-10-11). So every cue plays on one
+# background thread; callers never wait on CoreAudio.
+# A cue still waiting this long after it was asked for is dropped: one that
+# would sound 10 s late (behind a hung play) is worse than none.
+STALE_S = 0.5
+
+_q_lock = threading.Lock()
+_pending: tuple[Cue, float] | None = None   # newest cue wins
+_wake = threading.Event()
+_idle = threading.Event()
+_idle.set()
+_worker: threading.Thread | None = None
+
+
 def play(cue: Cue) -> None:
-    """Fire-and-forget play. No-op when disabled or on failure (never raises)."""
+    """Fire-and-forget: hand the cue to the cue thread and return at once.
+    No-op when disabled; never raises, never blocks."""
+    global _pending, _worker
     if not _enabled:
         return
+    with _q_lock:
+        _pending = (cue, time.monotonic())
+        _idle.clear()
+        if _worker is None or not _worker.is_alive():
+            _worker = threading.Thread(target=_run, name="sound-cues", daemon=True)
+            _worker.start()
+        _wake.set()
+
+
+def wait_idle(timeout: float | None = None) -> bool:
+    """Block until every requested cue has played or been dropped (tests)."""
+    return _idle.wait(timeout)
+
+
+def _run() -> None:
+    global _pending
+    while True:
+        with _q_lock:
+            item, _pending = _pending, None
+            if item is None:
+                _wake.clear()
+                _idle.set()
+        if item is None:
+            _wake.wait()
+            continue
+        cue, asked_at = item
+        if time.monotonic() - asked_at > STALE_S:
+            continue
+        try:
+            _play_now(cue)
+        except Exception as e:  # the cue thread must survive anything
+            print(f"[sounds] play({cue}) failed: {e}", flush=True)
+
+
+def _play_now(cue: Cue) -> None:
+    """Play on this thread (the cue thread): may block for seconds."""
     for other in _SUPERSEDES.get(cue, ()):
         playing = _cache.get(other)  # never loaded = never played
         if playing is not None:

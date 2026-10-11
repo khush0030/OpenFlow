@@ -111,6 +111,7 @@ from flow_state import IDLE as FLOW_IDLE, RECORDING as FLOW_RECORDING, SILENT as
 from widget_channel import EDIT_OVERLAY_SOCKET_PATH, WidgetServer
 from control_channel import ControlServer
 from config_apply import plan_changes, resolve_hotkeys
+import hang_watch
 import sounds
 
 
@@ -1786,6 +1787,7 @@ class Daemon:
             self._abort_stream(ctx)
             self._take_failed(audio, ctx, run)
             return
+        self._busy_since = time.monotonic()   # hang_watch: a wedged run gets its stacks dumped
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
         # Stage timings (seconds) for the log line and the history row.
@@ -1925,6 +1927,7 @@ class Daemon:
             log_exception("daemon.pipeline", "pipeline crashed", e)
             self._flow.done(run=run) or self._stale(run)
         finally:
+            self._busy_since = None
             self._busy.release()
             self.state.recording = RecordingState.IDLE
             self.state.notify()
@@ -2121,6 +2124,25 @@ class Daemon:
         chords[_ESCAPE_CHORD] = self._on_escape  # cancel a recording (spec §4, state 7)
         return chords
 
+    def _pipeline_stalled_for(self) -> float | None:
+        since = getattr(self, "_busy_since", None)
+        return None if since is None else time.monotonic() - since
+
+    def _start_hang_watch(self, main_loop: bool) -> None:
+        """A hang leaves its stacks in errors.log (the 2026-10-11 force-quits
+        left nothing): the NSApp main loop (hotkeys, tray) not answering a
+        ping, or a pipeline run wedged, for hang_watch.STALL_S. Plus
+        `kill -USR1 <pid>` for an on-demand dump."""
+        hang_watch.install_faulthandler()
+        probes = [hang_watch.Probe("pipeline worker", self._pipeline_stalled_for)]
+        if main_loop:
+            try:
+                from PyObjCTools import AppHelper  # type: ignore
+                probes.append(hang_watch.MainLoopProbe(AppHelper.callAfter))
+            except Exception as e:
+                print(f"[daemon] main-loop watchdog unavailable: {e}", flush=True)
+        self._hang_watch = hang_watch.Watchdog(probes).start()
+
     def run(self) -> None:
         hold_key = self.cfg["hotkeys"]["record_hold"]
         self._hold = self._build_hold(hold_key)
@@ -2156,6 +2178,7 @@ class Daemon:
         )
 
         headless = bool(os.environ.get("OPENFLOW_NO_TRAY"))
+        self._start_hang_watch(main_loop=not headless)
         try:
             if headless:
                 # Headless mode: just block until SIGINT.
