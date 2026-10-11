@@ -16,6 +16,7 @@ Supported parser forms (same as hotkeys.HoldOrToggle._parse):
 """
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Callable, Optional
@@ -163,7 +164,7 @@ _SIDE_BITS = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010 | 0x0020 | 0x0040 | 0x20
 
 def _event_ms(ev) -> Optional[float]:
     """When the key actually moved (ms since boot), not when we got to it.
-    The monitor runs on the main thread, behind the key-down's own work
+    Each event is handled on the key thread behind the previous key's work
     (mic open, AX reads: ~0.3 s cold), so handler time made taps look like
     holds and broke double-taps."""
     try:
@@ -171,6 +172,69 @@ def _event_ms(ev) -> Optional[float]:
     except Exception:
         return None
     return ts * 1000.0 if ts > 0 else None
+
+
+class KeyWorker:
+    """One ordered thread that runs every hotkey's work.
+
+    The NSEvent monitors call us on the NSApp main thread. Doing the work
+    there (mic open, AX paste target, widget, cues, the key-up tail wait)
+    held up every later key event and the rest of the main loop: key-down
+    queueing p99 560 ms, the second press of a double-tap p50 171 ms late,
+    one slow mic open cascading into the next press. The monitors now only
+    read the event (its timestamp included) and hand it here; this thread
+    runs the hold key's state machine and the chord callbacks in arrival
+    order, so taps, holds, double-taps and chords behave exactly as before.
+    PortAudio, AX and NSSound are fine off the main thread; the tray already
+    marshals its updates back with AppHelper.callAfter."""
+
+    def __init__(self, name: str = "hotkey-worker") -> None:
+        self._name = name
+        self._q: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+        self._pending = 0
+        self._idle = threading.Condition(self._lock)
+        self._busy_since: Optional[float] = None
+
+    def submit(self, fn: Callable[[], None]) -> None:
+        """Queue fn behind everything submitted before it. Never blocks."""
+        with self._lock:
+            self._pending += 1
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+        self._q.put(fn)
+
+    def drain(self, timeout: Optional[float] = None) -> bool:
+        """Wait until everything submitted so far has run (tests, shutdown)."""
+        with self._idle:
+            return self._idle.wait_for(lambda: self._pending == 0, timeout)
+
+    def busy_for(self) -> Optional[float]:
+        """How long the job now running has run (hang_watch), or None."""
+        since = self._busy_since
+        return None if since is None else time.monotonic() - since
+
+    def _run(self) -> None:
+        while True:
+            fn = self._q.get()
+            self._busy_since = time.monotonic()
+            try:
+                fn()
+            except Exception as e:   # the key thread must survive anything
+                print(f"[hotkey] worker error: {e}", flush=True)
+            finally:
+                self._busy_since = None
+                with self._idle:
+                    self._pending -= 1
+                    if self._pending == 0:
+                        self._idle.notify_all()
+
+
+# Shared by the hold key and the chords, so an Esc or the edit chord is
+# handled in order with the hold key's presses and releases.
+KEY_WORKER = KeyWorker()
 
 
 def accessibility_trusted() -> Optional[bool]:
@@ -223,6 +287,8 @@ class HoldOrToggle:
         self._install_lock = threading.Lock()
         self._stopped = False
         self._events_seen = False
+        # Where the work runs: the shared ordered key thread (KeyWorker).
+        self._dispatch: Callable[[Callable[[], None]], None] = KEY_WORKER.submit
 
     @staticmethod
     def _now_ms() -> float:
@@ -343,6 +409,8 @@ class HoldOrToggle:
         return bool(flags & self.target_flag)
 
     def _handler(self, ev) -> None:
+        """NSEvent monitor callback, on the main thread: read the event and
+        hand it to the key thread (KeyWorker). Nothing slow happens here."""
         try:
             et = ev.type()
             kc = ev.keyCode()
@@ -356,26 +424,35 @@ class HoldOrToggle:
             at = _event_ms(ev)
             if kc != self.target_vk:
                 if et == _NSEventTypeKeyDown and not ev.isARepeat():
-                    self._on_other_key(at)
+                    self._dispatch(lambda: self._on_other_key(at))
                 return
-            if et == _NSEventTypeFlagsChanged and self.target_flag is not None:
-                if self._key_is_down(int(ev.modifierFlags())):
-                    if self._down:
-                        # A press while we think the key is down: its last
-                        # release never reached us. Close that press out so
-                        # this one isn't swallowed.
-                        print("[hotkey] press while marked down — release was missed", flush=True)
-                        self._on_release(at)
-                    self._on_press(at)
-                else:
-                    self._on_release(at)
-            elif et == _NSEventTypeKeyDown:
-                if not ev.isARepeat():
-                    self._on_press(at)
-            elif et == _NSEventTypeKeyUp:
-                self._on_release(at)
+            if et == _NSEventTypeFlagsChanged:
+                flags, repeat = int(ev.modifierFlags()), False
+            else:
+                flags, repeat = 0, et == _NSEventTypeKeyDown and bool(ev.isARepeat())
+            self._dispatch(lambda: self._on_key_event(et, flags, repeat, at))
         except Exception as e:
             print(f"[hotkey] handler error: {e}", flush=True)
+
+    def _on_key_event(self, et: int, flags: int, repeat: bool,
+                      at: Optional[float]) -> None:
+        """The hold key moved (on the key thread, in event order)."""
+        if et == _NSEventTypeFlagsChanged and self.target_flag is not None:
+            if self._key_is_down(flags):
+                if self._down:
+                    # A press while we think the key is down: its last
+                    # release never reached us. Close that press out so
+                    # this one isn't swallowed.
+                    print("[hotkey] press while marked down — release was missed", flush=True)
+                    self._on_release(at)
+                self._on_press(at)
+            else:
+                self._on_release(at)
+        elif et == _NSEventTypeKeyDown:
+            if not repeat:
+                self._on_press(at)
+        elif et == _NSEventTypeKeyUp:
+            self._on_release(at)
 
     def start(self, install_delay_s: float | None = None) -> None:
         ax = accessibility_trusted()
@@ -428,6 +505,8 @@ class HotkeySet:
         self.bindings = bindings
         self._monitor = None
         self._install_lock = threading.Lock()
+        # Chords run on the same ordered key thread as the hold key.
+        self._dispatch: Callable[[Callable[[], None]], None] = KEY_WORKER.submit
         self._stopped = False
         self._compiled = []
         for chord, cb in bindings.items():
@@ -484,13 +563,17 @@ class HotkeySet:
             held = flags & mod_mask
             for (vk, required), cb in self._compiled:
                 if kc == vk and (held & required) == required:
-                    try:
-                        cb()
-                    except Exception as e:
-                        print(f"[hotkey] chord handler error: {e}", flush=True)
+                    self._dispatch(lambda cb=cb: self._run_chord(cb))
                     break
         except Exception as e:
             print(f"[hotkey] chord listener error: {e}", flush=True)
+
+    @staticmethod
+    def _run_chord(cb: Callable[[], None]) -> None:
+        try:
+            cb()
+        except Exception as e:
+            print(f"[hotkey] chord handler error: {e}", flush=True)
 
     def start(self, install_delay_s: float | None = None) -> None:
         _schedule_install(self, install_delay_s)

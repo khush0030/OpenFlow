@@ -61,6 +61,13 @@ def alt_l_up(ts, also=0):
     return Ev(hn._NSEventTypeFlagsChanged, ALT_L, (OPTION if also else 0) | also, ts)
 
 
+def feed(h, ev):
+    """Deliver an NSEvent as the monitor does, then wait for the key thread
+    (hotkeys_nsevent.KeyWorker) to have handled it."""
+    h._handler(ev)
+    assert hn.KEY_WORKER.drain(2.0), "key thread stuck"
+
+
 class Clock:
     """Handler-time clock: what _now_ms() returned before the fix."""
     def __init__(self): self.ms = 10_000.0
@@ -104,9 +111,9 @@ def test_slow_key_down_work_does_not_turn_a_tap_into_a_hold(monkeypatch):
     h = make_hold(rec, monkeypatch, clock)
     # A real double-tap: 120 ms tap, 110 ms gap, second tap. Each event is
     # handled only after the previous handler returned (clock moves 400 ms).
-    h._handler(alt_l_down(100.000))
-    h._handler(alt_l_up(100.120))
-    h._handler(alt_l_down(100.230))
+    feed(h, alt_l_down(100.000))
+    feed(h, alt_l_up(100.120))
+    feed(h, alt_l_down(100.230))
     assert h.hands_free, "the double-tap must start a hands-free session"
     assert rec.on
     assert rec.log == ["start", "cancel", "start"]
@@ -116,8 +123,8 @@ def test_a_real_hold_is_still_a_hold(monkeypatch):
     clock = Clock()
     rec = Rec(clock, start_cost_ms=400)
     h = make_hold(rec, monkeypatch, clock)
-    h._handler(alt_l_down(50.0))
-    h._handler(alt_l_up(52.5))
+    feed(h, alt_l_down(50.0))
+    feed(h, alt_l_up(52.5))
     assert rec.log == ["start", "stop"]
     assert not h.hands_free
 
@@ -125,9 +132,9 @@ def test_a_real_hold_is_still_a_hold(monkeypatch):
 def test_events_without_timestamps_fall_back_to_the_clock():
     rec = Rec()
     h = make_hold(rec)
-    h._handler(alt_l_down(0.0))       # timestamp 0: unknown
+    feed(h, alt_l_down(0.0))       # timestamp 0: unknown
     h._press_ms -= 1000
-    h._handler(alt_l_up(0.0))
+    feed(h, alt_l_up(0.0))
     assert rec.log == ["start", "stop"]
 
 
@@ -136,35 +143,35 @@ def test_events_without_timestamps_fall_back_to_the_clock():
 def test_left_option_release_seen_while_right_option_is_held():
     rec = Rec()
     h = make_hold(rec)
-    h._handler(alt_l_down(10.0))
+    feed(h, alt_l_down(10.0))
     # Right Option goes down too (keyCode 61: not ours, ignored) ...
-    h._handler(Ev(hn._NSEventTypeFlagsChanged, ALT_R, OPTION | L_ALT_BIT | R_ALT_BIT, 10.5))
+    feed(h, Ev(hn._NSEventTypeFlagsChanged, ALT_R, OPTION | L_ALT_BIT | R_ALT_BIT, 10.5))
     # ... then left Option comes up: Option flag still set, left bit clear.
-    h._handler(alt_l_up(11.0, also=R_ALT_BIT))
+    feed(h, alt_l_up(11.0, also=R_ALT_BIT))
     assert rec.log == ["start", "stop"], "left Option's release must stop the hold"
     assert not h._down
-    h._handler(alt_l_down(20.0))
+    feed(h, alt_l_down(20.0))
     assert rec.on, "the next press must start recording"
 
 
 def test_without_side_bits_the_option_flag_decides():
     rec = Rec()
     h = make_hold(rec)
-    h._handler(Ev(hn._NSEventTypeFlagsChanged, ALT_L, OPTION, 10.0))
+    feed(h, Ev(hn._NSEventTypeFlagsChanged, ALT_L, OPTION, 10.0))
     assert rec.on
-    h._handler(Ev(hn._NSEventTypeFlagsChanged, ALT_L, 0, 11.0))
+    feed(h, Ev(hn._NSEventTypeFlagsChanged, ALT_L, 0, 11.0))
     assert not rec.on
 
 
 def test_a_missed_release_does_not_swallow_the_next_press():
     rec = Rec()
     h = make_hold(rec)
-    h._handler(alt_l_down(10.0))
+    feed(h, alt_l_down(10.0))
     # Its release never arrived (e.g. delivered to a secure-input field).
-    h._handler(alt_l_down(30.0))
+    feed(h, alt_l_down(30.0))
     assert rec.log == ["start", "stop", "start"]
     assert rec.on and h._down
-    h._handler(alt_l_up(32.0))
+    feed(h, alt_l_up(32.0))
     assert not rec.on
 
 
@@ -174,12 +181,12 @@ def test_release_after_stopping_a_hands_free_session_does_nothing():
     rec = Rec()
     h = make_hold(rec)
     for t, ev in ((1.0, alt_l_down), (1.1, alt_l_up), (1.2, alt_l_down), (1.3, alt_l_up)):
-        h._handler(ev(t))
+        feed(h, ev(t))
     assert h.hands_free and rec.on
-    h._handler(alt_l_down(9.0))           # stops the session
+    feed(h, alt_l_down(9.0))           # stops the session
     assert not rec.on
     rec.log.clear()
-    h._handler(alt_l_up(9.8))
+    feed(h, alt_l_up(9.8))
     assert rec.log == [], "the stop press's release must not stop again"
     assert h._mode == "idle"
 
@@ -206,30 +213,30 @@ def test_a_tap_cancels_its_take_instead_of_stopping_it(backend):
 def test_option_used_as_a_modifier_drops_the_take():
     rec = Rec()
     h = make_hold(rec)
-    h._handler(alt_l_down(5.0))
-    h._handler(Ev(hn._NSEventTypeKeyDown, KEY_A, OPTION | L_ALT_BIT, 5.3))   # ⌥A
+    feed(h, alt_l_down(5.0))
+    feed(h, Ev(hn._NSEventTypeKeyDown, KEY_A, OPTION | L_ALT_BIT, 5.3))   # ⌥A
     assert rec.log == ["start", "cancel"]
-    h._handler(alt_l_up(6.0))
+    feed(h, alt_l_up(6.0))
     assert rec.log == ["start", "cancel"], "its release must not stop or arm a double-tap"
-    h._handler(alt_l_down(6.2))
+    feed(h, alt_l_down(6.2))
     assert not h.hands_free and rec.on, "the next press is a fresh hold"
 
 
 def test_typing_late_in_a_long_hold_keeps_the_take():
     rec = Rec()
     h = make_hold(rec)
-    h._handler(alt_l_down(5.0))
-    h._handler(Ev(hn._NSEventTypeKeyDown, KEY_A, OPTION | L_ALT_BIT, 8.0))
+    feed(h, alt_l_down(5.0))
+    feed(h, Ev(hn._NSEventTypeKeyDown, KEY_A, OPTION | L_ALT_BIT, 8.0))
     assert rec.on
-    h._handler(alt_l_up(9.0))
+    feed(h, alt_l_up(9.0))
     assert rec.log == ["start", "stop"]
 
 
 def test_without_on_cancel_a_tap_still_stops_the_take():
     rec = Rec()
     h = hn.HoldToTalk("alt_l", rec.start, rec.stop, is_active=lambda: rec.on)
-    h._handler(alt_l_down(1.0))
-    h._handler(alt_l_up(1.1))
+    feed(h, alt_l_down(1.0))
+    feed(h, alt_l_up(1.1))
     assert rec.log == ["start", "stop"]
 
 

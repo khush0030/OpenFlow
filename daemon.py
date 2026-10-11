@@ -2136,6 +2136,10 @@ class Daemon:
         `kill -USR1 <pid>` for an on-demand dump."""
         hang_watch.install_faulthandler()
         probes = [hang_watch.Probe("pipeline worker", self._pipeline_stalled_for)]
+        key_worker = getattr(sys.modules.get("hotkeys_nsevent"), "KEY_WORKER", None)
+        if key_worker is not None and not _PYNPUT:
+            # Key presses run there, in order: one stuck job holds every later key.
+            probes.append(hang_watch.Probe("hotkey worker", key_worker.busy_for))
         if main_loop:
             try:
                 from PyObjCTools import AppHelper  # type: ignore
