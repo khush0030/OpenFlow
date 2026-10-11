@@ -76,6 +76,14 @@ def _never_supervise_the_real_daemon(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _no_daemon_key_cache(monkeypatch):
+    # keys.current is the running daemon's start-up key read; a test that
+    # builds a real Daemon must not leave it for the doctor tests.
+    import keys
+    monkeypatch.setattr(keys, "current", None)
+
+
+@pytest.fixture(autouse=True)
 def _hub_never_reads_the_real_appearance(monkeypatch):
     # A HubWindow built without an appearance source reads [widget]
     # appearance from the real config.toml (and macOS dark mode): tests would

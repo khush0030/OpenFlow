@@ -330,6 +330,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     for c in doctor.check_files():
         print(c["line"])
     print(doctor.check_sarvam_key()["line"])
+    for c in doctor.check_fallback_keys():
+        print(c["line"])
 
     return 0
 
