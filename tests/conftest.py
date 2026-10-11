@@ -31,6 +31,11 @@ import stream_stt
 # played through the speakers, and on a sleeping output device blocked the
 # cue thread ~10 s, so test_cue_never_blocks failed in full runs only.
 sounds._load = lambda cue: None
+# Same for cue routing: between tests a leaked cue must not read the real
+# default output and start an afplay probe of it.
+import output_devices
+output_devices.outputs = lambda: (None, None)
+sounds._probe = lambda uid: True
 
 
 @pytest.fixture(autouse=True)
