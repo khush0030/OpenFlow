@@ -88,8 +88,34 @@ def wlog(monkeypatch):
     return log
 
 
+class FakeSupervision:
+    """A Restarter on a fake clock: no real daemon is looked up, launched or
+    killed; tests set `info` (the lock holder) and read launches / kills."""
+
+    def __init__(self) -> None:
+        import supervisor
+        self.t = 1000.0
+        self.info = None
+        self.launches: list[bool] = []
+        self.kills: list = []
+        self.hang = supervisor.HangWatch(lambda: self.t)
+        self.restarter = supervisor.Restarter(
+            self.hang, clock=lambda: self.t, daemon=lambda: self.info,
+            launch=lambda force=False: self.launches.append(force) or True,
+            kill=lambda pid: self.kills.append(pid) or True,
+            killable=lambda info: info is not None and bool(info.pid),
+            run_async=lambda fn: fn())
+
+
 @pytest.fixture
-def fa(monkeypatch):
+def sup(monkeypatch):
+    s = FakeSupervision()
+    monkeypatch.setattr(fw, "make_restarter", lambda: s.restarter)
+    return s
+
+
+@pytest.fixture
+def fa(monkeypatch, sup):
     monkeypatch.setattr(fw, "WidgetClient", FakeClient)
     monkeypatch.setattr(fw, "pin_overlay", lambda w: True)
     monkeypatch.setattr(fw.FlowApp, "_screen_rect", lambda self: SCREEN)
@@ -394,16 +420,111 @@ def test_connection_changes_are_logged(fa, wlog):
 
 
 def test_exit_and_self_quit_are_logged(fa, wlog, monkeypatch):
+    import supervisor
     quits = []
     monkeypatch.setattr(fw.QApplication, "quit", staticmethod(lambda: quits.append(1)))
     fa._on_message({"type": "exit"})
     fa.client.connected = False
     fa.client.connect = lambda: False
-    fa._lost_since = 0.0                       # gone for "ever"
+    supervisor.mark_user_quit()                # the user quit OpenFlow
     fa._try_connect()
     assert len(quits) == 2
     assert "daemon asked the widget to exit" in wlog.text()
-    assert "no daemon for 30 s" in wlog.text()
+    assert "OpenFlow was quit" in wlog.text()
+
+
+# -- Crash recovery: the widget brings the daemon back (audit 2026-10-11) -----
+
+def _lose_daemon(fa):
+    fa.client.connected = False
+    fa.client.connect = lambda: False
+    fa._on_message({"type": "_disconnected"})
+
+
+def _tick(fa, sup, seconds):
+    for _ in range(int(seconds)):
+        sup.t += 1
+        fa._try_connect()
+
+
+def test_dead_daemon_shows_restarting_then_relaunches(fa, sup):
+    from ui import widget_copy as copy
+    fa._on_message({"type": "state", "state": "card", "text": "x"})
+    _lose_daemon(fa)
+    assert not fa.widget.isVisible() and fa.popup is None   # quiet at first
+    fa._try_connect()
+    _tick(fa, sup, 2)
+    assert sup.launches == [False]
+    assert fa.supervision == "restarting"
+    assert fa.widget.isVisible() and fa.widget.view == "idle"
+    assert isinstance(fa.popup, fw.Toast) and fa.popup.button is None
+    assert fa.popup.title_label.text() == copy.RESTARTING
+
+
+def test_daemon_back_clears_restarting(fa, sup):
+    _lose_daemon(fa)
+    fa._try_connect()
+    _tick(fa, sup, 2)
+    assert fa.popup is not None
+    fa.client.connect = lambda: True
+    fa._try_connect()
+    assert fa.supervision is None and fa.popup is None
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert fa.widget.view == "recording"
+
+
+def test_gives_up_with_stopped_and_restart(fa, sup):
+    from ui import widget_copy as copy
+    _lose_daemon(fa)
+    fa._try_connect()
+    _tick(fa, sup, 2 + 5 + 15 + 15)
+    assert len(sup.launches) == 3
+    assert fa.supervision == "stopped"
+    assert fa.popup.title_label.text() == copy.STOPPED
+    assert fa.popup.button.text() == copy.RESTART
+    fa.popup.button.click()
+    assert len(sup.launches) == 4
+    assert fa.supervision == "restarting"
+
+
+def test_never_relaunches_after_a_quit(fa, sup, monkeypatch):
+    import supervisor
+    quits = []
+    monkeypatch.setattr(fw.QApplication, "quit", staticmethod(lambda: quits.append(1)))
+    supervisor.mark_user_quit()
+    _lose_daemon(fa)
+    assert quits == [1]
+    _tick(fa, sup, 30)
+    assert sup.launches == []
+
+
+def test_connected_but_hung_daemon_is_killed(fa, sup):
+    import supervisor
+    sup.info = supervisor.LockInfo(4242, None)
+    fa._on_message({"type": "_ping", "ok": False})
+    sup.t += 10
+    fa._on_message({"type": "_ping", "ok": False})
+    assert sup.kills == [] and fa.supervision is None
+    sup.t += 10
+    fa._on_message({"type": "_ping", "ok": False})
+    assert sup.kills == [4242]
+    assert fa.supervision == "restarting" and fa.widget.isVisible()
+    # The killed daemon's socket drops: keep saying so, then relaunch.
+    sup.info = None
+    _lose_daemon(fa)
+    assert fa.popup is not None and fa.widget.isVisible()
+    fa._try_connect()
+    _tick(fa, sup, 2)
+    assert sup.launches == [False]
+
+
+def test_answered_pings_never_kill(fa, sup):
+    import supervisor
+    sup.info = supervisor.LockInfo(4242, None)
+    for _ in range(10):
+        sup.t += 5
+        fa._on_message({"type": "_ping", "ok": True})
+    assert sup.kills == []
 
 
 def test_pin_overlay_failure_is_logged(fa, wlog, monkeypatch):

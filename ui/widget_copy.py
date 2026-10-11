@@ -13,6 +13,11 @@ RETRY = "Retry"
 # Transcription failed but the take's audio is saved (Phase 4).
 SAVED = "Saved"
 OFFLINE_SAVED = "Offline · saved"
+# The daemon dropped or stopped answering; the widget brings it back
+# (supervisor.Restarter) and says so quietly.
+RESTARTING = "Restarting…"
+STOPPED = "OpenFlow stopped"
+RESTART = "Restart"
 CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"
 # Card after a paste that couldn't land (state 6, reason "not_pasted").
