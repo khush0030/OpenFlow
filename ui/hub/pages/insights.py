@@ -11,6 +11,7 @@ Layout: every multi-card row is an S.Reflow, so cards stack instead of
 clipping at the 985 pt window (≈735 pt panel)."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Sequence
@@ -25,7 +26,7 @@ import voice
 import voice_profile
 from ui import widget_copy
 from ui.hub import style as S
-from ui.hub import workers
+from ui.hub import datastamp, workers
 from ui.hub.page import Page
 from ui.hub.pages import _charts as C
 from ui.hub.pages import _voice_charts as V
@@ -136,6 +137,41 @@ def _hour(h: int) -> str:
     return f"{(h % 12) or 12} {'am' if h < 12 else 'pm'}"
 
 
+@dataclass
+class _Data:
+    """Everything Insights shows, computed off the Qt thread by _compute."""
+    rows: list
+    error: str | None
+    now: datetime
+    stats: stats.Stats
+    voice: voice.VoiceStats | None
+    rel: reliability.Reliability
+    profile: voice_profile.Profile | None
+
+
+def _compute(path: Path, profile_path: Path, now: datetime) -> _Data:
+    """Load and analyse the history. Pure data, no Qt: runs on a worker."""
+    err = None
+    try:
+        rows = stats.load(path)
+    except Exception as exc:
+        rows = []
+        err = f"Couldn't read your history at {path} ({exc})."
+    st = stats.compute(rows, now=now)
+    try:
+        v = voice.analyze(rows, now=now)
+    except Exception as exc:  # pragma: no cover - keep the usage tab alive
+        print(f"[hub.insights] voice analysis failed: {exc}", flush=True)
+        v = None
+    try:
+        takes, cols = reliability.load(path)
+        rel = reliability.analyze(takes, cols)
+    except Exception as exc:  # keep the other tabs alive
+        print(f"[hub.insights] reliability analysis failed: {exc}", flush=True)
+        rel = reliability.Reliability()
+    return _Data(rows, err, now, st, v, rel, voice_profile.load(profile_path))
+
+
 class InsightsPage(Page):
     key = "insights"
 
@@ -155,6 +191,8 @@ class InsightsPage(Page):
         self._provider_asked = False
         self.profile: voice_profile.Profile | None = None
         self.profile_busy = False
+        self._data_key_shown = None      # history stamp + day the widgets show
+        self._data_key_pending = None    # …and the one a worker is computing
 
         body = QWidget()
         root = QVBoxLayout(body)
@@ -879,24 +917,49 @@ class InsightsPage(Page):
             "here means the first choice was slow or down and the take still landed.")
 
     # ════════════════════════ data ════════════════════════
+    def _data_key(self, now: datetime) -> tuple:
+        return datastamp.history_stamp(self.ctx.history_path), now.date()
+
     def shown(self, **kwargs) -> None:
+        """Keep showing the last numbers; recompute them on a worker only
+        when history.sqlite changed (or the day rolled over) since."""
         try:
-            self.reload()
+            now = self.now()
+            key = self._data_key(now)
+            if key in (self._data_key_shown, self._data_key_pending):
+                return
+            self._data_key_pending = key
+            path, profile_path = self.ctx.history_path, self.profile_path
+
+            def done(data, error) -> None:
+                if self._data_key_pending != key:
+                    return                       # a newer load is on its way
+                self._data_key_pending = None
+                if error is not None:
+                    print(f"[hub.insights] reload failed: {error!r}", flush=True)
+                    return
+                self._apply(data)
+                self._data_key_shown = key
+
+            # First load: nothing to paint yet, start now. Later: paint the
+            # last numbers first (see workers.REFRESH_DELAY_MS).
+            run = workers.run_in_thread if self._data_key_shown is None else workers.refresh_in_thread
+            run(self, lambda: _compute(path, profile_path, now), done)
         except Exception as exc:  # pragma: no cover - never crash the window
             print(f"[hub.insights] reload failed: {exc}", flush=True)
 
     def reload(self) -> None:
-        err = None
-        try:
-            rows = stats.load(self.ctx.history_path)
-        except Exception as exc:
-            rows = []
-            err = f"Couldn't read your history at {self.ctx.history_path} ({exc})."
-        self.rows = rows
-        self.error_note.setText(err or "")
-        self.error_note.setVisible(bool(err))
+        """Recompute now, on the calling (Qt) thread."""
         now = self.now()
-        st = stats.compute(rows, now=now)
+        key = self._data_key(now)
+        self._apply(_compute(self.ctx.history_path, self.profile_path, now))
+        self._data_key_shown, self._data_key_pending = key, None
+
+    def _apply(self, d: "_Data") -> None:
+        rows, now = d.rows, d.now
+        self.rows = rows
+        self.error_note.setText(d.error or "")
+        self.error_note.setVisible(bool(d.error))
 
         if rows:
             first = datetime.fromtimestamp(rows[0].ts)
@@ -904,18 +967,11 @@ class InsightsPage(Page):
         else:
             self.since_label.setText("No dictations yet · on this Mac".upper())
 
-        self._fill_usage(st, now)
-        try:
-            self._fill_voice(voice.analyze(rows, now=now))
-        except Exception as exc:  # pragma: no cover - keep the usage tab alive
-            print(f"[hub.insights] voice analysis failed: {exc}", flush=True)
-        try:
-            takes, cols = reliability.load(self.ctx.history_path)
-            self._fill_reliability(reliability.analyze(takes, cols))
-        except Exception as exc:  # keep the other tabs alive
-            print(f"[hub.insights] reliability analysis failed: {exc}", flush=True)
-            self._fill_reliability(reliability.Reliability())
-        self.profile = voice_profile.load(self.profile_path)
+        self._fill_usage(d.stats, now)
+        if d.voice is not None:
+            self._fill_voice(d.voice)
+        self._fill_reliability(d.rel)
+        self.profile = d.profile
         self._render_profile()
         if self.tab == 1:
             self._ask_provider()

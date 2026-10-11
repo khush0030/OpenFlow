@@ -310,7 +310,9 @@ def test_profile_busy_state(voice_db, tmp_path, monkeypatch):
     pending = []
     monkeypatch.setattr(workers, "run_in_thread", lambda parent, fn, done: pending.append((fn, done)))
     page = make(voice_db, profile_path=tmp_path / "vp.json")
-    pending.clear()
+    while pending:                                           # the history load
+        fn, done = pending.pop(0)
+        done(fn(), None)
     page.write_profile()
     assert page.profile_busy and not page.profile_btn.isEnabled()
     assert page.profile_btn.text() == "Writing…"
@@ -330,3 +332,35 @@ def test_reloading_with_phrase_chips_does_not_crash(voice_db):
         _app.processEvents()
     assert "make sure ×4" in page.phrase_labels
     assert page.phrase_flow.count() == len(page.phrase_labels)
+
+
+# ── history load: off the Qt thread, cached until the file changes ─────────
+
+def test_shown_skips_recompute_until_history_changes(db, monkeypatch):
+    from ui.hub.pages import insights
+    calls = []
+    real = insights._compute
+    monkeypatch.setattr(insights, "_compute", lambda *a: calls.append(1) or real(*a))
+    page = make(db)
+    assert len(calls) == 1
+    page.shown()
+    page.shown()
+    assert len(calls) == 1                                   # nothing changed: no work
+    History(db).add("one more", "One more.", "verbatim", "en", 1.0, ts=ts(10, 1, 12))
+    page.shown()
+    assert len(calls) == 2
+    assert page.words_value.text() == "413"
+
+
+@pytest.mark.real_workers
+def test_recompute_runs_on_a_worker(db, monkeypatch):
+    import threading
+    from hub_async import deliver_queued
+    from ui.hub.pages import insights
+    threads = []
+    real = insights._compute
+    monkeypatch.setattr(insights, "_compute",
+                        lambda *a: threads.append(threading.current_thread().name) or real(*a))
+    page = make(db)
+    assert deliver_queued(lambda: page.since_label.text() == "SINCE SEP 29, 2026 · ON THIS MAC")
+    assert threads == ["hub-worker"]
