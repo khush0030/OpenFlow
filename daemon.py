@@ -90,6 +90,7 @@ from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
 import groq_stt
 import keys
+import retry_queue
 import llm
 from sarvam import STT_URL, warm
 from dictionary import Dictionary
@@ -417,6 +418,8 @@ class Daemon:
         self._net_up = lambda: network_up(STT_URL)
         self._takes_since = time.time()
         threading.Thread(target=self._tidy_takes, name="takes-prune", daemon=True).start()
+        # Failed takes transcribe themselves once the network is back.
+        self._auto_retry = retry_queue.for_daemon(self)
         self._prune_history()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
@@ -1773,6 +1776,9 @@ class Daemon:
                 reason = FLOW_SAVED if online else FLOW_OFFLINE
                 print(f"[daemon] take saved for Retry ({'online' if online else 'offline'})",
                       flush=True)
+            auto = getattr(self, "_auto_retry", None)
+            if auto is not None:
+                auto.kick()
         self._flow.failed(audio, ctx, run=run, reason=reason) or self._stale(run)
 
     def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
@@ -2168,6 +2174,8 @@ class Daemon:
         # Hub -> daemon commands (status, Paste again, Run it again as…).
         self._start_control_channel()
         self._start_edit_overlay_channel()
+        if getattr(self, "_auto_retry", None) is not None:
+            self._auto_retry.start()
 
         sv = self.cfg.get("sarvam") or {}
         print(

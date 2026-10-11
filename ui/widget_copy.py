@@ -26,6 +26,10 @@ CARD_NOT_PASTED_HINT = "On your clipboard · ⌘V to paste"
 # Card for an earlier take that lost the widget to a newer one (reason "queued").
 CARD_QUEUED_HEADING = "Earlier dictation"
 CARD_QUEUED_HINT = "Not pasted · Copy to use it"
+# Card for a saved take that transcribed itself once back online (reason
+# "recovered"); its text is already on the clipboard.
+CARD_RECOVERED_HEADING = "Recovered dictation"
+CARD_RECOVERED_HINT = "On your clipboard · ⌘V to paste"
 COPY = "Copy"
 MENU_APPEARANCE = "Appearance"
 MENU_HIDE = "Hide for 1 hour"

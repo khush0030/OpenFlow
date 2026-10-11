@@ -202,6 +202,16 @@ def test_not_pasted_card_says_so(fa):
     assert copy.CARD_HEADING in labels and copy.CARD_HINT in labels
 
 
+def test_recovered_card_says_it_is_on_the_clipboard(fa):
+    from ui import widget_copy as copy
+    from PyQt6.QtWidgets import QLabel
+    fa._on_message({"type": "state", "state": "card", "text": "hi", "reason": "recovered"})
+    labels = [l.text() for l in fa.popup.findChildren(QLabel)]
+    assert copy.CARD_RECOVERED_HEADING in labels and copy.CARD_RECOVERED_HINT in labels
+    fa.popup.copy_button.click()
+    assert fa.client.sent[-1] == {"action": "copy"}
+
+
 def test_menu_choices_apply_and_persist(fa):
     fa.choose("appearance", "ink")
     assert fa.theme is INK

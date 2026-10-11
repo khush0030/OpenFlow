@@ -513,7 +513,7 @@ class Card(Surface):
 
     def __init__(self, theme: Theme, text: str, on_copy, on_dismiss,
                  max_height: float | None = None, not_pasted: bool = False,
-                 queued: bool = False) -> None:
+                 queued: bool = False, recovered: bool = False) -> None:
         super().__init__(theme, radius=18)
         self.setFixedWidth(self.W + 2 * M)
         muted = f"color:{css(theme.muted)};background:transparent;"
@@ -524,7 +524,8 @@ class Card(Surface):
         head = QHBoxLayout()
         head.setSpacing(9)
         head.addWidget(MarkIcon(theme))
-        heading = QLabel(copy.CARD_QUEUED_HEADING if queued else
+        heading = QLabel(copy.CARD_RECOVERED_HEADING if recovered else
+                         copy.CARD_QUEUED_HEADING if queued else
                          copy.CARD_NOT_PASTED_HEADING if not_pasted else copy.CARD_HEADING)
         heading.setFont(ui_font(12, 500))
         heading.setStyleSheet(muted)
@@ -567,7 +568,8 @@ class Card(Surface):
         foot = QHBoxLayout()
         foot.setSpacing(7)
         foot.addWidget(PulseDot(theme))
-        hint = QLabel(copy.CARD_QUEUED_HINT if queued else
+        hint = QLabel(copy.CARD_RECOVERED_HINT if recovered else
+                      copy.CARD_QUEUED_HINT if queued else
                       copy.CARD_NOT_PASTED_HINT if not_pasted else copy.CARD_HINT)
         hint.setFont(ui_font(12))
         hint.setStyleSheet(muted)
@@ -1261,7 +1263,8 @@ class FlowApp(QObject):
         if v == "card":
             return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
                         max_height=max_height, not_pasted=self.reason == "not_pasted",
-                        queued=self.reason == "queued")
+                        queued=self.reason == "queued",
+                        recovered=self.reason == "recovered")
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:
