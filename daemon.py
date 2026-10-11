@@ -896,26 +896,82 @@ class Daemon:
 
     def on_record_start(self, hands_free: bool = False,
                         pressed_at_ms: float | None = None) -> None:
+        began = self._begin_record_start(hands_free, pressed_at_ms)
+        if began is not None:
+            self._finish_record_start(*began)
+
+    def _widget_start(self) -> None:
+        """The widget's mic button (FlowHooks.start_recording, under the flow
+        lock on the widget socket's thread). The widget answers now; the mic
+        opens on its own thread: opened here, a slow open (10 s when
+        CoreAudio was stuck, 2026-10-11) left every later click, ✓ and ✕
+        included, unread until it was done."""
+        began = self._begin_record_start(False, None)
+        if began is not None:
+            self._run_record_start(lambda: self._finish_record_start(*began))
+
+    def _run_record_start(self, fn) -> None:
+        threading.Thread(target=fn, name="record-start", daemon=True).start()
+
+    def _begin_record_start(self, hands_free: bool,
+                            pressed_at_ms: float | None) -> tuple[float, float] | None:
+        """Claim the start and show it: (t0, key-down time), or None when
+        paused, already recording, or another start is still opening the mic
+        (a second click / press is a no-op)."""
         if self.state.paused:
             print("[daemon] paused — key press ignored", flush=True)
-            return
-        if self.recorder.is_recording:
-            return
-        print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
-        t0 = time.monotonic()
-        # Key-down timing from the key event itself when the hotkey gave it
-        # (the handler can run late, behind the main thread's other work).
-        t_key = t0
-        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < EVENT_TIME_MAX_AGE_S:
-            t_key = pressed_at_ms / 1000.0
-        # Feedback first: the widget (and cue) answer the key now, not after
-        # the mic open below (~0.15 s), which used to leave a press looking
-        # ignored.
-        self.state.recording = RecordingState.RECORDING
-        self.state.notify()
-        with self._flow.lock:   # a lone tap's delayed collapse checks the take id
-            self._take_id = getattr(self, "_take_id", 0) + 1
-            self._flow.recording_started(hands_free=hands_free)
+            return None
+        with self._flow.lock:
+            if self.recorder.is_recording:
+                return None
+            if getattr(self, "_start_pending", False):
+                print("[daemon] start ignored: the mic is still opening for the last one",
+                      flush=True)
+                return None
+            self._start_pending = True
+            self._stop_after_start = None
+        try:
+            print(f"[daemon] recording (tone={self.state.tone.value}, lang={self.state.language.value})...", flush=True)
+            t0 = time.monotonic()
+            # Key-down timing from the key event itself when the hotkey gave it
+            # (the handler can run late, behind the main thread's other work).
+            t_key = t0
+            if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < EVENT_TIME_MAX_AGE_S:
+                t_key = pressed_at_ms / 1000.0
+            # Feedback first: the widget (and cue) answer the key now, not after
+            # the mic open below (~0.15 s), which used to leave a press looking
+            # ignored.
+            self.state.recording = RecordingState.RECORDING
+            self.state.notify()
+            with self._flow.lock:   # a lone tap's delayed collapse checks the take id
+                self._take_id = getattr(self, "_take_id", 0) + 1
+                self._flow.recording_started(hands_free=hands_free)
+        except BaseException:
+            with self._flow.lock:            # never leave the start claimed
+                self._start_pending = False
+            raise
+        return t0, t_key
+
+    def _finish_record_start(self, t0: float, t_key: float) -> None:
+        """Open the mic for the claimed start, then act on a ✓ / ✕ / key-up
+        that came while it opened (_record_stop deferred it)."""
+        opened = False
+        try:
+            opened = self._open_mic_for_take(t0, t_key)
+        finally:
+            with self._flow.lock:
+                self._start_pending = False
+                stop, self._stop_after_start = self._stop_after_start, None
+        if opened and stop:
+            print(f"[daemon] {stop} came while the mic was opening — applying it now",
+                  flush=True)
+            if stop == "cancel":
+                self._cancel_recording()
+            else:
+                self.on_record_stop()
+
+    def _open_mic_for_take(self, t0: float, t_key: float) -> bool:
+        """False when no input would open (the widget says so)."""
         # Then the mic, before every other key-down read: the paste target
         # (AX), the screen names and the STT stream all finish while the
         # user talks; the stream gets the blocks it missed (attach).
@@ -937,7 +993,7 @@ class Daemon:
             self.state.recording = RecordingState.IDLE
             self.state.notify()
             self._flow.no_audio(None, None)
-            return
+            return False
         t_mic = time.monotonic()
         self._recording_since = t_mic      # the hands-free cap counts from here
         remembered = capture_paste_target()
@@ -970,6 +1026,7 @@ class Daemon:
         if t_mic - t_open > SLOW_MIC_OPEN_S:
             self._warn(f"slow mic open: {1000 * (t_mic - t_open):.0f}ms in PortAudio "
                        "(CoreAudio busy: an output device failing to start?)")
+        return True
 
     def _on_hold_cancel(self) -> None:
         """The hold key was tapped (first half of a double-tap) or used as a
@@ -1102,7 +1159,7 @@ class Daemon:
         self._flow = FlowController(
             emit=self._send_widget,
             hooks=FlowHooks(
-                start_recording=self.on_record_start,
+                start_recording=self._widget_start,
                 finish_recording=self.on_record_stop,
                 cancel_recording=self._cancel_recording,
                 rerun=self._rerun,
@@ -1221,7 +1278,7 @@ class Daemon:
         self._send_widget(self._flow.message())
 
     def _cancel_recording(self) -> None:
-        if not self.recorder.is_recording:
+        if not self.recorder.is_recording and not getattr(self, "_start_pending", False):
             return  # already stopped: a stray flag would cancel the next take
         self._cancel_pending = True
         try:
@@ -1232,7 +1289,8 @@ class Daemon:
     def _on_escape(self) -> None:
         # Recording: stop and discard. Processing: discard the result (the
         # flow ignores Esc in every other state).
-        if self.recorder.is_recording or self._flow.state == FLOW_PROCESSING:
+        if (self.recorder.is_recording or getattr(self, "_start_pending", False)
+                or self._flow.state == FLOW_PROCESSING):
             print(f"[daemon] Esc — cancel (state={self._flow.state})", flush=True)
             self._flow.handle_action({"action": "cancel"})
 
@@ -1508,6 +1566,17 @@ class Daemon:
             self._record_stop(event_ms)
 
     def _record_stop(self, event_ms: float | None = None) -> None:
+        if getattr(self, "_start_pending", False):
+            # ✓ / ✕ / Esc while the mic is still opening (the widget already
+            # shows recording): stop as soon as the start is done. These were
+            # ignored ("widget confirm (state=idle)" x11, 2026-10-11). A
+            # cancel wins over a confirm: nothing gets pasted by mistake.
+            want = "cancel" if self._cancel_pending else "confirm"
+            if getattr(self, "_stop_after_start", None) != "cancel":
+                self._stop_after_start = want
+            print(f"[daemon] {want} while the mic is opening — will stop once it is open",
+                  flush=True)
+            return
         if not self.recorder.is_recording:
             return
         # The edit hotkey's take (if this is one) stops listening here,

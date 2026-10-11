@@ -134,6 +134,8 @@ def make_daemon():
     d._edit_selection = ""
     # Run pipelines inline so Undo/Retry sequences are deterministic.
     d._start_worker = d._pipeline_worker
+    # And the widget's mic-button start (its own thread in the app).
+    d._run_record_start = lambda fn: fn()
     d._build_flow_widget()
     return d
 
