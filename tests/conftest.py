@@ -42,6 +42,18 @@ def _never_play_real_sounds(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_probe_real_outputs(monkeypatch):
+    # Cue routing reads the default output from CoreAudio and probes it
+    # with afplay; tests that exercise routing pass their own fakes.
+    import output_devices
+    monkeypatch.setattr(output_devices, "outputs", lambda: (None, None))
+
+    def refuse(uid):
+        raise AssertionError("tests never probe a real output device")
+    monkeypatch.setattr(sounds, "_probe", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _never_open_real_websockets(monkeypatch):
     # Streaming STT connects to Sarvam at key-down; tests pass a fake
     # `connect`, and anything that slips through fails instead of dialing out.

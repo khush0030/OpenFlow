@@ -144,6 +144,9 @@ EVENT_TIME_MAX_AGE_S = 60.0
 # A tap's mic stays open this much past the double-tap window, so a second
 # press whose handler runs a little late still reuses it (audio.cancel).
 TAP_LINGER_SLACK_S = 0.15
+# A PortAudio open slower than this is logged as a warning (normally ~0.1 s;
+# 5-10 s when CoreAudio was stuck starting a dead output device).
+SLOW_MIC_OPEN_S = 1.0
 
 
 # Hands-free safety stop: a double-tap session (or the edit hotkey's take)
@@ -921,7 +924,10 @@ class Daemon:
             reused = (bool(getattr(self.recorder, "lingering", False))
                       and self.recorder.resume(keep_s=t_open - t_key))
             if not reused:
-                self.recorder.start()
+                # No cue may start its output device while the input opens:
+                # CoreAudio serializes them (sounds.mic_opening).
+                with sounds.mic_opening():
+                    self.recorder.start()
         except Exception as e:
             # No input would open (device busy / gone). Say so on screen
             # instead of leaving the widget recording nothing.
@@ -961,6 +967,9 @@ class Daemon:
             mic_ms = 1000 * (t_mic - t_key)
         print(f"[daemon] mic open {mic_ms:.0f}ms after key-down ({how}; "
               f"paste target +{1000 * (t_target - t_mic):.0f}ms)", flush=True)
+        if t_mic - t_open > SLOW_MIC_OPEN_S:
+            self._warn(f"slow mic open: {1000 * (t_mic - t_open):.0f}ms in PortAudio "
+                       "(CoreAudio busy: an output device failing to start?)")
 
     def _on_hold_cancel(self) -> None:
         """The hold key was tapped (first half of a double-tap) or used as a
@@ -1463,6 +1472,7 @@ class Daemon:
                         self._reload_config()
                     self._apply_pending_hotkeys()
                     self._reload_dictionary_if_changed()
+                    sounds.check_output()   # a new default output is probed early
                 watchdog.poll(self._widget.connected)
             except Exception as e:
                 print(f"[daemon] widget pump error: {e}", flush=True)
