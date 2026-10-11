@@ -25,6 +25,14 @@ import sounds
 import stream_stt
 
 
+# Session-wide too, not only per test: a cue fired by a timer a test leaked
+# (the hold-cue _after, 0.2 s) can reach the cue thread between one test's
+# teardown and the next one's setup, when the real _load is back. It then
+# played through the speakers, and on a sleeping output device blocked the
+# cue thread ~10 s, so test_cue_never_blocks failed in full runs only.
+sounds._load = lambda cue: None
+
+
 @pytest.fixture(autouse=True)
 def _never_play_real_sounds(monkeypatch):
     # The daemon plays cues on every widget state change; without this every
