@@ -40,7 +40,9 @@ class Entry:
     cleanup_provider: str | None = None
     # Never lose a word (Phase 4): NULL = pasted as before; 'failed' = not
     # transcribed yet, its audio kept at audio_path; 'retried' = transcribed
-    # later from the saved audio (widget Retry / History "Transcribe again").
+    # later from the saved audio (widget Retry / History "Transcribe again");
+    # 'discarded:no_speech' = no speech heard, nothing pasted, audio kept so
+    # History can still transcribe it (never retried by itself).
     status: str | None = None
     audio_path: str | None = None
 
@@ -77,6 +79,11 @@ _FAILOVER_COLS = ("stt_path", "cleanup_provider")
 _TAKE_COLS = ("status", "audio_path")
 STATUS_FAILED = "failed"
 STATUS_RETRIED = "retried"
+# A take judged to hold no speech (daemon: heard_speech / is_phantom). Not
+# a failure in Reliability ("discard…" reads as thrown away) and not in
+# failed_takes(), so AutoRetry leaves it alone; History offers it again.
+STATUS_NO_SPEECH = "discarded:no_speech"
+UNTRANSCRIBED = (STATUS_FAILED, STATUS_NO_SPEECH)
 # Same order as Entry's fields: rows are unpacked positionally.
 _COLS += ", " + ", ".join(_FAILOVER_COLS + _TAKE_COLS)
 

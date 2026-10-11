@@ -361,6 +361,78 @@ def heard_nothing(audio: np.ndarray, sample_rate: int = 16000,
     return loudest_rms(audio, sample_rate) < threshold
 
 
+# Was anything *said*? heard_nothing() only catches a dead mic: a live mic in
+# a quiet room sits at ~0.0015-0.0025 RMS (measured on a saved take,
+# 2026-10-11), right on NO_INPUT_RMS, so an empty or accidental take passes
+# it. Uploaded, that room noise comes back as a made-up word ("Okay.",
+# "Applications.", "I'll."): 21 of 21 such takes in openflow.log, none real.
+#
+# Speech is judged on the whole take in 20 ms frames of RMS, the same
+# measure as the live gate (stream_stt, [audio] silence_threshold = 0.01)
+# and trim_silence, so the numbers mean the same thing everywhere:
+# - a frame is (possibly soft) speech at SOFT_SPEECH_FACTOR x the silence
+#   threshold (0.006 by default: ~3x the room's floor, 40% under the live
+#   gate, so a quiet voice the stream never sent still counts);
+# - and it has to hold for MIN_SPEECH_RUN_S without a break: a syllable
+#   does, a click, a bump or a breath of noise doesn't.
+SPEECH_FRAME_S = 0.02
+SOFT_SPEECH_FACTOR = 0.6
+MIN_SPEECH_RUN_S = 0.06
+# Below this much audio at the full silence threshold a take is
+# low-energy: a lone stock word from it is likely made up
+# (transcribe.is_phantom). A spoken "okay" at a normal level has ~0.3-0.5 s.
+LOW_ENERGY_SPEECH_S = 0.25
+
+
+def frame_rms(audio: np.ndarray, sample_rate: int = 16000,
+              frame_s: float = SPEECH_FRAME_S) -> np.ndarray:
+    """RMS of each whole `frame_s` frame of the take."""
+    x = np.asarray(audio, dtype=np.float32).reshape(-1)
+    n = max(1, int(sample_rate * frame_s))
+    count = x.size // n
+    if count == 0:
+        return np.zeros(0, dtype=np.float64)
+    frames = x[: count * n].reshape(count, n).astype(np.float64)
+    return np.sqrt(np.mean(frames * frames, axis=1))
+
+
+def _longest_run(flags: np.ndarray) -> int:
+    best = run = 0
+    for f in flags:
+        run = run + 1 if f else 0
+        best = max(best, run)
+    return best
+
+
+def heard_speech(audio: np.ndarray, sample_rate: int = 16000,
+                 silence_threshold: float = 0.01) -> bool:
+    """True if some stretch of the take is loud enough, for long enough, to
+    be speech (see above). A threshold of 0 turns the check off."""
+    threshold = silence_threshold * SOFT_SPEECH_FACTOR
+    if threshold <= 0:
+        return np.size(audio) > 0
+    loud = frame_rms(audio, sample_rate) >= threshold
+    if not loud.any():
+        return False
+    need = max(1, int(round(MIN_SPEECH_RUN_S / SPEECH_FRAME_S)))
+    return _longest_run(loud) >= need
+
+
+def speech_seconds(audio: np.ndarray, sample_rate: int = 16000,
+                   threshold: float = 0.01) -> float:
+    """Seconds of the take at or above `threshold` (20 ms frames)."""
+    return float(np.count_nonzero(frame_rms(audio, sample_rate) >= threshold)) * SPEECH_FRAME_S
+
+
+def low_energy(audio: np.ndarray, sample_rate: int = 16000,
+               silence_threshold: float = 0.01) -> bool:
+    """Less than LOW_ENERGY_SPEECH_S of the take reached the silence
+    threshold: next to no speech at a normal level, however long it ran."""
+    if silence_threshold <= 0:
+        return False
+    return speech_seconds(audio, sample_rate, silence_threshold) < LOW_ENERGY_SPEECH_S
+
+
 def save_wav(path: str, audio: np.ndarray, sample_rate: int = 16000) -> None:
     import wavio
     pcm = np.clip(audio, -1.0, 1.0)

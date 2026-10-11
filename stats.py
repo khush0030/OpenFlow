@@ -181,8 +181,10 @@ def load(db_path: str | Path) -> list:
         if not cols:
             return []
         app = "app" if "app" in cols else "NULL"
-        # A take saved but not transcribed (Phase 4) has no words yet.
-        failed = "WHERE status IS NOT 'failed' " if "status" in cols else ""
+        # A take saved but not transcribed (Phase 4, or no speech heard) has
+        # no words yet.
+        failed = ("WHERE (status IS NULL OR status NOT IN "
+                  "('failed', 'discarded:no_speech')) " if "status" in cols else "")
         rows = c.execute(
             f"SELECT id, ts, raw, final, tone, lang, duration, {app} "
             f"FROM dictations {failed}ORDER BY ts, id"

@@ -75,8 +75,9 @@ import config as cfg_mod
 from openflow_logger import get_logger, log_exception
 
 _log = get_logger("daemon")
-from audio import NO_INPUT_RMS, Recorder, RecorderConfig, heard_nothing, loudest_rms
-from transcribe import Transcriber, TranscribeOptions
+from audio import (NO_INPUT_RMS, SOFT_SPEECH_FACTOR, Recorder, RecorderConfig, heard_nothing,
+                   heard_speech, loudest_rms, low_energy)
+from transcribe import Transcriber, TranscribeOptions, is_phantom
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
 _PYNPUT = os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput"
@@ -103,12 +104,12 @@ import formatting
 import screen_context
 import command_mode
 from prompts import app_kind as prompts_app_kind
-from history import STATUS_FAILED, History
+from history import STATUS_FAILED, STATUS_NO_SPEECH, UNTRANSCRIBED, History
 from takes import TakeStore, network_up
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
-from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
+from flow_state import CARD, NO_AUDIO, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
 from flow_state import OFFLINE as FLOW_OFFLINE, SAVED as FLOW_SAVED
 from flow_state import PROCESSING as FLOW_PROCESSING
 from flow_state import IDLE as FLOW_IDLE, RECORDING as FLOW_RECORDING, SILENT as FLOW_SILENT
@@ -1647,6 +1648,22 @@ class Daemon:
             self.state.notify()
             self._flow.no_audio(audio, ctx)
             return
+        silence = self._silence_threshold()
+        if not heard_speech(audio, sr, silence):
+            # A live mic but no speech (an accidental or empty take): the
+            # room's noise, uploaded, comes back as a made-up word. Same
+            # outcome as a dead mic, but the audio goes to History in case.
+            print(f"[daemon] no speech: loudest {loudest_rms(audio, sr):.5f}, nothing held "
+                  f">= {silence * SOFT_SPEECH_FACTOR:.4f} — not transcribing "
+                  "(kept in History).", flush=True)
+            if take is not None:
+                self._disarm_edit()
+            self._abort_stream(ctx)
+            self.state.recording = RecordingState.IDLE
+            self.state.notify()
+            self._flow.no_audio(audio, ctx)
+            self._keep_unheard(audio, ctx)
+            return
         # The take will be transcribed: have Sarvam finalize now, so its
         # ~0.25 s overlaps the hand-off below instead of following it.
         end_stream = getattr(stream, "end", None)
@@ -2049,7 +2066,8 @@ class Daemon:
 
     def _record_failed_take(self, audio_path: str, duration: float, *,
                             app: str | None = None, ts: float | None = None,
-                            tone: ToneMode | None = None) -> int | None:
+                            tone: ToneMode | None = None,
+                            status: str = STATUS_FAILED) -> int | None:
         hist_cfg = {**cfg_mod.DEFAULTS["history"], **(self.cfg.get("history") or {})}
         if not hist_cfg["enabled"]:
             return None
@@ -2057,7 +2075,49 @@ class Daemon:
             raw="", final="", tone=(tone or self._tone_for(None)).value,
             lang=self.state.language.value, duration=duration, app=app,
             cap=int(hist_cfg["size_cap"]), ts=ts,
-            status=STATUS_FAILED, audio_path=audio_path)
+            status=status, audio_path=audio_path)
+
+    def _silence_threshold(self) -> float:
+        return float(self.cfg["audio"].get("silence_threshold", 0.01))
+
+    def _unheard_row(self, audio, ctx: RunContext) -> RunContext:
+        """Keep a take judged to hold no speech: its audio on disk and a
+        History row (status no_speech) that "Transcribe again" can run, in
+        case it was a real, very quiet word. Never auto-retried."""
+        ctx = self._save_take(audio, ctx)
+        if ctx.audio_path and not ctx.edit_mode and ctx.history_id is None:
+            try:
+                hid = self._record_failed_take(
+                    ctx.audio_path, audio.size / self.cfg["audio"]["sample_rate"],
+                    app=getattr(ctx.target, "name", None) or None,
+                    tone=self._tone_for(ctx.target), status=STATUS_NO_SPEECH)
+            except Exception as e:
+                log_exception("daemon.takes", "could not save the unheard take to history", e)
+                hid = None
+            ctx = replace(ctx, history_id=hid)
+            if hid is None:              # nowhere to retry it from: don't keep the file
+                self._takes.discard(ctx.audio_path)
+        return ctx
+
+    def _keep_unheard(self, audio, ctx: RunContext) -> None:
+        """Key-up found no speech: keep the take (_unheard_row) off the
+        key-up thread; nothing waits on it."""
+        if self._needs_save(audio, ctx) is None:
+            return
+
+        def run() -> None:
+            try:
+                self._unheard_row(audio, ctx)
+            except Exception as e:
+                log_exception("daemon.takes", "could not keep the unheard take", e)
+        self._unheard_job = threading.Thread(target=run, name="take-unheard", daemon=True)
+        self._unheard_job.start()
+
+    def _take_unheard(self, audio, ctx: RunContext, run: int) -> None:
+        """The transcript was judged made up (is_phantom): nothing is
+        pasted, the widget says it can't hear you, History keeps the take."""
+        self._unheard_row(audio, ctx)
+        self._flow.failed(audio, ctx, run=run, reason=NO_AUDIO) or self._stale(run)
 
     def _take_failed(self, audio, ctx: RunContext, run: int, reason: str = "") -> None:
         """Transcription failed (after the whole provider chain): keep the
@@ -2174,6 +2234,17 @@ class Daemon:
             if not raw.strip():
                 self._take_landed(ctx)
                 self._flow.done(run=run) or self._stale(run)
+                return
+            if is_phantom(raw, opts.keyterms) and low_energy(
+                    audio, self.cfg["audio"]["sample_rate"], self._silence_threshold()):
+                # A lone stock word from a take with next to no speech in it:
+                # made up, not said. Don't paste it; History keeps the audio.
+                print("[daemon] dropped a likely made-up transcript (low-energy take) — "
+                      "not pasting (kept in History).", flush=True)
+                if not self._discarded(run, ctx, "after transcription"):
+                    self._take_unheard(audio, ctx, run)
+                else:
+                    self._take_landed(ctx)
                 return
             if self._discarded(run, ctx, "after transcription"):
                 self._take_landed(ctx)
@@ -2422,7 +2493,7 @@ class Daemon:
         e = self.history.get(entry_id)
         if e is None:
             raise ValueError("That dictation is no longer in your history")
-        if e.status != STATUS_FAILED:
+        if e.status not in UNTRANSCRIBED:
             return {"id": e.id, "raw": e.raw, "final": e.final, "status": e.status}
         if not e.audio_path or not os.path.exists(e.audio_path):
             raise ValueError("The audio for this take is no longer kept")

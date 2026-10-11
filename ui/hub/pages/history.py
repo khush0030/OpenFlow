@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
                              QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
                              QVBoxLayout, QWidget, QWidgetItem)
 
-from history import STATUS_FAILED, Entry, History
+from history import STATUS_NO_SPEECH, UNTRANSCRIBED, Entry, History
 from stats import word_count
 from ui.hub import style as S
 from ui.hub import datastamp, workers
@@ -61,6 +61,9 @@ TRANSCRIBING = "Transcribing…"
 FAILED_NOTE = ("This take couldn't be transcribed when you said it. Its audio is "
                "saved on this Mac, so nothing is lost: transcribe it again when "
                "you're back online.")
+NO_SPEECH_NOTE = ("OpenFlow heard no speech in this take, so nothing was pasted. Its "
+                  "audio is saved on this Mac: if you did say something, transcribe "
+                  "it again.")
 AUDIO_GONE_NOTE = ("This take couldn't be transcribed, and its audio is no longer "
                    "kept (saved takes are cleared after a week).")
 RETRANSCRIBE_FAILED = "Couldn't transcribe it just now. The audio is still saved; try again."
@@ -97,7 +100,7 @@ def when_label(ts: float) -> str:
 
 
 def is_failed(e: Entry) -> bool:
-    return getattr(e, "status", None) == STATUS_FAILED
+    return getattr(e, "status", None) in UNTRANSCRIBED
 
 
 def audio_kept(e: Entry) -> bool:
@@ -686,7 +689,9 @@ class _Detail(QWidget):
         self.pasted.set_plain(e.final or "")
         self.said.set_plain(e.raw or "")
         kept = failed and audio_kept(e)
-        self.failed_note.set_plain(FAILED_NOTE if kept else AUDIO_GONE_NOTE)
+        heard_none = getattr(e, "status", None) == STATUS_NO_SPEECH
+        self.failed_note.set_plain((NO_SPEECH_NOTE if heard_none else FAILED_NOTE)
+                                   if kept else AUDIO_GONE_NOTE)
         self.failed_section.setVisible(failed)
         for w in (self.pasted_section, self.said_card, self.rerun_section,
                   self.paste_btn, self.copy_btn):
