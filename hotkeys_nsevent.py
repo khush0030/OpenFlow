@@ -16,7 +16,6 @@ Supported parser forms (same as hotkeys.HoldOrToggle._parse):
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
 from typing import Callable, Optional
@@ -195,7 +194,7 @@ class HoldOrToggle:
         self.last_press_ms: Optional[float] = None
         self._monitor = None
         self._stopped = False
-        self._match_seen = False
+        self._events_seen = False
 
     @staticmethod
     def _now_ms() -> float:
@@ -319,15 +318,18 @@ class HoldOrToggle:
         try:
             et = ev.type()
             kc = ev.keyCode()
-            # Trace until match observed.
-            if not self._match_seen and os.environ.get("OPENFLOW_LOG_ALL_KEYS", "1") != "0":
-                print(f"[hotkey][trace] event type={et} keyCode={kc}", flush=True)
+            # Say once that the monitor sees key events at all. Never which
+            # key: logging every keycode until the hold key showed up put
+            # ~20k of them in openflow.log (a keylogger, in effect).
+            if not self._events_seen:
+                self._events_seen = True
+                print(f"[hotkey] monitor is receiving key events (hold key={self.key_name!r})",
+                      flush=True)
             at = _event_ms(ev)
             if kc != self.target_vk:
                 if et == _NSEventTypeKeyDown and not ev.isARepeat():
                     self._on_other_key(at)
                 return
-            self._match_seen = True
             if et == _NSEventTypeFlagsChanged and self.target_flag is not None:
                 if self._key_is_down(int(ev.modifierFlags())):
                     if self._down:

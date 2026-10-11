@@ -7,7 +7,6 @@ Two interaction modes share one key:
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
 from typing import Callable
@@ -179,14 +178,14 @@ class HoldOrToggle:
         return self._mode == "hold" and self._down
 
     def _on_press(self, key) -> None:
-        # Diag: log every press until the user has triggered ours at least
-        # once, so we can confirm pynput is seeing events + what physical
-        # key the user is pressing. Disable via OPENFLOW_LOG_ALL_KEYS=0.
-        if not getattr(self, "_match_seen", False) and os.environ.get("OPENFLOW_LOG_ALL_KEYS", "1") != "0":
-            print(f"[hotkey][trace] saw press: {key!r}  (configured key={self.key!r})", flush=True)
+        # Diag: say once that the listener sees key events at all. Never
+        # which key: logging every key typed until the hold key showed up
+        # put ~20k keycodes in openflow.log (a keylogger, in effect).
+        if not getattr(self, "_events_seen", False):
+            self._events_seen = True
+            print(f"[hotkey] listener is receiving key events (hold key={self.key!r})", flush=True)
         if not self._matches(key) or self._down:
             return
-        self._match_seen = True
         self._down = True
         now = self._now_ms()
 
