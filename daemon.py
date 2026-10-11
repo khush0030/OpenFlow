@@ -134,6 +134,10 @@ _LANG_CYCLE: list[LanguageMode] = [
 # two thirds of real taps (log, 2026-10-01: 105–313 ms, median ~190). A longer
 # tap's tick is cut off when the hands-free cue plays (sounds._SUPERSEDES).
 HOLD_CUE_DELAY_S = 0.2
+# A key event's own timestamp is used for latency timing only if it is at
+# most this old when handled (else the clocks disagree: handler time). Was
+# 5 s, which hid exactly the stalls worth seeing.
+EVENT_TIME_MAX_AGE_S = 60.0
 # A tap's mic stays open this much past the double-tap window, so a second
 # press whose handler runs a little late still reuses it (audio.cancel).
 TAP_LINGER_SLACK_S = 0.15
@@ -248,8 +252,9 @@ class RunContext:
     edit_mode: bool = False
     selection: str = ""            # edit-mode selection the run applies to
     # Latency bookkeeping for the live run only (Undo/Retry clear it):
-    keyup_at: float | None = None  # time.monotonic() when recording stopped
-    record_s: float | None = None  # key-up -> audio in hand (recorder.stop)
+    keyup_at: float | None = None  # time.monotonic() of the key-up (its event time)
+    record_s: float | None = None  # stop handler -> audio in hand (recorder.stop)
+    keyup_queue_s: float | None = None  # key-up event -> its stop handler ran
     stream: object = None          # the take's StreamingSession, if streamed
     # Names on screen at key-down (screen_context.py); in memory only.
     screen_terms: tuple[str, ...] = ()
@@ -763,7 +768,7 @@ class Daemon:
         # Key-down timing from the key event itself when the hotkey gave it
         # (the handler can run late, behind the main thread's other work).
         t_key = t0
-        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < 5.0:
+        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < EVENT_TIME_MAX_AGE_S:
             t_key = pressed_at_ms / 1000.0
         # Feedback first: the widget (and cue) answer the key now, not after
         # the mic open below (~0.15 s), which used to leave a press looking
@@ -808,7 +813,12 @@ class Daemon:
             how = f"reused the tap's stream, kept {1000 * (t_open - t_key):.0f}ms"
             mic_ms = 0.0
         else:
+            # queued: key event -> this handler; ui: widget + cue hand-off
+            # (state, flow, widget socket) before the mic; open: PortAudio.
+            # The three add up to the total (the 20 s stall of 2026-10-11 sat
+            # entirely in the unlabelled "ui" step).
             how = (f"queued {1000 * (t0 - t_key):.0f}ms, "
+                   f"ui {1000 * (t_open - t0):.0f}ms, "
                    f"open {1000 * (t_mic - t_open):.0f}ms")
             mic_ms = 1000 * (t_mic - t_key)
         print(f"[daemon] mic open {mic_ms:.0f}ms after key-down ({how}; "
@@ -1055,7 +1065,7 @@ class Daemon:
         mode and against the same paste target / selection."""
         if isinstance(ctx, RunContext):
             # The user waited on the card: key-up time no longer means anything.
-            ctx = replace(ctx, keyup_at=None, record_s=None, stream=None)
+            ctx = replace(ctx, keyup_at=None, record_s=None, keyup_queue_s=None, stream=None)
         self._start_worker(audio, ctx, run)
 
     def _save_widget_setting(self, key: str, value: str) -> None:
@@ -1287,22 +1297,31 @@ class Daemon:
                 print(f"[daemon] widget pump error: {e}", flush=True)
                 self._stop_evt.wait(PUMP_LEVEL_S)
 
-    def on_record_stop(self) -> None:
+    def _on_hold_release(self) -> None:
+        """The hold key stopped the take: time it from the key event."""
+        self.on_record_stop(event_ms=getattr(self._hold, "last_event_ms", None))
+
+    def on_record_stop(self, event_ms: float | None = None) -> None:
         # Under the flow lock, like every widget action: a key-up and a ✕ /
         # Esc arriving together can't interleave, so the cancel either stops
         # the recording itself or finds the run PROCESSING and discards it.
         with self._flow.lock:
-            self._record_stop()
+            self._record_stop(event_ms)
 
-    def _record_stop(self) -> None:
+    def _record_stop(self, event_ms: float | None = None) -> None:
         if not self.recorder.is_recording:
             return
         # The edit hotkey's take (if this is one) stops listening here,
         # whatever ended it; its end-pointer sees that and quits.
         take, self._edit_take = getattr(self, "_edit_take", None), None
-        keyup_at = time.monotonic()
+        handler_at = time.monotonic()
+        # Key-up time from the key event when the hotkey gave it: the stop
+        # can run behind other key work, and that wait is part of the lag.
+        keyup_at = handler_at
+        if event_ms is not None and 0 <= handler_at - event_ms / 1000.0 < EVENT_TIME_MAX_AGE_S:
+            keyup_at = event_ms / 1000.0
         audio = self.recorder.stop()
-        record_s = time.monotonic() - keyup_at
+        record_s = time.monotonic() - handler_at
         stream = self._take_stream()
         if audio.size == 0:
             if stream is not None:
@@ -1320,7 +1339,8 @@ class Daemon:
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
                          selection=getattr(self, "_edit_selection", "") if edit_mode else "",
                          command=getattr(self, "_command", None) if edit_mode else None,
-                         keyup_at=keyup_at, record_s=record_s, stream=stream,
+                         keyup_at=keyup_at, record_s=record_s,
+                         keyup_queue_s=handler_at - keyup_at, stream=stream,
                          screen_terms=self._screen_terms())
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
@@ -1899,7 +1919,11 @@ class Daemon:
             timings["total"] = t3 - start
             # Log only (not a history column): key-up handling between the
             # recorder stopping and this worker starting on the transcript.
-            handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
+            # keyup_queue: the key-up event waited this long for its handler
+            # (in total, not in handoff, which stays comparable to old logs).
+            queued = ctx.keyup_queue_s or 0.0
+            handoff = (f" handoff={t0 - start - ctx.record_s - queued:.2f}s"
+                       f" keyup_queue={queued:.2f}s"
                        if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
                 f"{k}={v:.2f}s" for k, v in timings.items()) + handoff
@@ -2110,7 +2134,7 @@ class Daemon:
     def _build_hold(self, hold_key: str) -> HoldToTalk:
         # is_active: the widget (✓ / ✕) or Esc can stop a double-tap toggle
         # session; the key must then treat its next press as a fresh hold.
-        return HoldToTalk(hold_key, self._on_hold_press, self.on_record_stop,
+        return HoldToTalk(hold_key, self._on_hold_press, self._on_hold_release,
                           is_active=lambda: self.recorder.is_recording,
                           on_cancel=self._on_hold_cancel)
 

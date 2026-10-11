@@ -283,6 +283,9 @@ class HoldOrToggle:
         # When the latest press happened (event clock = time.monotonic ms),
         # so the daemon can time key-down -> mic open from the key itself.
         self.last_press_ms: Optional[float] = None
+        # When the key event now being handled happened (press or release):
+        # a stop times key-up -> paste from the key, not from the handler.
+        self.last_event_ms: Optional[float] = None
         self._monitor = None
         self._install_lock = threading.Lock()
         self._stopped = False
@@ -324,6 +327,7 @@ class HoldOrToggle:
         self._down = True
         now = self._now_ms() if at_ms is None else at_ms
         self.last_press_ms = now
+        self.last_event_ms = now
         if self._mode == "toggle" and self.is_active is not None and not self.is_active():
             print("[hotkey] press: toggle session already stopped elsewhere", flush=True)
             self._mode = "idle"
@@ -358,6 +362,7 @@ class HoldOrToggle:
             return
         self._down = False
         now = self._now_ms() if at_ms is None else at_ms
+        self.last_event_ms = now
         if self._mode == "toggle":
             # In toggle mode releases are no-ops; press toggles.
             return
