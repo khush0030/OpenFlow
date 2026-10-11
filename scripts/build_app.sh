@@ -34,6 +34,11 @@ codesign --verify --deep --strict dist/OpenFlow.app
 echo "✓ Built and verified dist/OpenFlow.app"
 
 if [[ "${1:-}" == "--deploy" ]]; then
+  # Count the deploy as a Quit, so neither the flow widget nor the guard
+  # LaunchAgent relaunches OpenFlow mid-copy (supervisor.USER_QUIT). The
+  # relaunch below clears it: the daemon removes the marker when it starts.
+  mkdir -p "$HOME/.openflow"
+  date +%s > "$HOME/.openflow/user-quit"
   pkill -f "OpenFlow.app/Contents/MacOS/openflow" 2>/dev/null || true
   sleep 1
   rm -rf "$APP_DEST"

@@ -21,33 +21,21 @@ xattr -dr com.apple.quarantine "$APP_DEST" 2>/dev/null || true
 
 read -r -p "Auto-launch OpenFlow on login? [y/N] " yn
 if [[ "$yn" =~ ^[Yy]$ ]]; then
-    mkdir -p "$PLIST_DIR"
-    # Launch via `open` so the app attaches to the user's GUI/Aqua session.
-    # Cocoa / pystray refuse to init outside an Aqua session and the daemon
-    # SIGABRTs as soon as the icon goes up. `open -a` hands the bundle to
-    # LaunchServices, which puts it in the right session context.
-    cat > "$PLIST_PATH" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>com.openflow.dictation</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/open</string>
-        <string>-a</string>
-        <string>/Applications/OpenFlow.app</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><false/>
-    <key>StandardOutPath</key><string>$HOME/.openflow/launchd.out.log</string>
-    <key>StandardErrorPath</key><string>$HOME/.openflow/launchd.err.log</string>
-</dict>
-</plist>
-EOF
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
-    launchctl load "$PLIST_PATH"
-    echo "LaunchAgent installed at $PLIST_PATH"
+    # login_item.py writes the plists (the same ones Settings › Open at login
+    # does): the login agent, which runs `open -a` so the app attaches to the
+    # user's Aqua session, and the guard agent, which restarts OpenFlow if it
+    # dies or hangs (never after a Quit). From source with the app installed,
+    # both point at /Applications/OpenFlow.app.
+    PY="${PYTHON:-.venv/bin/python}"
+    [[ -x "$PY" ]] || PY="python3"
+    env -u OPENFLOW_FROM_SOURCE "$PY" - <<'PYEOF'
+import login_item
+path = login_item.enable()
+login_item.unload()            # an older copy, if loaded (fails quietly if not)
+login_item.load(path)          # RunAtLoad: starts OpenFlow now
+login_item.refresh_guard()     # loads the guard; it doesn't run at load
+print(f"LaunchAgents installed at {path} and {login_item.guard_plist_path()}")
+PYEOF
 fi
 
 cat <<EOF
