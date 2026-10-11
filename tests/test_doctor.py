@@ -89,6 +89,7 @@ def test_cli_output_is_unchanged(fakes, capsys, tmp_path):
         "AXIsProcessTrusted: True\n"
         "Input Monitoring: granted\n"
         "Microphone: ok\n"
+        "Sound output: unknown\n"
         "\nListening for any key events for 5s. Press right Option a few times…\n"
         "Captured 1 events:\n"
         "  press Key.alt_r\n"
@@ -119,7 +120,8 @@ def test_run_checks_returns_structured_results(fakes, tmp_path):
     import doctor
     checks = doctor.run_checks()
     by = {c["name"]: c for c in checks}
-    assert list(by) == ["accessibility", "input_monitoring", "microphone", "config",
+    assert list(by) == ["accessibility", "input_monitoring", "microphone", "sound_output",
+                        "config",
                         "dictionary", "history", "sarvam_key", "groq_key", "anthropic_key"]
     assert by["input_monitoring"]["ok"] is True
     assert by["accessibility"]["ok"] is True
@@ -199,3 +201,51 @@ def test_doctor_uses_the_daemons_start_up_read(fakes, monkeypatch):
     monkeypatch.setattr(keys, "check_all", lambda *a, **k: pytest.fail("no second Keychain read"))
     by = {c["name"]: c for c in doctor.check_fallback_keys()}
     assert by["anthropic_key"]["ok"] is True and by["groq_key"]["ok"] is None
+
+
+# -- the default output device (2026-10-11: a Dell's HDMI audio never started) --
+
+def _outputs(monkeypatch, verdict, fallback=True, probed=None):
+    import output_devices
+    import sounds
+    from output_devices import Output
+    dell = Output("DELL-UID", "DELL S2725QS", builtin=False)
+    spk = Output("BuiltInSpeakerDevice", "MacBook Air Speakers", builtin=True)
+    monkeypatch.setattr(output_devices, "outputs", lambda: (dell, spk if fallback else None))
+    monkeypatch.setattr(sounds, "_out_uid", dell.uid if verdict is not None else None)
+    monkeypatch.setattr(sounds, "_out_ok", verdict)
+    if probed is not None:
+        monkeypatch.setattr(sounds, "_probe", lambda uid: probed)
+
+
+def test_sound_output_that_fails_says_so_and_what_to_do(monkeypatch):
+    import doctor
+    _outputs(monkeypatch, False)
+    c = doctor.check_sound_output()
+    assert c["ok"] is False
+    assert c["line"] == ("Sound output: DELL S2725QS FAILS to start audio — cues play on "
+                         "MacBook Air Speakers instead. Choose another output in System "
+                         "Settings → Sound → Output (or wake / reconnect the device).")
+
+
+def test_sound_output_that_works(monkeypatch):
+    import doctor
+    _outputs(monkeypatch, True)
+    assert doctor.check_sound_output()["line"] == "Sound output: DELL S2725QS — ok"
+
+
+def test_sound_output_not_tested_is_probed_only_when_asked(monkeypatch):
+    import doctor
+    _outputs(monkeypatch, None, fallback=False, probed=False)
+    assert doctor.check_sound_output()["ok"] is None          # the daemon: no probe
+    c = doctor.check_sound_output(probe=True)                 # the CLI: tests it
+    assert c["ok"] is False and "cues are skipped" in c["line"]
+
+
+def test_sound_output_check_never_raises(monkeypatch):
+    import doctor
+    import sounds
+    monkeypatch.setattr(sounds, "output_status",
+                        lambda: (_ for _ in ()).throw(RuntimeError("hal gone")))
+    c = doctor.check_sound_output()
+    assert c["ok"] is None and "hal gone" in c["line"]

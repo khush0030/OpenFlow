@@ -56,6 +56,35 @@ def check_microphone() -> Check:
         return _check("microphone", False, detail, f"Microphone: FAILED — {detail}")
 
 
+def check_sound_output(probe: bool = False) -> Check:
+    """Whether the default output device can start audio. A monitor's
+    HDMI / DisplayPort audio that won't start held every CoreAudio call ~10 s
+    (cues silent, mic opens stalled, 2026-10-11); cues now play on the
+    built-in output instead (sounds._route). With probe, an output the cues
+    haven't tested yet is tested now (silent, up to sounds.PROBE_TIMEOUT_S);
+    otherwise the daemon's last verdict is reported."""
+    try:
+        import sounds
+        st = sounds.probe_default_output() if probe else sounds.output_status()
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        return _check("sound_output", None, detail, f"Sound output: check failed — {detail}")
+    name, ok, fallback = st["name"], st["ok"], st["fallback"]
+    if name is None:
+        return _check("sound_output", None, "unknown", "Sound output: unknown")
+    if ok:
+        return _check("sound_output", True, name, f"Sound output: {name} — ok")
+    if ok is None:
+        return _check("sound_output", None, f"{name}: not tested yet",
+                      f"Sound output: {name} — not tested yet")
+    where = (f"cues play on {fallback} instead" if fallback
+             else "cues are skipped (no built-in output to use)")
+    return _check("sound_output", False, f"{name} fails to start audio",
+                  f"Sound output: {name} FAILS to start audio — {where}. Choose another "
+                  "output in System Settings → Sound → Output (or wake / reconnect "
+                  "the device).")
+
+
 def check_files() -> list[Check]:
     import config
     out = []
@@ -134,4 +163,4 @@ def check_fallback_keys(cfg: dict | None = None, results: dict | None = None) ->
 def run_checks() -> list[Check]:
     """All non-interactive doctor checks, in CLI order."""
     return [check_accessibility(), check_input_monitoring(), check_microphone(),
-            *check_files(), check_sarvam_key(), *check_fallback_keys()]
+            check_sound_output(), *check_files(), check_sarvam_key(), *check_fallback_keys()]

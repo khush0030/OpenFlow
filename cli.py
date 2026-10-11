@@ -292,6 +292,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(doctor.check_accessibility()["line"])
     print(doctor.check_input_monitoring()["line"])
     print(doctor.check_microphone()["line"])
+    print(doctor.check_sound_output(probe=True)["line"])
 
     # pynput listener — start and watch for 5 seconds
     print("\nListening for any key events for 5s. Press right Option a few times…")
