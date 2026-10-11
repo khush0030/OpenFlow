@@ -379,6 +379,7 @@ def test_paste_again_runs_off_the_ui_thread(db, monkeypatch):
     ctl.gate.set()
     page, _ = make(db, control=ctl, monkeypatch=monkeypatch)
     page.status_timer.stop()
+    assert deliver_queued(lambda: page.rows)               # history loads on a worker
     page.rows[0].paste_btn.click()
     assert deliver_queued(lambda: page.rows[0].note.text() == "Pasted")
     assert ("paste_text", "hub-worker") in ctl.threads
@@ -416,3 +417,53 @@ def test_long_dictation_clamps_with_show_more(tmp_path, monkeypatch):
     row.paste_btn.click()                     # paste/copy always use the full text
     assert ("paste_text", {"text": long}) in page.ctx.control.calls
     page.hide()
+
+
+# ── history load: off the Qt thread, cached until the file changes ─────────
+
+def test_shown_skips_reload_until_history_changes(db, monkeypatch):
+    calls = []
+    real = home._compute
+    monkeypatch.setattr(home, "_compute", lambda *a: calls.append(1) or real(*a))
+    page, _ = make(db, monkeypatch=monkeypatch)
+    assert len(calls) == 1 and len(page.rows) == 3
+    page.shown()
+    page.shown()
+    assert len(calls) == 1                                   # nothing changed: no work
+    History(db).add("brand new take", "Brand new take.", "verbatim", "en", 2.0,
+                    ts=ts(2026, 10, 1, 15, 48))
+    page.shown()
+    assert len(calls) == 2
+    assert page.today_label.text() == "TODAY · 4"
+    page.reload()                                            # explicit reload always recomputes
+    assert len(calls) == 3
+
+
+@pytest.mark.real_workers
+def test_history_load_runs_on_a_worker_and_keeps_last_values(db, monkeypatch):
+    threads = []
+    real = home._compute
+    gate = threading.Event()
+
+    def slow(*a):
+        threads.append(threading.current_thread().name)
+        gate.wait(2)
+        return real(*a)
+
+    monkeypatch.setattr(home, "_compute", slow)
+    monkeypatch.setattr(workers, "REFRESH_DELAY_MS", 0)      # refresh without waiting on a timer
+    page, _ = make(db, control=FakeControl(), monkeypatch=monkeypatch)
+    page.status_timer.stop()
+    assert page.rows == []                                   # first load still running…
+    assert page.list_layout.count() == 0                     # …and no "Nothing yet today" flash
+    gate.set()
+    assert deliver_queued(lambda: len(page.rows) == 3)
+    assert threads == ["hub-worker"]
+    words = page.words_stat.text()
+    gate.clear()
+    History(db).add("brand new take", "Brand new take.", "verbatim", "en", 2.0,
+                    ts=ts(2026, 10, 1, 15, 48))
+    page.shown()
+    assert page.words_stat.text() == words and len(page.rows) == 3   # last values stay up
+    gate.set()
+    assert deliver_queued(lambda: len(page.rows) == 4)

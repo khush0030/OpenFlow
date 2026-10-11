@@ -602,3 +602,82 @@ def test_restore_view_ignores_a_selection_that_is_gone(hist):
     page.restore_view({"query": "", "filter": "bogus", "selected": 999999})
     assert page.chips["all"].isChecked()
     assert page.selected() is not None       # falls back to the first row
+
+
+# ── cheap page shows ──────────────────────────────────────────────────────
+
+def test_shown_skips_rebuild_until_history_changes(hist):
+    page = make_page(hist)
+    rows = list(page.rows)
+    page.select(rows[2].entry.id)
+    page.shown()
+    assert page.rows == rows                                 # same widgets: no rebuild
+    assert page.selected().id == rows[2].entry.id
+    hist.add("brand new", "Brand new.", "verbatim", "en", 1.0, ts=_ts(NOW.replace(minute=59)))
+    page.shown()
+    assert page.rows != rows and finals(page)[0] == "Brand new."
+    assert page.selected().id == rows[2].entry.id            # selection survives the reload
+    page.shown(query="report")                               # a search always reloads
+    assert finals(page) == ["Please send the report by Friday."]
+
+
+def _clamp_reference(text, font, width, lines):
+    """The old _Clamp._layout: lays out the whole text."""
+    from PyQt6.QtGui import QFontMetricsF, QTextLayout
+    width = max(width, 40.0)
+    tl = QTextLayout(text, font)
+    spans = []
+    tl.beginLayout()
+    while True:
+        line = tl.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        spans.append((line.textStart(), line.textLength()))
+    tl.endLayout()
+    out = [text[s:s + n].rstrip() for s, n in spans[:lines]]
+    if len(spans) > lines:
+        rest = text[spans[lines - 1][0]:].replace("\n", " ")
+        out[-1] = QFontMetricsF(font).elidedText(rest, Qt.TextElideMode.ElideRight, width)
+    return out or [""]
+
+
+@pytest.mark.parametrize("words", [0, 1, 6, 14, 30, 400, 3000])
+@pytest.mark.parametrize("width", [10, 120, 333, 900])
+def test_clamp_stops_after_the_visible_lines_with_the_same_result(words, width):
+    from ui.hub import style as S
+    from ui.hub.pages.history import _Clamp
+    text = " ".join(f"word{i % 13}" for i in range(words))
+    c = _Clamp(text, S.sans(S.T_BODY), S.INK)
+    assert c._layout(width) == _clamp_reference(text, S.sans(S.T_BODY), width, 2)
+    assert c._layout(width) is c._layout(width)             # cached per width
+    assert c._layout(width + 1) == _clamp_reference(text, S.sans(S.T_BODY), width + 1, 2)
+
+
+def test_history_stamp_changes_on_every_write(tmp_path):
+    from ui.hub.datastamp import history_stamp
+    path = tmp_path / "history.sqlite"
+    assert history_stamp(path) is None
+    h = History(path)
+    seen = {history_stamp(path)}
+    for i in range(5):                                       # same size, same mtime tick: still differs
+        h.add(f"take {i}", f"Take {i}.", "verbatim", "en", 1.0)
+        seen.add(history_stamp(path))
+    assert len(seen) == 6
+    assert history_stamp(path) == history_stamp(path)
+    (tmp_path / "dir.sqlite").mkdir()
+    history_stamp(tmp_path / "dir.sqlite")                   # never raises
+
+
+@pytest.mark.parametrize("text", [
+    "Can you make sure the screens match? " * 9,
+    "Supercalifragilisticexpialidocious-antidisestablishmentarianism " * 4,
+    "a " * 500, "हिन्दी में बोलो और लिखो " * 12, "x"])
+@pytest.mark.parametrize("width", [40, 95, 260, 610])
+def test_clamp_matches_reference_on_real_text(text, width):
+    from ui.hub import style as S
+    from ui.hub.pages.history import _Clamp
+    text = " ".join(text.split())
+    for lines in (1, 2, 3):
+        c = _Clamp(text, S.sans(S.T_BODY), S.INK, lines=lines)
+        assert c._layout(width) == _clamp_reference(text, S.sans(S.T_BODY), width, lines)

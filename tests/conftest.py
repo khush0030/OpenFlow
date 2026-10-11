@@ -129,3 +129,4 @@ def _hub_calls_inline(request, monkeypatch):
         return
     from ui.hub import workers
     monkeypatch.setattr(workers, "run_in_thread", _sync_run)
+    monkeypatch.setattr(workers, "REFRESH_DELAY_MS", 0)

@@ -59,3 +59,29 @@ def test_callback_exception_does_not_escape():
     workers.run_in_thread(QObject(), lambda: 1, bad)
     assert deliver_queued(lambda: seen)
     assert deliver_queued(lambda: not workers._LIVE)
+
+
+def test_refresh_waits_for_its_timer_and_dies_with_the_parent(monkeypatch):
+    from PyQt6.QtCore import QTimer
+    monkeypatch.setattr(workers, "REFRESH_DELAY_MS", 60)
+    parent, got = QObject(), []
+    workers.refresh_in_thread(parent, lambda: threading.current_thread().name,
+                              lambda r, e: got.append(r))
+    timers = parent.findChildren(QTimer)
+    assert len(timers) == 1 and timers[0].isActive() and timers[0].interval() == 60
+    assert not deliver_queued(lambda: got, 0.1)              # nothing started yet
+    timers[0].timeout.emit()                                 # as if 60 ms passed
+    assert deliver_queued(lambda: got) and got == ["hub-worker"]
+
+    doomed, ran = QObject(), []
+    workers.refresh_in_thread(doomed, lambda: ran.append(1), lambda r, e: None)
+    timer = doomed.findChildren(QTimer)[0]
+    sip.delete(doomed)
+    assert sip.isdeleted(timer) and not ran                  # the page went away first
+
+
+def test_refresh_without_delay_starts_at_once(monkeypatch):
+    monkeypatch.setattr(workers, "REFRESH_DELAY_MS", 0)
+    got = []
+    workers.refresh_in_thread(QObject(), lambda: 1, lambda r, e: got.append(r))
+    assert deliver_queued(lambda: got) and got == [1]
