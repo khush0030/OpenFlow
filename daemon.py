@@ -89,6 +89,8 @@ from paste import (paste, get_active_app, capture_front_app, capture_paste_targe
 from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
 import groq_stt
+import keys
+import retry_queue
 import llm
 from sarvam import STT_URL, warm
 from dictionary import Dictionary
@@ -377,12 +379,17 @@ class Daemon:
             )
         )
         sarvam_cfg = self.cfg.get("sarvam") or {}
+        # Fallback provider keys: read once now (any Keychain prompt shows at
+        # launch, not mid-dictation), then served from memory.
+        self._keys = keys.KeyCache()
+        keys.current = self._keys
+        self._keys.start(self.cfg)
         self.transcriber = Transcriber(
             model=sarvam_cfg.get("stt_model", "saaras:v4"),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
             streaming=sarvam_cfg.get("streaming", "auto"),
-            # Provider failover: Groq Whisper after Sarvam, read per take.
-            fallback=lambda: groq_stt.from_config(self.cfg),
+            # Provider failover: Groq Whisper after Sarvam ([failover] read per take).
+            fallback=lambda: keys.fallback_stt(self.cfg, self._keys),
         )
         self._stream_enabled = True   # see _open_stream
         self._stream = None
@@ -393,7 +400,8 @@ class Daemon:
             model=sarvam_cfg.get("chat_model", "sarvam-105b"),
             max_tokens=int(sarvam_cfg.get("max_tokens", 1024)),
             api_key_env=sarvam_cfg.get("api_key_env", "SARVAM_API_KEY"),
-        ), provider=llm.with_failover(make_cleanup_provider(self.cfg), self.cfg))
+        ), provider=llm.with_failover(make_cleanup_provider(self.cfg), self.cfg,
+                                      find_key=self._keys.find))
         print(f"[daemon] cleanup LLM: {self.ai.provider.name} "
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
@@ -411,6 +419,8 @@ class Daemon:
         self._net_up = lambda: network_up(STT_URL)
         self._takes_since = time.time()
         threading.Thread(target=self._tidy_takes, name="takes-prune", daemon=True).start()
+        # Failed takes transcribe themselves once the network is back.
+        self._auto_retry = retry_queue.for_daemon(self)
         self._prune_history()
         self._busy = threading.Lock()
         self._hold: HoldToTalk | None = None
@@ -1141,7 +1151,10 @@ class Daemon:
             print(f"[daemon] streaming STT -> {streaming}", flush=True)
         if ch.cleanup is not None:
             self.cfg["cleanup"] = ch.cleanup
-            self.ai.provider = llm.with_failover(make_cleanup_provider(self.cfg), self.cfg)
+            cache = getattr(self, "_keys", None)
+            self.ai.provider = llm.with_failover(
+                make_cleanup_provider(self.cfg), self.cfg,
+                **({"find_key": cache.find} if cache is not None else {}))
             print(f"[daemon] cleanup LLM -> {self.ai.provider.name} "
                   f"({self.ai.provider.model})", flush=True)
         # [failover]: read per take (groq_stt.from_config) and per failure (llm).
@@ -1764,6 +1777,9 @@ class Daemon:
                 reason = FLOW_SAVED if online else FLOW_OFFLINE
                 print(f"[daemon] take saved for Retry ({'online' if online else 'offline'})",
                       flush=True)
+            auto = getattr(self, "_auto_retry", None)
+            if auto is not None:
+                auto.kick()
         self._flow.failed(audio, ctx, run=run, reason=reason) or self._stale(run)
 
     def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
@@ -1946,6 +1962,7 @@ class Daemon:
     def _control_handlers(self) -> dict:
         return {
             "status": self._ctl_status,
+            "ping": self._ctl_ping,
             "set_tone": self._ctl_set_tone,
             "set_language": self._ctl_set_language,
             "paste_text": self._ctl_paste_text,
@@ -2010,6 +2027,20 @@ class Daemon:
                 "microphone": probe("microphone_granted"),
             },
         }
+
+    _PING_LOCK_WAIT_S = 2.0   # under supervisor.PING_TIMEOUT_S
+
+    def _ctl_ping(self) -> dict:
+        """Liveness probe for the supervisors (supervisor.ping). Answered on
+        the control thread; flow_ok is False when the widget state lock has
+        been held past _PING_LOCK_WAIT_S (a stuck handler)."""
+        lock = getattr(getattr(self, "_flow", None), "lock", None)
+        ok = True
+        if lock is not None:
+            ok = lock.acquire(timeout=self._PING_LOCK_WAIT_S)
+            if ok:
+                lock.release()
+        return {"pid": os.getpid(), "flow_ok": ok}
 
     def _ctl_set_tone(self, value: str) -> dict:
         self.set_tone(self._parse_tone(value))   # same path as the tray menu
@@ -2165,6 +2196,8 @@ class Daemon:
         # Hub -> daemon commands (status, Paste again, Run it again as…).
         self._start_control_channel()
         self._start_edit_overlay_channel()
+        if getattr(self, "_auto_retry", None) is not None:
+            self._auto_retry.start()
 
         sv = self.cfg.get("sarvam") or {}
         print(
@@ -2198,6 +2231,8 @@ class Daemon:
                         self._stop_evt.wait(timeout=1.0)
         except KeyboardInterrupt:
             print("\n[daemon] shutting down.", flush=True)
+            import supervisor
+            supervisor.mark_user_quit()   # Ctrl-C is a quit: don't relaunch
         finally:
             self._stop_evt.set()
             self._send_widget({"type": "exit"})

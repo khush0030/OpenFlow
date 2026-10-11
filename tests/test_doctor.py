@@ -69,6 +69,13 @@ def fakes(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "load_env", lambda: None)
     monkeypatch.setenv("SARVAM_API_KEY", "sk-test")
     monkeypatch.setattr(sys, "executable", "/py")
+    # Fallback keys: never the real Keychain or ~/.openflow/.env.
+    import keys
+    state["fallback"] = {}   # name -> (key, source, keychain error)
+    monkeypatch.setattr(keys, "check_all", lambda cfg, find=None: {
+        name: keys.lookup(name, env, user,
+                          find=lambda e, u, n=name: state["fallback"].get(n, (None, None, None)))
+        for name, (env, user) in keys.fallback_refs(cfg).items()})
     return state
 
 
@@ -89,6 +96,10 @@ def test_cli_output_is_unchanged(fakes, capsys, tmp_path):
         f"Dict:   {tmp_path / 'dictionary.json'} (exists=False)\n"
         f"Hist:   {tmp_path / 'history.db'} (exists=False)\n"
         "Sarvam key: env=yes keychain=no\n"
+        "Groq key: not set — no speech fallback if Sarvam fails "
+        "(optional; `openflow key set groq`)\n"
+        "Anthropic key: not set — no Claude cleanup fallback "
+        "(optional; `openflow key set anthropic`)\n"
     )
 
 
@@ -109,7 +120,7 @@ def test_run_checks_returns_structured_results(fakes, tmp_path):
     checks = doctor.run_checks()
     by = {c["name"]: c for c in checks}
     assert list(by) == ["accessibility", "input_monitoring", "microphone", "config",
-                        "dictionary", "history", "sarvam_key"]
+                        "dictionary", "history", "sarvam_key", "groq_key", "anthropic_key"]
     assert by["input_monitoring"]["ok"] is True
     assert by["accessibility"]["ok"] is True
     assert by["microphone"] == {"name": "microphone", "ok": True, "detail": "ok",
@@ -153,3 +164,38 @@ def test_input_monitoring_check_never_raises(fakes, monkeypatch):
                         lambda: (_ for _ in ()).throw(RuntimeError("iokit")))
     c = doctor.check_input_monitoring()
     assert c["ok"] is None and "RuntimeError: iokit" in c["line"]
+
+
+# -- Fallback keys as OpenFlow reads them (audit 2026-10-11 §3.8) -------------
+
+def test_fallback_key_found(fakes):
+    import doctor
+    fakes["fallback"]["groq"] = ("gsk", "keychain", None)
+    by = {c["name"]: c for c in doctor.check_fallback_keys()}
+    assert by["groq_key"]["ok"] is True
+    assert by["groq_key"]["line"] == ("Groq key: ok (keychain) — "
+                                      "speech and cleanup fallback ready")
+    assert by["anthropic_key"]["ok"] is None          # optional, just not set
+
+
+def test_fallback_key_denied_by_the_keychain_says_so(fakes):
+    import doctor
+    fakes["fallback"]["groq"] = (None, None,
+                                 "Can't get password from keychain: (-128, 'Keychain Access Denied')")
+    c = {c["name"]: c for c in doctor.check_fallback_keys()}["groq_key"]
+    assert c["ok"] is False
+    assert "BLOCKED" in c["line"] and "access denied, -128" in c["line"]
+    assert "groq_api_key" in c["line"] and "openflow key set groq" in c["line"]
+    assert "not set" not in c["line"]
+
+
+def test_doctor_uses_the_daemons_start_up_read(fakes, monkeypatch):
+    import doctor
+    import keys
+    fakes["fallback"]["anthropic"] = ("k", ".env", None)
+    cache = keys.KeyCache()
+    cache.resolve({})
+    monkeypatch.setattr(keys, "current", cache)
+    monkeypatch.setattr(keys, "check_all", lambda *a, **k: pytest.fail("no second Keychain read"))
+    by = {c["name"]: c for c in doctor.check_fallback_keys()}
+    assert by["anthropic_key"]["ok"] is True and by["groq_key"]["ok"] is None

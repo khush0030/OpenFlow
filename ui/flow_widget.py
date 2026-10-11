@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect,
                              QHBoxLayout, QLabel, QMenu, QPushButton, QScrollArea,
                              QVBoxLayout, QWidget)
 
+import supervisor
 from openflow_logger import get_logger, log_exception
 from ui import widget_copy as copy
 from ui.fonts import load_fonts
@@ -361,9 +362,10 @@ def chip_button(text: str, on_click) -> QPushButton:
 class Toast(Surface):
     """Headline + one chip button, styled like the Tooltip (white Fraunces on
     the widget's red, user feedback 2026-10-02: the cream toast with a black
-    button didn't match); optional shrinking timer line on the bottom edge."""
+    button didn't match); optional shrinking timer line on the bottom edge.
+    No button_text: the headline alone ("Restarting…")."""
 
-    def __init__(self, theme: Theme, title: str, button_text: str, on_button,
+    def __init__(self, theme: Theme, title: str, button_text: str | None, on_button=None,
                  timer_s: float | None = None) -> None:
         super().__init__(theme)
         self.fill = qc(theme.accent)
@@ -374,8 +376,13 @@ class Toast(Surface):
         title_label.setFont(serif_font(18))
         title_label.setStyleSheet("color:#FFFFFF;background:transparent;")
         lay.addWidget(title_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.button = chip_button(button_text, on_button)
-        lay.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.title_label = title_label
+        self.button = None
+        if button_text:
+            self.button = chip_button(button_text, on_button)
+            lay.addWidget(self.button, 0, Qt.AlignmentFlag.AlignVCenter)
+        else:
+            lay.setContentsMargins(M + 16, M + 9, M + 16, M + 9)
         self._timer_s = timer_s
         self._t0 = time.monotonic()
         self._timer = QTimer(self)
@@ -506,7 +513,7 @@ class Card(Surface):
 
     def __init__(self, theme: Theme, text: str, on_copy, on_dismiss,
                  max_height: float | None = None, not_pasted: bool = False,
-                 queued: bool = False) -> None:
+                 queued: bool = False, recovered: bool = False) -> None:
         super().__init__(theme, radius=18)
         self.setFixedWidth(self.W + 2 * M)
         muted = f"color:{css(theme.muted)};background:transparent;"
@@ -517,7 +524,8 @@ class Card(Surface):
         head = QHBoxLayout()
         head.setSpacing(9)
         head.addWidget(MarkIcon(theme))
-        heading = QLabel(copy.CARD_QUEUED_HEADING if queued else
+        heading = QLabel(copy.CARD_RECOVERED_HEADING if recovered else
+                         copy.CARD_QUEUED_HEADING if queued else
                          copy.CARD_NOT_PASTED_HEADING if not_pasted else copy.CARD_HEADING)
         heading.setFont(ui_font(12, 500))
         heading.setStyleSheet(muted)
@@ -560,7 +568,8 @@ class Card(Surface):
         foot = QHBoxLayout()
         foot.setSpacing(7)
         foot.addWidget(PulseDot(theme))
-        hint = QLabel(copy.CARD_QUEUED_HINT if queued else
+        hint = QLabel(copy.CARD_RECOVERED_HINT if recovered else
+                      copy.CARD_QUEUED_HINT if queued else
                       copy.CARD_NOT_PASTED_HINT if not_pasted else copy.CARD_HINT)
         hint.setFont(ui_font(12))
         hint.setStyleSheet(muted)
@@ -1015,7 +1024,15 @@ class FlowApp(QObject):
         self.client = WidgetClient(
             SOCKET_PATH, on_message=self.message.emit,
             on_disconnect=lambda: self.message.emit({"type": "_disconnected"}))
-        self._lost_since: float | None = time.monotonic()
+        # Crash recovery: relaunch a daemon that dropped, kill one that
+        # stopped answering (supervisor.py). None, RESTARTING or STOPPED.
+        self.supervision: str | None = None
+        self.restarter = make_restarter()
+        self._pinger = None
+        if QGuiApplication.platformName() == "cocoa":
+            self._pinger = supervisor.Pinger(
+                lambda ok: self.message.emit({"type": "_ping", "ok": ok}))
+            self._pinger.start()
         retry = QTimer(self)
         retry.timeout.connect(self._try_connect)
         retry.start(1000)
@@ -1034,13 +1051,42 @@ class FlowApp(QObject):
             return
         if self.client.connect():
             _log.info("connected to daemon")
-            self._lost_since = None
+            self.restarter.connected()
+            self._set_supervision(None)
             return
-        if self._lost_since is None:
-            self._lost_since = time.monotonic()
-        elif time.monotonic() - self._lost_since > 30:
-            _log.info("no daemon for 30 s; quitting (it respawns us when back)")
+        if supervisor.user_quit():
+            _log.info("OpenFlow was quit; widget exiting")
             QApplication.quit()
+            return
+        status = self.restarter.poll()
+        if status == supervisor.QUIT:
+            _log.info("daemon answers but its widget socket doesn't; quitting "
+                      "(it respawns us)")
+            QApplication.quit()
+            return
+        self._set_supervision(status)
+
+    def _set_supervision(self, status: str | None) -> None:
+        """Show "Restarting…" / "OpenFlow stopped · Restart" by the idle
+        handle, or clear it once the daemon is back."""
+        if status == self.supervision:
+            return
+        _log.info("supervision: %s", status or "daemon back")
+        self.supervision = status
+        if status is None:
+            self._close_popup()  # the daemon's config + state show the widget again
+            return
+        self.cancel_drag()
+        self.state, self.text, self.reason = "idle", "", ""
+        self._set_hands_free(False)
+        self.widget.set_view("idle")
+        self.relayout(animate=False)
+        self.widget.show_pinned()
+
+    def restart_daemon(self) -> None:
+        """Restart on "OpenFlow stopped"."""
+        _log.info("user asked to restart OpenFlow")
+        self._set_supervision(self.restarter.restart_now())
 
     def send(self, action: str, value: str | None = None) -> None:
         msg = {"action": action}
@@ -1058,10 +1104,22 @@ class FlowApp(QObject):
     def _dispatch(self, m: dict) -> None:
         kind = m.get("type")
         if kind == "_disconnected":
+            if supervisor.user_quit():
+                _log.info("lost the daemon connection after a quit; exiting")
+                QApplication.quit()
+                return
+            if self.supervision is not None:
+                _log.info("lost the daemon connection; restarting it")
+                return   # already saying so (we stopped a hung daemon)
             _log.info("lost the daemon connection; hiding and reconnecting")
-            self._lost_since = time.monotonic()
             self._close_popup()
             self.widget.hide()
+        elif kind == "_ping":
+            self.restarter.hang.note(m.get("ok"))
+            if self.client.connected:
+                status = self.restarter.watch()
+                if status is not None:
+                    self._set_supervision(status)
         elif kind == "exit":
             _log.info("daemon asked the widget to exit")
             QApplication.quit()
@@ -1178,6 +1236,10 @@ class FlowApp(QObject):
 
     def _make_popup(self, max_height: float) -> Surface | None:
         v, th = self.widget.view, self.theme
+        if self.supervision == supervisor.RESTARTING:
+            return Toast(th, copy.RESTARTING, None)
+        if self.supervision == supervisor.STOPPED:
+            return Toast(th, copy.STOPPED, copy.RESTART, self.restart_daemon)
         if v == "hover":
             return Tooltip(th, copy.DICTATE, copy.hold_label(self.hold_key))
         if v == "recording" and self._hint_on:
@@ -1201,7 +1263,8 @@ class FlowApp(QObject):
         if v == "card":
             return Card(th, self.text, lambda: self.send("copy"), lambda: self.send("dismiss"),
                         max_height=max_height, not_pasted=self.reason == "not_pasted",
-                        queued=self.reason == "queued")
+                        queued=self.reason == "queued",
+                        recovered=self.reason == "recovered")
         return None
 
     def _sync_popup(self, anchor: Rect) -> None:
@@ -1210,7 +1273,7 @@ class FlowApp(QObject):
         screen = self._screen or self._screen_rect()
         max_h = popup_max_height(anchor, screen, self.position)
         key = (self.widget.view, self.text, self.reason, self.theme.name, self.hold_key,
-               self.position, max_h, self._hint_on)
+               self.position, max_h, self._hint_on, self.supervision)
         if self.popup is None or key != self._popup_key:
             self._close_popup()
             popup = self._make_popup(max_h)
@@ -1367,6 +1430,11 @@ class FlowApp(QObject):
         self.widget.update()
         if self.widget.target_rect is not None:
             self._sync_popup(self.widget.target_rect)
+
+
+def make_restarter() -> supervisor.Restarter:
+    """The widget's supervisor (tests swap in a fake)."""
+    return supervisor.Restarter(supervisor.HangWatch())
 
 
 def _accessory_app() -> None:

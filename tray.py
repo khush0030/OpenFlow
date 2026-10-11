@@ -103,7 +103,13 @@ class OpenFlowTray(rumps.App):
 
     def _before_quit(self) -> None:
         """Any quit (Dock, ⌘Q, menu): stop the daemon and close the widget,
-        overlay and OpenFlow window with it."""
+        overlay and OpenFlow window with it. Recorded first, so nothing
+        (the widget, the LaunchAgent guard) brings OpenFlow back."""
+        try:
+            import supervisor
+            supervisor.mark_user_quit()
+        except Exception as e:
+            print(f"[tray] could not record the quit: {e}", flush=True)
         try:
             self.daemon.shutdown()
             quit_ui = getattr(self.daemon, "close_ui", None)

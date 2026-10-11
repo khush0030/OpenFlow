@@ -13,6 +13,11 @@ RETRY = "Retry"
 # Transcription failed but the take's audio is saved (Phase 4).
 SAVED = "Saved"
 OFFLINE_SAVED = "Offline · saved"
+# The daemon dropped or stopped answering; the widget brings it back
+# (supervisor.Restarter) and says so quietly.
+RESTARTING = "Restarting…"
+STOPPED = "OpenFlow stopped"
+RESTART = "Restart"
 CARD_HEADING = "No text box selected"
 CARD_HINT = "Click any text box to paste"
 # Card after a paste that couldn't land (state 6, reason "not_pasted").
@@ -21,6 +26,10 @@ CARD_NOT_PASTED_HINT = "On your clipboard · ⌘V to paste"
 # Card for an earlier take that lost the widget to a newer one (reason "queued").
 CARD_QUEUED_HEADING = "Earlier dictation"
 CARD_QUEUED_HINT = "Not pasted · Copy to use it"
+# Card for a saved take that transcribed itself once back online (reason
+# "recovered"); its text is already on the clipboard.
+CARD_RECOVERED_HEADING = "Recovered dictation"
+CARD_RECOVERED_HINT = "On your clipboard · ⌘V to paste"
 COPY = "Copy"
 MENU_APPEARANCE = "Appearance"
 MENU_HIDE = "Hide for 1 hour"

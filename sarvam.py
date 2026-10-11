@@ -47,18 +47,30 @@ def find_api_key(
 ) -> str | None:
     """Env → Keychain (service "openflow", account `keyring_user`) →
     ~/.openflow/.env / repo .env. None if the key is nowhere."""
+    return lookup_api_key(api_key_env, keyring_user)[0]
+
+
+def lookup_api_key(
+    api_key_env: str = DEFAULT_API_KEY_ENV,
+    keyring_user: str = KEYRING_USER,
+) -> tuple[str | None, str | None, str | None]:
+    """find_api_key, with where the key came from ("env", "keychain",
+    ".env") and the Keychain's error when it refused to answer (e.g.
+    -128, access denied): (key, source, keychain_error)."""
     load_env()
     key = os.environ.get(api_key_env, "").strip()
     if key:
-        return key
+        return key, "env", None
+    keychain_error = None
     try:
         import keyring  # type: ignore
         key = (keyring.get_password(KEYRING_SERVICE, keyring_user) or "").strip()
         if key:
             os.environ[api_key_env] = key
-            return key
+            return key, "keychain", None
     except Exception as e:
-        print(f"[sarvam] keyring read failed: {e}", flush=True)
+        keychain_error = str(e) or type(e).__name__
+        print(f"[sarvam] keyring read failed ({keyring_user}): {e}", flush=True)
     for env_path in (
         os.path.expanduser("~/.openflow/.env"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
@@ -76,10 +88,10 @@ def find_api_key(
                         key = v.strip().strip('"').strip("'")
                         if key:
                             os.environ[api_key_env] = key
-                            return key
+                            return key, ".env", None
         except Exception:
             pass
-    return None
+    return None, None, keychain_error
 
 
 def resolve_api_key(api_key_env: str = DEFAULT_API_KEY_ENV) -> str:

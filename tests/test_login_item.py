@@ -82,7 +82,9 @@ def test_enable_writes_the_install_script_plist(plist, tmp_path):
         "StandardErrorPath": str(tmp_path / "logs" / "launchd.err.log"),
     }
     assert login_item.is_enabled(plist)
-    assert sorted(p.name for p in plist.parent.iterdir()) == [plist.name]  # no temp left
+    # The guard is written next to it; no temp file is left.
+    assert sorted(p.name for p in plist.parent.iterdir()) == [
+        "com.openflow.dictation.guard.plist", plist.name]
 
 
 def test_enable_dev_sets_working_directory(plist, monkeypatch, tmp_path):
@@ -142,3 +144,97 @@ def test_load_reports_failure(plist):
         returncode = 5
         stderr = "Bootstrap failed: 5: Input/output error"
     assert login_item.load(plist, runner=lambda cmd, **kw: R(), uid=501) is False
+
+
+# -- Supervision: the guard agent (reliability audit 2026-10-11) -------------
+
+def _guard(plist):
+    with open(plist.parent / "com.openflow.dictation.guard.plist", "rb") as f:
+        return plistlib.load(f)
+
+
+def test_enable_writes_the_guard_next_to_it(plist, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable",
+                        "/Applications/OpenFlow.app/Contents/MacOS/openflow")
+    login_item.enable(plist, log_dir=tmp_path / "logs")
+    g = _guard(plist)
+    assert g["Label"] == "com.openflow.dictation.guard"
+    assert g["ProgramArguments"][-1] == "supervise"
+    assert g["ProgramArguments"][0].endswith("OpenFlow.app/Contents/MacOS/openflow")
+    assert g["StartInterval"] == login_item.GUARD_INTERVAL_S
+    assert g["RunAtLoad"] is False            # the login agent starts OpenFlow
+    assert g["LimitLoadToSessionType"] == "Aqua"
+    assert "KeepAlive" not in g
+    # The login agent itself is unchanged: `open -a`, not supervised.
+    with open(plist, "rb") as f:
+        main = plistlib.load(f)
+    assert main["KeepAlive"] is False and main["ProgramArguments"][0] == "/usr/bin/open"
+
+
+def test_guard_runs_the_installed_app_from_source(monkeypatch, tmp_path):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.delenv("OPENFLOW_FROM_SOURCE", raising=False)
+    app = tmp_path / "OpenFlow.app"
+    app.mkdir()
+    monkeypatch.setattr(login_item, "INSTALLED_APP", app)
+    assert login_item.guard_program_arguments() == [
+        str(app / "Contents/MacOS/openflow"), "supervise"]
+    monkeypatch.setattr(login_item, "INSTALLED_APP", tmp_path / "missing.app")
+    args = login_item.guard_program_arguments()
+    assert args[0] == sys.executable and args[-1] == "supervise"
+
+
+def test_disable_removes_the_guard_too(plist):
+    login_item.enable(plist, program=["/bin/true"])
+    assert login_item.guard_installed(plist.parent / "com.openflow.dictation.guard.plist")
+    login_item.disable(plist)
+    assert list(plist.parent.iterdir()) == []
+
+
+class _Launchctl:
+    def __init__(self, loaded: bool) -> None:
+        self.loaded = loaded
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd[1:])
+        outer = self
+
+        class R:
+            returncode = 0 if (cmd[1] != "print" or outer.loaded) else 113
+            stderr = ""
+        return R()
+
+
+def test_refresh_guard_does_nothing_when_login_is_off():
+    run = _Launchctl(loaded=False)
+    assert login_item.refresh_guard(runner=run, uid=501) is False
+    assert run.calls == []
+    assert not login_item.guard_plist_path().exists()
+
+
+def test_refresh_guard_adds_and_loads_a_missing_guard(tmp_path):
+    login_item.enable(program=["/bin/true"], log_dir=tmp_path)
+    login_item.guard_plist_path().unlink()          # enabled before the guard existed
+    run = _Launchctl(loaded=False)
+    assert login_item.refresh_guard(runner=run, uid=501, log_dir=tmp_path) is True
+    assert login_item.guard_plist_path().exists()
+    assert run.calls == [["print", "gui/501/com.openflow.dictation.guard"],
+                         ["bootstrap", "gui/501", str(login_item.guard_plist_path())]]
+
+
+def test_refresh_guard_leaves_a_current_loaded_guard_alone(tmp_path):
+    login_item.enable(program=["/bin/true"], log_dir=tmp_path)
+    run = _Launchctl(loaded=True)
+    assert login_item.refresh_guard(runner=run, uid=501, log_dir=tmp_path) is True
+    assert run.calls == [["print", "gui/501/com.openflow.dictation.guard"]]
+
+
+def test_refresh_guard_reloads_a_changed_guard(tmp_path):
+    login_item.enable(program=["/bin/true"], log_dir=tmp_path)
+    login_item.guard_plist_path().write_bytes(plistlib.dumps({"Label": "old"}))
+    run = _Launchctl(loaded=True)
+    assert login_item.refresh_guard(runner=run, uid=501, log_dir=tmp_path) is True
+    assert [c[0] for c in run.calls] == ["print", "bootout", "bootstrap"]
+    assert _guard(login_item.default_plist_path())["StartInterval"] == login_item.GUARD_INTERVAL_S

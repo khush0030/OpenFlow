@@ -81,7 +81,57 @@ def check_sarvam_key() -> Check:
     return _check("sarvam_key", has_env or has_keyring, detail, f"Sarvam key: {detail}")
 
 
+# What each fallback key backs, for the doctor lines.
+_FALLBACK_ROLE = {
+    "groq": ("speech and cleanup fallback ready", "no speech fallback if Sarvam fails"),
+    "anthropic": ("cleanup fallback ready", "no Claude cleanup fallback"),
+}
+
+
+def check_fallback_keys(cfg: dict | None = None, results: dict | None = None) -> list[Check]:
+    """The Groq and Anthropic keys as OpenFlow itself reads them. Served by
+    the daemon, this uses what it read at start-up (keys.current), so the
+    answer is the bundle's own, Keychain access list included. Missing is
+    fine (ok=None: optional); a key the Keychain refused is a problem."""
+    import keys
+    try:
+        if results is None:
+            cache = keys.current
+            if cache is not None and cache.ready:
+                results = cache.results()
+            else:
+                if cfg is None:
+                    import config
+                    cfg = config.load()
+                results = keys.check_all(cfg)
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        return [_check("fallback_keys", None, detail, f"Fallback keys: check failed — {detail}")]
+    out = []
+    for name, (ready, missing) in _FALLBACK_ROLE.items():
+        r = results.get(name)
+        if r is None:
+            continue
+        label = keys.LABELS[name]
+        check = f"{name}_key"
+        if r.found:
+            out.append(_check(check, True, f"found ({r.source})",
+                              f"{label} key: ok ({r.source}) — {ready}"))
+        elif r.denied:
+            reason = keys.keychain_reason(r.keychain_error)
+            out.append(_check(
+                check, False, f"keychain refused: {reason}",
+                f"{label} key: BLOCKED — the Keychain refused to give it to OpenFlow "
+                f"({reason}). Open Keychain Access, find \"openflow\" › {r.keyring_user} "
+                f"and allow OpenFlow, or save it again (`openflow key set {name}`)."))
+        else:
+            out.append(_check(check, None, "not set",
+                              f"{label} key: not set — {missing} "
+                              f"(optional; `openflow key set {name}`)"))
+    return out
+
+
 def run_checks() -> list[Check]:
     """All non-interactive doctor checks, in CLI order."""
     return [check_accessibility(), check_input_monitoring(), check_microphone(),
-            *check_files(), check_sarvam_key()]
+            *check_files(), check_sarvam_key(), *check_fallback_keys()]

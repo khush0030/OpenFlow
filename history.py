@@ -175,6 +175,15 @@ class History:
                 "WHERE id = ?", (raw, final, status, int(entry_id)))
             return cur.rowcount > 0
 
+    def failed_takes(self, since: float = 0.0) -> list[Entry]:
+        """Saved takes still waiting for a transcript (status 'failed', audio
+        kept), recorded at or after `since`, oldest first."""
+        with self._conn() as c:
+            rows = c.execute(
+                f"SELECT {_COLS} FROM dictations WHERE status = ? AND audio_path IS NOT NULL "
+                "AND ts >= ? ORDER BY ts ASC, id ASC", (STATUS_FAILED, since)).fetchall()
+        return [Entry(*r) for r in rows]
+
     def audio_paths(self) -> set[str]:
         """Saved-take paths that history rows point at."""
         with self._conn() as c:
