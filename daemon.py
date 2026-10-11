@@ -78,7 +78,8 @@ from audio import NO_INPUT_RMS, Recorder, RecorderConfig, heard_nothing, loudest
 from transcribe import Transcriber, TranscribeOptions
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
-if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
+_PYNPUT = os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput"
+if _PYNPUT:
     from hotkeys import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "esc"       # pynput's name for the key
 else:
@@ -2147,17 +2148,20 @@ class Daemon:
         hold_key = self.cfg["hotkeys"]["record_hold"]
         self._hold = self._build_hold(hold_key)
         self._hold.start()
-        # macOS TIS (Text Input Sources) API is not thread-safe during init.
-        # Two pynput listeners starting concurrently both call
-        # TISCopyCurrentKeyboardInputSource and SIGABRT. Stagger them so the
-        # first listener finishes its TIS init before the second begins.
-        time.sleep(0.8)
+        # pynput only: macOS TIS (Text Input Sources) is not thread-safe
+        # during init; two pynput listeners starting together both call
+        # TISCopyCurrentKeyboardInputSource and SIGABRT, so stagger them.
+        # NSEvent monitors install on the main run loop: no wait (these
+        # sleeps held dictation back ~1.2 s after every login).
+        if _PYNPUT:
+            time.sleep(0.8)
 
         chords = self._chord_bindings(self.cfg["hotkeys"])
         if chords:
             self._chords = HotkeySet(chords)
             self._chords.start()
-            time.sleep(0.4)  # let second listener settle too
+            if _PYNPUT:
+                time.sleep(0.4)  # let second listener settle too
 
         # Flow widget: open the socket, then the pump spawns the widget
         # process and keeps it alive.

@@ -97,9 +97,36 @@ def is_valid_chord(chord: str) -> bool:
     return HotkeySet._compile_chord(chord) is not None
 
 
-# Monitors are installed on a background thread after this long, so they
-# don't race rumps' NSApp start-up. A live rebind passes a shorter delay.
+# Start-up installs the monitors on the main run loop (AppHelper.callAfter):
+# the call runs as soon as rumps' NSApp loop is up, with no guessed delay.
+# The old fixed 2.5 s wait (INSTALL_DELAY_S) is now only the fallback when
+# PyObjCTools is missing. INSTALL_FALLBACK_S: a background install for when
+# no main run loop ever runs (headless); a no-op once the loop installed it.
+# A live rebind (loop already running) passes its own short delay.
 INSTALL_DELAY_S = 2.5
+INSTALL_FALLBACK_S = 5.0
+
+
+def _call_on_main_loop(fn: Callable[[], None]) -> bool:
+    """Queue fn on the main run loop. False if that isn't possible here."""
+    try:
+        from PyObjCTools import AppHelper  # type: ignore
+        AppHelper.callAfter(fn)
+        return True
+    except Exception:
+        return False
+
+
+def _schedule_install(obj, delay_s: float | None) -> None:
+    """Install obj's monitor: on the main loop at start-up, after delay_s
+    on a background thread when one is given (live rebind)."""
+    if delay_s is None:
+        if _call_on_main_loop(lambda: obj._install_monitor(0)):
+            threading.Thread(target=obj._install_monitor, args=(INSTALL_FALLBACK_S,),
+                             daemon=True).start()
+            return
+        delay_s = INSTALL_DELAY_S
+    threading.Thread(target=obj._install_monitor, args=(delay_s,), daemon=True).start()
 
 
 _VK_TO_FLAG = {
@@ -193,6 +220,7 @@ class HoldOrToggle:
         # so the daemon can time key-down -> mic open from the key itself.
         self.last_press_ms: Optional[float] = None
         self._monitor = None
+        self._install_lock = threading.Lock()
         self._stopped = False
         self._events_seen = False
 
@@ -356,23 +384,21 @@ class HoldOrToggle:
                   "Firing native prompt.", flush=True)
             from permissions import request_accessibility_trust
             request_accessibility_trust()
-        # Defer install so we don't race rumps' NSApp creation. A background
-        # thread waits for NSApp to settle, then installs the monitor.
-        delay = INSTALL_DELAY_S if install_delay_s is None else install_delay_s
-        threading.Thread(target=self._install_monitor, args=(delay,), daemon=True).start()
+        _schedule_install(self, install_delay_s)
 
     def _install_monitor(self, delay_s: float) -> None:
-        # Give rumps NSApp.run() a moment to set up its main run loop.
-        time.sleep(delay_s)
-        if self._stopped:
-            return  # replaced by a rebind before it was ever installed
-        try:
-            from AppKit import NSEvent  # type: ignore
-        except Exception as e:
-            print(f"[hotkey] AppKit unavailable: {e}", flush=True)
-            return
-        mask = _MASK_KEYDOWN | _MASK_KEYUP | _MASK_FLAGS_CHANGED
-        self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._handler)
+        if delay_s:
+            time.sleep(delay_s)
+        with self._install_lock:
+            if self._stopped or self._monitor is not None:
+                return  # replaced by a rebind first, or already installed
+            try:
+                from AppKit import NSEvent  # type: ignore
+            except Exception as e:
+                print(f"[hotkey] AppKit unavailable: {e}", flush=True)
+                return
+            mask = _MASK_KEYDOWN | _MASK_KEYUP | _MASK_FLAGS_CHANGED
+            self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._handler)
         print(f"[hotkey] NSEvent global monitor installed (vk={self.target_vk}, name={self.key_name!r})", flush=True)
         if self._stopped:
             self.stop()  # stop() ran while we were installing
@@ -401,6 +427,7 @@ class HotkeySet:
     def __init__(self, bindings: dict[str, Callable[[], None]]) -> None:
         self.bindings = bindings
         self._monitor = None
+        self._install_lock = threading.Lock()
         self._stopped = False
         self._compiled = []
         for chord, cb in bindings.items():
@@ -466,19 +493,20 @@ class HotkeySet:
             print(f"[hotkey] chord listener error: {e}", flush=True)
 
     def start(self, install_delay_s: float | None = None) -> None:
-        delay = INSTALL_DELAY_S if install_delay_s is None else install_delay_s
-        threading.Thread(target=self._install_monitor, args=(delay,), daemon=True).start()
+        _schedule_install(self, install_delay_s)
 
     def _install_monitor(self, delay_s: float) -> None:
-        time.sleep(delay_s)
-        if self._stopped:
-            return  # replaced by a rebind before it was ever installed
-        try:
-            from AppKit import NSEvent  # type: ignore
-        except Exception:
-            return
-        mask = _MASK_KEYDOWN
-        self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._handler)
+        if delay_s:
+            time.sleep(delay_s)
+        with self._install_lock:
+            if self._stopped or self._monitor is not None:
+                return  # replaced by a rebind first, or already installed
+            try:
+                from AppKit import NSEvent  # type: ignore
+            except Exception:
+                return
+            mask = _MASK_KEYDOWN
+            self._monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, self._handler)
         print(f"[hotkey] NSEvent chord monitor installed ({len(self._compiled)} chords)", flush=True)
         if self._stopped:
             self.stop()  # stop() ran while we were installing
