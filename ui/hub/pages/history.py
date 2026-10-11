@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
 from history import STATUS_FAILED, Entry, History
 from stats import word_count
 from ui.hub import style as S
-from ui.hub import workers
+from ui.hub import datastamp, workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.widget_copy import TONE_LABELS
@@ -187,6 +187,7 @@ class _Clamp(QWidget):
         super().__init__()
         self._text, self._font, self._color = text, font, QColor(color)
         self._lines, self._leading = lines, leading
+        self._cache: dict[float, list[str]] = {}   # width -> lines
         sp = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         sp.setHeightForWidth(True)
         self.setSizePolicy(sp)
@@ -200,10 +201,13 @@ class _Clamp(QWidget):
 
     def _layout(self, width: float) -> list[str]:
         width = max(width, 40.0)
+        hit = self._cache.get(width)
+        if hit is not None:
+            return hit                     # heightForWidth asks ~10x per layout pass
         tl = QTextLayout(self._text, self._font)
         spans = []
         tl.beginLayout()
-        while True:
+        while len(spans) <= self._lines:   # one line past the clamp says "more"
             line = tl.createLine()
             if not line.isValid():
                 break
@@ -212,9 +216,17 @@ class _Clamp(QWidget):
         tl.endLayout()
         out = [self._text[s:s + n].rstrip() for s, n in spans[:self._lines]]
         if len(spans) > self._lines:
-            rest = self._text[spans[self._lines - 1][0]:].replace("\n", " ")
+            # Elide only the last visible line plus the next one: already
+            # wider than `width`, so the result is the same as eliding the
+            # whole rest of a long transcript, at a fraction of the cost.
+            s, (n_s, n_len) = spans[self._lines - 1][0], spans[self._lines]
+            rest = self._text[s:n_s + n_len].replace("\n", " ")
             out[-1] = QFontMetricsF(self._font).elidedText(rest, Qt.TextElideMode.ElideRight, width)
-        return out or [""]
+        out = out or [""]
+        if len(self._cache) >= 16:
+            self._cache.clear()
+        self._cache[width] = out
+        return out
 
     def hasHeightForWidth(self) -> bool:
         return True
@@ -730,6 +742,7 @@ class HistoryPage(Page):
         self.chips: dict[str, QPushButton] = {}
         self._last_day: date | None = None
         self._groups: list[tuple[str, list[int]]] = []
+        self._loaded_key: tuple | None = None    # history stamp + day the list shows
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setObjectName("historyPage")
@@ -861,7 +874,10 @@ class HistoryPage(Page):
             self._search_timer.stop()
             self._query = query.strip()
             self._selected_id = None
-        self._reload()
+        # Rebuilding ~200 rows costs ~300 ms: skip it when the list on screen
+        # is already what the database holds (search/filter reload themselves).
+        if query is not None or self._loaded_key != self._data_key():
+            self._reload()
         self._probe_daemon()
         if query is None:
             self.setFocus(Qt.FocusReason.OtherFocusReason)     # ↑/↓ work straight away
@@ -1005,10 +1021,15 @@ class HistoryPage(Page):
         for k, c in self.chips.items():
             c.setChecked(k == self._filter)
 
+    def _data_key(self) -> tuple:
+        return datastamp.history_stamp(self.ctx.history_path), self._today()
+
     def _reload(self, to_top: bool = False, select_index: int | None = None) -> None:
+        key = self._data_key()               # before reading: a write mid-read means reload again
         self._rebuild_chips()
         limit = max(PAGE_SIZE, len(self._entries)) if not to_top else PAGE_SIZE
         entries = self._fetch(limit)
+        self._loaded_key = key if entries is not None else None
         self._clear_rows()
         if entries is None:
             entries = []
