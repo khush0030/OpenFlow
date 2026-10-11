@@ -100,7 +100,8 @@ def test_silent_take_pastes_nothing(nd, env, take):
     nd.transcriber = Recording(result="Okay.")
     keyup(nd, take)
     assert nd.transcriber.calls == 0 and pasted(env) == []
-    assert nd._flow.state == ERROR and nd._flow.reason == "no_audio"   # can't hear you
+    assert nd._flow.state == IDLE                  # quietly: the mic works
+    assert not any(m.get("state") == ERROR for m in nd._widget.sent)
     assert nd.state.recording == dm.RecordingState.IDLE
     # Never lose a word: History keeps it, to transcribe again by hand ...
     (row,) = nd.history.recent(10)
@@ -123,7 +124,14 @@ def test_silent_take_aborts_its_stream(env, monkeypatch):
     (s,) = d.transcriber.opened
     d.on_record_stop()
     assert s.aborted and d.transcriber.calls == []
-    assert d._flow.reason == "no_audio" and pasted(env) == []
+    assert d._flow.state == IDLE and pasted(env) == []
+
+
+def test_dead_mic_still_says_cant_hear_you(nd, env):
+    nd.transcriber = Recording(result="Okay.")
+    keyup(nd, np.zeros(SR, dtype=np.float32))
+    assert nd.transcriber.calls == 0
+    assert nd._flow.state == ERROR and nd._flow.reason == "no_audio"
 
 
 def test_history_can_still_transcribe_an_unheard_take(nd, env):
@@ -193,7 +201,8 @@ def test_lone_phantom_word_on_low_energy_take_is_dropped(nd, env, text):
     nd.transcriber = Recording(result=text)
     keyup(nd, take)
     assert nd.transcriber.calls == 1 and pasted(env) == []
-    assert nd._flow.state == ERROR and nd._flow.reason == "no_audio"
+    assert nd._flow.state == IDLE
+    assert not any(m.get("state") in (ERROR, CARD) for m in nd._widget.sent)
     (row,) = nd.history.recent(10)
     assert row.status == STATUS_NO_SPEECH and os.path.exists(row.audio_path)
     assert nd.history.failed_takes() == []

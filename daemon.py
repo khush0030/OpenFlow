@@ -109,7 +109,7 @@ from takes import TakeStore, network_up
 from state import DaemonState, RecordingState, ToneMode, LanguageMode
 from tray import TrayApp, Status
 from tray import _spawn_ui_subprocess as spawn_ui
-from flow_state import CARD, NO_AUDIO, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
+from flow_state import CARD, NOT_PASTED, WRITE_FAILED, FlowController, FlowHooks
 from flow_state import OFFLINE as FLOW_OFFLINE, SAVED as FLOW_SAVED
 from flow_state import PROCESSING as FLOW_PROCESSING
 from flow_state import IDLE as FLOW_IDLE, RECORDING as FLOW_RECORDING, SILENT as FLOW_SILENT
@@ -1651,8 +1651,9 @@ class Daemon:
         silence = self._silence_threshold()
         if not heard_speech(audio, sr, silence):
             # A live mic but no speech (an accidental or empty take): the
-            # room's noise, uploaded, comes back as a made-up word. Same
-            # outcome as a dead mic, but the audio goes to History in case.
+            # room's noise, uploaded, comes back as a made-up word. The mic
+            # is fine, so no "can't hear you": back to idle quietly, like a
+            # too-short tap. The audio goes to History in case.
             print(f"[daemon] no speech: loudest {loudest_rms(audio, sr):.5f}, nothing held "
                   f">= {silence * SOFT_SPEECH_FACTOR:.4f} — not transcribing "
                   "(kept in History).", flush=True)
@@ -1661,7 +1662,7 @@ class Daemon:
             self._abort_stream(ctx)
             self.state.recording = RecordingState.IDLE
             self.state.notify()
-            self._flow.no_audio(audio, ctx)
+            self._flow.done()
             self._keep_unheard(audio, ctx)
             return
         # The take will be transcribed: have Sarvam finalize now, so its
@@ -2115,9 +2116,10 @@ class Daemon:
 
     def _take_unheard(self, audio, ctx: RunContext, run: int) -> None:
         """The transcript was judged made up (is_phantom): nothing is
-        pasted, the widget says it can't hear you, History keeps the take."""
+        pasted, the widget goes back to idle quietly (the mic works: no
+        "can't hear you"), History keeps the take."""
         self._unheard_row(audio, ctx)
-        self._flow.failed(audio, ctx, run=run, reason=NO_AUDIO) or self._stale(run)
+        self._flow.done(run=run) or self._stale(run)
 
     def _take_failed(self, audio, ctx: RunContext, run: int, reason: str = "") -> None:
         """Transcription failed (after the whole provider chain): keep the
