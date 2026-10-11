@@ -67,6 +67,7 @@ def _install_file_logger() -> None:
 # Installed by main() (the daemon's start-up), never at import: a one-off
 # `import daemon` (tests, dev tools) must not write to ~/.openflow.
 
+import collections
 import json
 import subprocess
 
@@ -338,6 +339,55 @@ PREFETCH_WAIT_S = 0.1
 # leaves its file behind, which the next start lists as a failed take: the
 # words are never lost, only kept longer than needed.
 SAVE_WAIT_S = 10.0
+
+
+class _WidgetSender:
+    """Writes to the widget socket on one thread, in order. _send_widget
+    runs inside the FlowController lock (and on the key thread); a widget
+    process that stops reading made every state change wait out the
+    socket's 1 s send timeout there, holding the lock that the key thread,
+    the pump and the widget's own clicks all need. Callers now only queue.
+    A level message replaces a level still waiting, so a stalled widget
+    can't build up a backlog of stale meter readings."""
+
+    def __init__(self, server) -> None:
+        self._server = server
+        self._q: "collections.deque[dict]" = collections.deque()
+        self._cv = threading.Condition()
+        self._busy = False
+        threading.Thread(target=self._run, name="widget-send", daemon=True).start()
+
+    def send(self, msg: dict) -> None:
+        with self._cv:
+            if msg.get("type") == "level" and self._q and self._q[-1].get("type") == "level":
+                self._q[-1] = msg
+            else:
+                self._q.append(msg)
+            self._cv.notify_all()
+
+    def flush(self, timeout: float) -> bool:
+        """Wait until everything queued has been written (quit, tests)."""
+        with self._cv:
+            return self._cv.wait_for(lambda: not self._q and not self._busy, timeout)
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                self._cv.wait_for(lambda: bool(self._q))
+                msg = self._q.popleft()
+                self._busy = True
+            try:
+                self._server.send(msg)
+            except Exception as e:   # never let the sender thread die
+                print(f"[daemon] widget send failed: {e}", flush=True)
+            finally:
+                with self._cv:
+                    self._busy = False
+                    self._cv.notify_all()
+
+
+# Quitting waits at most this long for the widget's last messages ("exit").
+WIDGET_FLUSH_S = 1.0
 
 
 class _WidgetWatchdog:
@@ -1055,6 +1105,7 @@ class Daemon:
             log_exception("daemon.widget", "widget socket unavailable — running without the flow widget", e)
             self._widget = None
             return
+        self._widget_out = _WidgetSender(self._widget)
         threading.Thread(target=self._widget_pump, name="widget-pump", daemon=True).start()
 
     def _send_widget(self, msg: dict) -> None:
@@ -1080,8 +1131,15 @@ class Daemon:
             elif cue:
                 sounds.play(cue)
         server = getattr(self, "_widget", None)
-        if server is not None:
-            server.send(msg)
+        if server is None:
+            return
+        out = getattr(self, "_widget_out", None)
+        if out is None:
+            server.send(msg)     # no sender thread (test daemons): write now
+            return
+        out.send(msg)
+        if msg.get("type") == "exit":
+            out.flush(WIDGET_FLUSH_S)   # quitting: let it reach the widget
 
     def _hold_cue(self) -> None:
         """The deferred hold start tick: only if that hold is still going."""
