@@ -62,7 +62,7 @@ then AppKit and the whole `Quartz` umbrella at runtime (screens.py).
 | widget, daemon | widget socket reader: `recv` with a 1 s timeout (the socket's *send* timeout) | 1 /s each |
 | daemon | `_widget_pump`: `wait(0.05)` forever; mic level only matters while recording, Undo/Retry timers tick at 4 /s, config.toml mtime every 2 s | 20 /s |
 | daemon | control / edit-overlay accept loops | blocking (none) |
-| hub (open) | 0.45 % CPU offscreen; quits 60 s after its window is hidden (`QUIT_AFTER_HIDDEN_MS`) | — |
+| hub (open) | 0.45 % CPU offscreen; quits 10 min after its window is hidden (`QUIT_AFTER_HIDDEN_MS`; was 60 s until 2026-10-11) | — |
 
 ### Per take
 

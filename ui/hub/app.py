@@ -3,7 +3,8 @@
 Run as its own process (`openflow hub [page]`); rumps and PyQt can't share an
 NSApp. Single instance: the first process listens on ~/.openflow/hub.sock and
 a later launch hands its page over there and exits. The window owns a Dock
-icon only while it is visible, and the process quits after a minute hidden.
+icon only while it is visible, and the process quits after QUIT_AFTER_HIDDEN_MS
+(10 minutes) hidden.
 """
 from __future__ import annotations
 
@@ -37,7 +38,9 @@ DOCK_ICON = _ASSETS / "logo" / "icon.png"
 DEFAULT_SIZE = (1280, 832)
 MIN_SIZE = (980, 640)
 SIDEBAR_W = 236
-QUIT_AFTER_HIDDEN_MS = 60_000
+# A hidden hub lingers (about 44 MB, idle) so reopening it from the menu
+# bar is instant (tray.open_hub → hub.sock) instead of a 0.5–2 s cold start.
+QUIT_AFTER_HIDDEN_MS = 10 * 60_000
 
 # ── artwork (mockup common.py: 24-unit stroked glyphs, 26-unit mark) ─────────
 _ICON_PATHS = {
