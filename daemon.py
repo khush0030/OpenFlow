@@ -86,7 +86,7 @@ else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "escape"
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
-                   focused_editable, set_clipboard, undo_last_paste)
+                   field_snapshot, focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
 import groq_stt
@@ -287,6 +287,45 @@ class _SaveJob:
         return None if self._thread.is_alive() else self._path
 
 
+class _PastePrefetch:
+    """The paste's AX reads, done while the take is being transcribed: is
+    the key-down element a text field (focused_editable), and the field's
+    text before Cmd+V (paste verification). Both depend only on the paste
+    target captured at key-down, so they needn't wait for the transcript."""
+
+    def __init__(self, target, check_editable: bool) -> None:
+        self.target = target
+        self.editable = None
+        self.editable_known = False
+        self.before = None
+        self.before_known = False
+        self._check_editable = check_editable
+        self._done = threading.Event()
+        threading.Thread(target=self._run, name="paste-prefetch", daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            # Only the element captured at key-down: with none, focused_editable
+            # reads the focus of the moment, which must be read at paste time.
+            if self._check_editable and getattr(self.target, "ax_element", None) is not None:
+                self.editable = focused_editable(self.target)
+                self.editable_known = True
+            self.before = field_snapshot(self.target)
+            self.before_known = True
+        except Exception as e:
+            print(f"[daemon] paste prefetch skipped: {e}", flush=True)
+        finally:
+            self._done.set()
+
+    def ready(self, timeout: float) -> "_PastePrefetch | None":
+        return self if self._done.wait(timeout) else None
+
+
+# A prefetch not finished by paste time is waited on this long, then ignored
+# (the paste reads for itself, as before).
+PREFETCH_WAIT_S = 0.1
+
+
 # The worker waits at most this long for a take's audio to reach the disk
 # before discarding it. A write still running past it finishes later and
 # leaves its file behind, which the next start lists as a failed take: the
@@ -432,6 +471,7 @@ class Daemon:
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
         self._screen_enabled = True   # see _start_screen_capture
+        self._prefetch_enabled = True  # see _prefetch_paste
         self.dictionary = Dictionary.load()
         self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
         self._autolearner = AutoLearner(cfg_mod.SUGGESTIONS_PATH, cfg_mod.DICT_PATH,
@@ -1848,6 +1888,20 @@ class Daemon:
                       flush=True)
         self._flow.failed(audio, ctx, run=run, reason=reason) or self._stale(run)
 
+    def _prefetch_paste(self, ctx: RunContext, run: int):
+        """Start the paste's AX reads now, next to STT (_PastePrefetch).
+        Only a daemon built by __init__ prefetches; test daemons read at
+        paste time as before unless a test turns it on."""
+        if ctx.target is None or not getattr(self, "_prefetch_enabled", False) \
+                or self._flow.is_cancelled(run):
+            return None
+        try:
+            return _PastePrefetch(ctx.target,
+                                  check_editable=not ctx.edit_mode or ctx.command is not None)
+        except Exception as e:
+            print(f"[daemon] paste prefetch skipped: {e}", flush=True)
+            return None
+
     def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
         """True (and logs) if the user cancelled this run: its text must
         not be pasted, copied or saved."""
@@ -1870,6 +1924,7 @@ class Daemon:
             self._take_failed(audio, ctx, run)
             return
         self._busy_since = time.monotonic()   # hang_watch: a wedged run gets its stacks dumped
+        prefetch = self._prefetch_paste(ctx, run)
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
         # Stage timings (seconds) for the log line and the history row.
@@ -1956,20 +2011,29 @@ class Daemon:
                 return
 
             self.state.last_pasted = final
-            if (not ctx.edit_mode or ctx.command is not None) \
-                    and focused_editable(target) is False:
+            pre = prefetch.ready(PREFETCH_WAIT_S) if prefetch is not None else None
+            check_editable = not ctx.edit_mode or ctx.command is not None
+            if check_editable:
+                editable = (pre.editable if pre is not None and pre.editable_known
+                            else focused_editable(target))
+            if check_editable and editable is False:
                 set_clipboard(final)   # even if the card can't be shown
                 print("[daemon] no text box focused — showing card", flush=True)
                 self._flow.show_card(final, run=run) or self._stale(run)
             else:
                 self._stop_paste_watch()
-                paste_status = paste(final, target=target)
+                # The look for the text in the field after Cmd+V runs on a
+                # side thread: the done cue and the next take don't wait it.
+                kw = {"confirm_in_background": True}
+                if pre is not None and pre.before_known:
+                    kw["before"] = pre.before
+                paste_status = paste(final, target=target, **kw)
                 self.state.last_paste_at = time.time()
                 print(f"[daemon] paste {paste_status}", flush=True)
                 if paste_status == "pasted":
-                    self._watch_paste(final, target)
                     sounds.play("paste")
                     self._flow.done(run=run) or self._stale(run)
+                    self._watch_paste(final, target)
                 else:
                     # It could not have landed: never lose the text — it's
                     # on the clipboard and in the card (spec §8).

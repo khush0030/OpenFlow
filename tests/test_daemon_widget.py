@@ -104,7 +104,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(dm, "set_clipboard", lambda text: calls.append(("clipboard", text)) or True)
     monkeypatch.setattr(dm, "focused_editable", lambda target=None: None)
 
-    def fake_paste(text, target=None):
+    def fake_paste(text, target=None, **kw):
         calls.append(("paste", text))
         return "pasted"
     monkeypatch.setattr(dm, "paste", fake_paste)
@@ -287,7 +287,7 @@ def test_empty_tap_still_returns_widget_to_idle(env):
 
 
 def test_failed_paste_shows_card(env, monkeypatch):
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: "failed")
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: "failed")
     d = make_daemon()
     work(d, d._flow.processing())
     assert d._flow.state == CARD and d._flow.text == "hello world"
@@ -297,7 +297,7 @@ def test_failed_paste_shows_card(env, monkeypatch):
 def test_paste_that_could_not_land_shows_the_not_pasted_card(env, monkeypatch, status):
     played = []
     monkeypatch.setattr(dm.sounds, "play", played.append)
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: status)
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: status)
     d = make_daemon()
     work(d, d._flow.processing())
     assert d._flow.state == CARD and d._flow.text == "hello world"

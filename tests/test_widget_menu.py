@@ -59,7 +59,7 @@ def env(monkeypatch):
     calls: list[tuple] = []
     monkeypatch.setattr(dm, "print", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(dm, "log_exception", lambda *a, **k: calls.append(("logged",)))
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: calls.append(("paste", text)) or "pasted")
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: calls.append(("paste", text)) or "pasted")
     monkeypatch.setattr(dm, "capture_front_app", lambda: None)
     monkeypatch.setattr(dm, "spawn_ui", lambda module, *args: calls.append(("spawn", module, *args)))
     monkeypatch.setattr(dm.cfg_mod, "save_setting",

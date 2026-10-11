@@ -454,7 +454,7 @@ def test_queued_card_never_auto_pastes(env, monkeypatch):
 
 def test_daemon_queues_a_stale_not_pasted_card(env, monkeypatch):
     d = make_daemon()
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: "not_frontmost")
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: "not_frontmost")
     run1 = d._flow.processing()
     d.recorder.is_recording = True
     d._flow.recording_started()

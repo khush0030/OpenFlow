@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -216,3 +218,69 @@ def test_target_that_never_comes_to_front_sends_nothing(fake_os):
     fake_os["activate"] = 7                           # activate "succeeds", front unchanged
     assert paste.paste("hello", target=CODE) == "clipboard"
     assert "cmd+v" not in fake_os["events"]
+
+
+# -- latency: no fixed settle, early field read, verify off the critical path --
+
+def _sleeps(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr(paste.time, "sleep", lambda s: slept.append(s))
+    return slept
+
+
+def test_no_settle_sleep_when_keys_are_up_and_the_app_is_in_front(fake_os, monkeypatch):
+    slept = _sleeps(monkeypatch)
+    fake_os["lands"] = False                  # keep the confirm polls out of it
+    fake_os["field"] = None
+    assert paste.paste("hello", target=CODE) == "pasted"
+    assert paste.PASTE_SETTLE_S not in slept
+
+
+def test_settle_sleep_after_bringing_the_app_back(fake_os, monkeypatch):
+    slept = _sleeps(monkeypatch)
+    fake_os["front"], fake_os["activate"] = 7, 42
+    fake_os["field"] = None
+    assert paste.paste("hello", target=CODE) == "pasted"
+    assert paste.PASTE_SETTLE_S in slept
+
+
+def test_settle_sleep_after_waiting_for_a_held_modifier(fake_os, monkeypatch):
+    slept = _sleeps(monkeypatch)
+    fake_os["field"] = None
+
+    def wait(timeout_s=1.0):
+        threading.Event().wait(0.03)          # the ⌥ came up 30 ms later
+        return True
+    monkeypatch.setattr(paste, "_wait_modifiers_released", wait)
+    assert paste.paste("hello", target=CODE) == "pasted"
+    assert paste.PASTE_SETTLE_S in slept
+
+
+def test_a_field_read_earlier_is_used_instead_of_reading_now(fake_os):
+    early = paste.field_snapshot(CODE)
+    reads = fake_os["reads"]
+    assert paste.paste("hello world", target=CODE, before=early) == "pasted"
+    assert fake_os["events"].index("cmd+v") >= 0
+    # No read before Cmd+V; the reads after it are the confirmation's.
+    assert verdict(fake_os).endswith("pasted (verified)")
+    assert fake_os["reads"] - reads == 1
+
+
+def test_confirm_in_background_returns_right_after_cmd_v(fake_os, monkeypatch):
+    gate = threading.Event()
+    real_confirm = paste._confirm_paste
+
+    def slow_confirm(pid, before, text):
+        gate.wait(2)
+        return real_confirm(pid, before, text)
+    monkeypatch.setattr(paste, "_confirm_paste", slow_confirm)
+    t = time.monotonic()
+    assert paste.paste("hello world", target=CODE, confirm_in_background=True) == "pasted"
+    assert time.monotonic() - t < 0.5
+    assert not any("sent Cmd+V" in l for l in fake_os["log"])   # not decided yet
+    assert paste._LAST_PASTE is not None                         # undo still works
+    gate.set()
+    end = time.monotonic() + 2
+    while not any("sent Cmd+V" in l for l in fake_os["log"]) and time.monotonic() < end:
+        time.sleep(0.01)
+    assert verdict(fake_os).endswith("pasted (verified)")
