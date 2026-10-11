@@ -21,6 +21,8 @@ import threading
 import time
 from typing import Callable, Optional
 
+import hotkey_timing
+
 # Force-import HIServices at module top so pyobjc's lazy resolver settles
 # before the daemon's first AX query. Without this, HIServices may fail to
 # load inside the PyInstaller bundle and accessibility_trusted() returns
@@ -252,11 +254,9 @@ class HoldOrToggle:
     implementations transparently.
     """
 
-    # press+release shorter than this counts as a tap. Real taps in the log
-    # (2026-10-01) ran 46–340 ms, several at 313–340 ms, right on the old
-    # 350 ms limit; 450 leaves room without catching short holds.
-    SHORT_TAP_MS = 450
-    DOUBLE_TAP_GAP_MS = 600
+    # Tap length and double-tap window: one place for both backends.
+    SHORT_TAP_MS = hotkey_timing.SHORT_TAP_MS
+    DOUBLE_TAP_GAP_MS = hotkey_timing.DOUBLE_TAP_GAP_MS
     # Another key pressed this soon into a hold means the hold key is being
     # used as a modifier (⌥← in an editor), not to dictate: drop the take.
     CHORD_CANCEL_MS = 1500
@@ -343,6 +343,7 @@ class HoldOrToggle:
         if self._last_tap_release_ms and gap < self.DOUBLE_TAP_GAP_MS:
             print(f"[hotkey] press: DOUBLE-TAP detected (gap={gap:.0f}ms) -> toggle start", flush=True)
             self._mode = "toggle"  # set first: hands_free is read during the callback
+            self._press_ms = now   # a held second press ends like a hold (_on_release)
             try:
                 self.on_press_cb()
             except Exception as e:
@@ -357,14 +358,29 @@ class HoldOrToggle:
         except Exception as e:
             print(f"[hotkey] press handler error: {e}", flush=True)
 
-    def _on_release(self, at_ms: Optional[float] = None) -> None:
+    def _on_release(self, at_ms: Optional[float] = None, missed: bool = False) -> None:
+        """missed: no release event came; this one is made up at the next
+        press (so its time says nothing about how long the key was held)."""
         if not self._down:
             return
         self._down = False
         now = self._now_ms() if at_ms is None else at_ms
         self.last_event_ms = now
         if self._mode == "toggle":
-            # In toggle mode releases are no-ops; press toggles.
+            # The release of the press that started hands-free. A quick one
+            # (a real double-tap) leaves the session running; one held like
+            # a hold ("I re-gripped the key") stops it like a hold. A missed
+            # release leaves it to the press that found it: that press stops
+            # the session, as it always did.
+            held = now - self._press_ms
+            if held >= self.SHORT_TAP_MS and not missed:
+                print(f"[hotkey] release: double-tap's second press held {held:.0f}ms "
+                      "-> stop like a hold", flush=True)
+                try:
+                    self.on_release_cb()
+                except Exception as e:
+                    print(f"[hotkey] release handler error: {e}", flush=True)
+                self._mode = "idle"
             return
         if self._mode != "hold":
             # The press already did its job (stopped a hands-free session,
@@ -449,7 +465,7 @@ class HoldOrToggle:
                     # release never reached us. Close that press out so
                     # this one isn't swallowed.
                     print("[hotkey] press while marked down — release was missed", flush=True)
-                    self._on_release(at)
+                    self._on_release(at, missed=True)
                 self._on_press(at)
             else:
                 self._on_release(at)

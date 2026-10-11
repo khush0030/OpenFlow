@@ -232,24 +232,26 @@ def test_double_tap_reuses_the_taps_mic(keyed):
     feed(d._hold, down(now - 0.20))
     feed(d._hold, up(now - 0.10))               # a tap: the take is dropped...
     assert d.recorder.lingering and not d.recorder.is_recording
-    assert d._flow.state == IDLE
+    assert d._flow.state == RECORDING             # ...but the pill stays up (no stutter)
     feed(d._hold, down(now - 0.05))             # ...and the second press reuses it
     assert d._hold.hands_free and d.recorder.is_recording
     assert d._flow.state == RECORDING
     assert len(FakeStream.instances) == 1          # one PortAudio open for the double-tap
 
 
-def test_lone_tap_closes_the_mic_after_the_window(keyed, monkeypatch):
+def test_lone_tap_closes_the_mic_and_the_pill_after_the_window(keyed, monkeypatch):
     monkeypatch.setattr(dm, "TAP_LINGER_SLACK_S", 0.0)
+    monkeypatch.setattr(dm, "_after", lambda delay, fn: threading.Timer(delay, fn).start())
     d = keyed
     now = time.monotonic()
-    # Released 0.55 s ago: 50 ms of the 600 ms window left.
-    feed(d._hold, down(now - 0.65))
-    feed(d._hold, up(now - 0.55))
-    assert d.recorder.lingering
+    # Released 0.30 s ago: 50 ms of the 350 ms window left.
+    feed(d._hold, down(now - 0.40))
+    feed(d._hold, up(now - 0.30))
+    assert d.recorder.lingering and d._flow.state == RECORDING
     time.sleep(0.2)
     _closer_done(d.recorder)
     assert not d.recorder.lingering and open_streams() == []
+    assert d._flow.state == IDLE
 
 
 def test_chord_closes_the_mic_at_once(keyed):

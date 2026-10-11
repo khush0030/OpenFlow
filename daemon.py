@@ -843,7 +843,9 @@ class Daemon:
         # ignored.
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
-        self._flow.recording_started(hands_free=hands_free)
+        with self._flow.lock:   # a lone tap's delayed collapse checks the take id
+            self._take_id = getattr(self, "_take_id", 0) + 1
+            self._flow.recording_started(hands_free=hands_free)
         # Then the mic, before every other key-down read: the paste target
         # (AX), the screen names and the STT stream all finish while the
         # user talks; the stream gets the blocks it missed (attach).
@@ -908,15 +910,34 @@ class Daemon:
         # it again. Otherwise (a chord) it closes now. No tail wait: this
         # audio is discarded either way.
         hold = getattr(self, "_hold", None)
-        linger = 0.0
+        linger = window = 0.0
         if getattr(hold, "double_tap_armed", False):
-            linger = hold.double_tap_window_s() + TAP_LINGER_SLACK_S
+            window = hold.double_tap_window_s()
+            linger = window + TAP_LINGER_SLACK_S
         self.recorder.cancel(linger_s=linger)
         self._drop_stream()
         self._screen = None
         self.state.recording = RecordingState.IDLE
         self.state.notify()
+        if window > 0:
+            # Keep the recording pill up through the double-tap window, as
+            # the mic lingers: collapsing it here and re-growing it ~80 ms
+            # later at the second press stuttered every hands-free start.
+            # A lone tap's pill goes idle when the window ends.
+            self._send_widget({"type": "level", "rms": 0.0})
+            take_id = getattr(self, "_take_id", 0)
+            _after(window, lambda: self._collapse_lone_tap(take_id))
+            return
         self._flow.idle_if_recording()
+
+    def _collapse_lone_tap(self, take_id: int) -> None:
+        """The double-tap window ended without a second press: the tap's pill
+        goes idle, unless a new take (the second press, a widget click) has
+        started since; checked under the flow lock that start takes too."""
+        with self._flow.lock:
+            if getattr(self, "_take_id", 0) != take_id or self.recorder.is_recording:
+                return
+            self._flow.idle_if_recording()
 
     def _open_stream(self) -> None:
         """Key-down: stream this take to Sarvam while the user talks
@@ -1035,8 +1056,14 @@ class Daemon:
             new = msg.get("state", "idle")
             # Starts carry the flag; stops / cancels end the session before.
             hands_free = bool(msg.get("hands_free")) or getattr(self, "_last_hands_free", False)
-            cue = sounds.cue_for_transition(getattr(self, "_last_flow_state", "idle"), new,
-                                            hands_free=hands_free)
+            prev = getattr(self, "_last_flow_state", "idle")
+            cue = sounds.cue_for_transition(prev, new, hands_free=hands_free)
+            if (cue is None and new == "recording" and prev in ("recording", "silent")
+                    and msg.get("hands_free") and not getattr(self, "_last_hands_free", False)):
+                # A double-tap's second press: the tap's pill stayed up
+                # through the window (_on_hold_cancel), so recording ->
+                # recording is the hands-free start.
+                cue = "handsfree_start"
             self._last_flow_state = new
             self._last_hands_free = bool(msg.get("hands_free"))
             self._wake_pump()     # its cadence follows the state
