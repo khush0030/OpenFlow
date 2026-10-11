@@ -264,6 +264,34 @@ class RunContext:
     # lands, and its history row once a failure was recorded there.
     audio_path: str | None = None
     history_id: int | None = None
+    # The take's audio being written (a _SaveJob) while it is transcribed.
+    saving: object = None
+
+
+class _SaveJob:
+    """Writes a take's audio (TakeStore.save: WAV + fsync) on its own thread,
+    so the STT race starts at once instead of after the disk write."""
+
+    def __init__(self, store, audio, sample_rate: int) -> None:
+        self._path: str | None = None
+        self._thread = threading.Thread(target=self._run, args=(store, audio, sample_rate),
+                                        name="take-save", daemon=True)
+        self._thread.start()
+
+    def _run(self, store, audio, sample_rate: int) -> None:
+        self._path = store.save(audio, sample_rate)
+
+    def wait(self, timeout: float | None = None) -> str | None:
+        """The saved path (None: not saved, or still writing at the timeout)."""
+        self._thread.join(timeout)
+        return None if self._thread.is_alive() else self._path
+
+
+# The worker waits at most this long for a take's audio to reach the disk
+# before discarding it. A write still running past it finishes later and
+# leaves its file behind, which the next start lists as a failed take: the
+# words are never lost, only kept longer than needed.
+SAVE_WAIT_S = 10.0
 
 
 class _WidgetWatchdog:
@@ -1734,19 +1762,47 @@ class Daemon:
         except Exception as e:
             log_exception("daemon.takes", "tidying saved takes failed", e)
 
-    def _save_take(self, audio, ctx: RunContext) -> RunContext:
-        """Key-up: the take's audio on disk before anything can fail.
+    def _needs_save(self, audio, ctx: RunContext):
+        """The take store, if this take's audio still has to be written.
         Edit / command takes stay in memory: they only replay on the widget."""
         store = getattr(self, "_takes", None)
         if store is None or ctx.edit_mode or getattr(audio, "size", 0) == 0:
+            return None
+        if ctx.saving is not None or (ctx.audio_path and os.path.exists(ctx.audio_path)):
+            return None
+        return store
+
+    def _begin_save(self, audio, ctx: RunContext) -> RunContext:
+        """Key-up: start writing the take's audio (never lose a word) next
+        to the transcription, not before it. The audio stays in memory for
+        the run; _saved() waits for the file before anything relies on it,
+        and _take_landed() before the audio is discarded."""
+        store = self._needs_save(audio, ctx)
+        if store is None:
             return ctx
-        if ctx.audio_path and os.path.exists(ctx.audio_path):
+        return replace(ctx, saving=_SaveJob(store, audio, int(self.cfg["audio"]["sample_rate"])))
+
+    def _saved(self, ctx: RunContext) -> RunContext:
+        """ctx once its audio write (if any) has finished."""
+        job = ctx.saving
+        if job is None:
+            return ctx
+        path = job.wait(SAVE_WAIT_S)
+        return replace(ctx, saving=None, audio_path=path or ctx.audio_path)
+
+    def _save_take(self, audio, ctx: RunContext) -> RunContext:
+        """The take's audio on disk now (a failure keeps it for Retry)."""
+        ctx = self._saved(ctx)
+        store = self._needs_save(audio, ctx)
+        if store is None:
             return ctx
         path = store.save(audio, int(self.cfg["audio"]["sample_rate"]))
         return replace(ctx, audio_path=path) if path else ctx
 
     def _take_landed(self, ctx: RunContext) -> None:
-        """The take's text was pasted or shown: drop its audio."""
+        """The take's text was pasted or shown: drop its audio, once the
+        write that kept it safe meanwhile has finished."""
+        ctx = self._saved(ctx)
         store = getattr(self, "_takes", None)
         if store is not None and ctx.audio_path:
             store.discard(ctx.audio_path)
@@ -1805,7 +1861,7 @@ class Daemon:
         ctx = ctx or RunContext()
         target = ctx.target
         if not self._flow.is_cancelled(run):
-            ctx = self._save_take(audio, ctx)    # never lose a word (takes.py)
+            ctx = self._begin_save(audio, ctx)   # never lose a word (takes.py)
         if not self._busy.acquire(timeout=self._BUSY_WAIT_S):
             # The previous dictation never finished: keep this audio and
             # offer Retry rather than dropping it.

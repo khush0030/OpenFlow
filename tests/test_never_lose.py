@@ -7,6 +7,7 @@ and history live in tmp dirs.
 from __future__ import annotations
 
 import os
+import time
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -74,16 +75,83 @@ def test_pasted_take_leaves_no_audio_behind(nd, env):
     assert row.final == "hello world" and row.status is None and row.audio_path is None
 
 
-def test_take_is_on_disk_while_transcribing(nd):
+def test_take_is_written_while_transcribing(nd):
+    # The write starts at key-up and runs next to the STT call (not before
+    # it: the fsync used to sit on the critical path). Mid-transcription
+    # the take is on disk.
     seen = []
 
     class Peek:
         def transcribe(self, audio, opts, stream=None):
+            deadline = time.monotonic() + 2
+            while not saved_files(nd) and time.monotonic() < deadline:
+                time.sleep(0.005)
             seen.extend(saved_files(nd))
             return "hello world"
     nd.transcriber = Peek()
     keyup(nd)
     assert len(seen) == 1 and seen[0].endswith(".wav")
+    assert saved_files(nd) == []
+
+
+class SlowDisk(TakeStore):
+    """A disk whose write + fsync takes a while."""
+
+    def __init__(self, root, delay_s):
+        super().__init__(root)
+        self.delay_s = delay_s
+        self.events: list[str] = []
+
+    def save(self, audio, sample_rate):
+        self.events.append("save start")
+        time.sleep(self.delay_s)
+        path = super().save(audio, sample_rate)
+        self.events.append("saved")
+        return path
+
+    def discard(self, path):
+        self.events.append("discard" if path else "discard nothing")
+        super().discard(path)
+
+
+def test_transcription_does_not_wait_for_the_disk(nd, tmp_path):
+    nd._takes = SlowDisk(tmp_path / "slow", delay_s=0.3)
+    seen = []
+
+    class Peek:
+        def transcribe(self, audio, opts, stream=None):
+            seen.append((time.monotonic(), list(nd._takes.events)))
+            return "hello world"
+    nd.transcriber = Peek()
+    t0 = time.monotonic()
+    keyup(nd)
+    started_at, events = seen[0]
+    assert started_at - t0 < 0.2, "STT must start before the slow write finishes"
+    assert "saved" not in events
+    # Never lose a word: the file was written before the audio was dropped.
+    assert nd._takes.events == ["save start", "saved", "discard"]
+    assert saved_files(nd) == []
+
+
+def test_failure_waits_for_the_write_and_keeps_that_file(nd, tmp_path):
+    nd._takes = SlowDisk(tmp_path / "slow", delay_s=0.2)
+    nd.transcriber = Flaky()
+    keyup(nd)
+    assert nd._flow.state == ERROR
+    [row] = nd.history.recent()
+    assert row.status == STATUS_FAILED and saved_files(nd) == [row.audio_path]
+    assert nd._takes.events == ["save start", "saved"]    # written once, kept
+
+
+def test_empty_transcript_still_drops_the_audio_after_the_write(nd, tmp_path):
+    nd._takes = SlowDisk(tmp_path / "slow", delay_s=0.2)
+
+    class Nothing:
+        def transcribe(self, audio, opts, stream=None):
+            return ""
+    nd.transcriber = Nothing()
+    keyup(nd)
+    assert nd._takes.events == ["save start", "saved", "discard"]
     assert saved_files(nd) == []
 
 
