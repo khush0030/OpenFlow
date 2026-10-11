@@ -16,7 +16,12 @@ class RecorderConfig:
     sample_rate: int = 16000
     channels: int = 1
     device: str | int | None = None
-    blocksize: int = 1024
+    # 16 ms blocks (was 1024 = 64 ms): key-up waits for the block covering
+    # the key-up moment (TAIL_WAIT_S), so a smaller block ends the take and
+    # hands the stream its last audio up to ~50 ms sooner. The level meter
+    # still averages ~64 ms (LEVEL_WINDOW_S) and the stream still sends
+    # ~64 ms messages (stream_stt.SEND_MIN_SAMPLES).
+    blocksize: int = 256
 
 
 def _rescan_devices() -> None:
@@ -30,15 +35,23 @@ def _rescan_devices() -> None:
 
 
 # Key-up waits at most this long for the mic block that covers the key-up
-# moment (a block is blocksize / sample_rate = 64 ms). A stalled device just
+# moment (a block is blocksize / sample_rate = 16 ms). A stalled device just
 # returns what it has.
 TAIL_WAIT_S = 0.25
 # start() waits at most this long for the previous take's stream to close.
 CLOSE_WAIT_S = 2.0
 # A cancelled take whose stream lingers (cancel(linger_s=...)) keeps at most
-# this many of its newest blocks (~1 s), so a restart can start the new take
-# at its key-down even when the handler ran late.
-PARK_KEEP_BLOCKS = 16
+# its newest ~1 s of blocks, so a restart can start the new take at its
+# key-down even when the handler ran late.
+PARK_KEEP_S = 1.0
+# current_rms (widget waveform, "can't hear you", edit end-pointing) is the
+# RMS over about this much audio, whatever the block size: the same 64 ms
+# the meter saw with 1024-sample blocks, so it doesn't get jumpier.
+LEVEL_WINDOW_S = 0.064
+
+
+def _blocks_for(seconds: float, blocksize: int, sample_rate: int) -> int:
+    return max(1, int(round(seconds * sample_rate / max(1, blocksize))))
 _PARKED = "parked"          # take marker of a lingering stream's callbacks
 
 
@@ -74,6 +87,9 @@ class Recorder:
         # when the timer fires; start() adopts it instead of opening anew.
         self._parked: tuple | None = None
         self._park_buf: deque | None = None
+        # Mean squares of the newest blocks, for current_rms (LEVEL_WINDOW_S).
+        self._levels: deque = deque(maxlen=_blocks_for(
+            LEVEL_WINDOW_S, self.cfg.blocksize, self.cfg.sample_rate))
 
     def _callback(self, indata: np.ndarray, frames: int, time, status,  # noqa: ARG002
                   take: int | None = None) -> None:
@@ -103,7 +119,9 @@ class Recorder:
                 self._tail.set()
                 return
         try:
-            self._rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+            levels = self._levels
+            levels.append(float(np.mean(np.square(block, dtype=np.float32))))
+            self._rms = float(np.sqrt(sum(levels) / len(levels)))
         except Exception:
             self._rms = 0.0
 
@@ -240,12 +258,14 @@ class Recorder:
             self._stream = None
             self._recording = False
             self._rms = 0.0
+            self._levels.clear()
             with self._cb_lock:
                 self._take += 1
                 self._stopping = False
                 self._q = queue.Queue()
                 if linger_s > 0:
-                    self._park_buf = deque(maxlen=PARK_KEEP_BLOCKS)
+                    self._park_buf = deque(maxlen=_blocks_for(
+                        PARK_KEEP_S, self.cfg.blocksize, self.cfg.sample_rate))
                     cell[0] = _PARKED
             if linger_s > 0:
                 timer = threading.Timer(linger_s, self._expire_parked, args=(stream,))
@@ -283,6 +303,7 @@ class Recorder:
             self._stream = None
             self._recording = False
             self._rms = 0.0
+            self._levels.clear()
             with self._cb_lock:
                 self._stopping = True
                 tail = self._tail

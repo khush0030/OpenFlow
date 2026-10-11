@@ -179,7 +179,7 @@ def test_unreadable_dictionary_keeps_the_current_one(env):
 def test_pipeline_watches_only_real_pastes(env, monkeypatch, status, watched):
     import test_daemon_widget as tw
     tw.env.__wrapped__(monkeypatch, env["tmp"])   # the widget suite's fakes
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: status)
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: status)
     d = tw.make_daemon()
     d._paste_watch = None
     d.cfg["dictionary"]["auto_learn"] = True

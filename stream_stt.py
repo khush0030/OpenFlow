@@ -36,6 +36,11 @@ FINISH_TIMEOUT_S = 2.0
 PING_EVERY_S = 5.0
 # Leading silence held back before the first loud block (transcribe.TRIM_PAD_S).
 GATE_PAD_S = 0.25
+# Mic blocks are 16 ms (audio.RecorderConfig.blocksize = 256); they go out in
+# messages of at least this many samples (64 ms, the old block size), so
+# Sarvam sees the same message rate as before. What is left at end() goes
+# out at once with the flush.
+SEND_MIN_SAMPLES = 1024
 
 # Error codes / close codes that won't fix themselves on the next take:
 # bad parameter or account not enabled (4000), bad key (HTTP 401/403).
@@ -119,6 +124,7 @@ class StreamingSession:
         self._error: StreamError | None = None
         self._ended = threading.Event()        # session.end seen, or failed
         self._closed = False                    # finish/abort called
+        self._ending = False                    # end() queued flush + end
         self._sent = 0                          # audio blocks sent
         self._thread: threading.Thread | None = None
 
@@ -135,8 +141,8 @@ class StreamingSession:
 
     def feed(self, block: np.ndarray) -> None:
         """A mic block (float32). Called from the audio callback: no I/O."""
-        if self._closed or self._ended.is_set():
-            return                      # finished, or failed: batch will run
+        if self._closed or self._ending or self._ended.is_set():
+            return                      # ending, finished or failed
         if not self._open:
             x = np.asarray(block, dtype=np.float32).reshape(-1)
             rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
@@ -153,8 +159,21 @@ class StreamingSession:
             self._held_n = 0
         self._q.put(block)
 
+    def end(self) -> None:
+        """Key-up, as soon as the recorder has the last block: ask Sarvam to
+        finalize now (flush + end), so its ~0.25 s finalize runs while the
+        key-up hand-off does its local work; finish() then only waits.
+        Blocks fed after this are not sent. Never raises, never blocks; a
+        no-op if the stream already failed or never opened its gate (finish
+        reports that as before)."""
+        if self._closed or self._ending or self._error is not None or not self._open:
+            return
+        self._ending = True
+        self._q.put(_END)
+
     def finish(self, timeout: float = FINISH_TIMEOUT_S) -> STTResult:
-        """Key-up: finalize and wait for the transcript. Raises StreamError."""
+        """Key-up: finalize (unless end() already did) and wait for the
+        transcript. Raises StreamError."""
         if self._closed:
             raise StreamError("stream already closed")
         self._closed = True
@@ -163,7 +182,9 @@ class StreamingSession:
         if not self._open:
             self.abort()
             raise StreamError("nothing above the silence threshold was streamed")
-        self._q.put(_END)
+        if not self._ending:
+            self._ending = True
+            self._q.put(_END)
         if not self._ended.wait(timeout):
             self.abort()
             raise StreamError(f"no final transcript {timeout:.1f}s after key-up")
@@ -222,21 +243,38 @@ class StreamingSession:
             return
         threading.Thread(target=self._receive, args=(ws,), name="stt-stream-rx",
                          daemon=True).start()
+        pending: list[np.ndarray] = []
+        pending_n = 0
+
+        def send_pending() -> None:
+            nonlocal pending, pending_n
+            if not pending:
+                return
+            audio = pending[0] if len(pending) == 1 else np.concatenate(
+                [np.asarray(b, dtype=np.float32).reshape(-1) for b in pending])
+            pending, pending_n = [], 0
+            ws.send(json.dumps({"event": "audio_input",
+                                "audio": base64.b64encode(_pcm16(audio)).decode("ascii")}))
+            self._sent += 1
+
         try:
             while not self._ended.is_set():
                 try:
                     item = self._q.get(timeout=PING_EVERY_S)
                 except queue.Empty:
+                    send_pending()
                     ws.send(json.dumps({"event": "ping"}))
                     continue
                 if item is _END:
                     if not self._ended.is_set():
+                        send_pending()
                         ws.send(json.dumps({"event": "flush"}))
                         ws.send(json.dumps({"event": "end"}))
                     return
-                ws.send(json.dumps({"event": "audio_input",
-                                    "audio": base64.b64encode(_pcm16(item)).decode("ascii")}))
-                self._sent += 1
+                pending.append(item)
+                pending_n += int(np.size(item))
+                if pending_n >= SEND_MIN_SAMPLES:
+                    send_pending()
         except Exception as e:
             self._fail(self._closed_error(e, "send failed"))
             self._close_quietly(ws)

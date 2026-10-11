@@ -7,9 +7,10 @@ Two interaction modes share one key:
 """
 from __future__ import annotations
 
-import os
 import threading
 import time
+
+import hotkey_timing
 from typing import Callable
 
 # Force-import HIServices BEFORE pynput so its lazy AXIsProcessTrusted lookup
@@ -98,15 +99,13 @@ class HoldOrToggle:
       hold  --release-->             idle (stop)
                                      [if duration < SHORT_TAP_MS, remember release time]
       idle  --press, gap<window-->   toggle (start)
-      toggle --release-->            toggle  (stays)
+      toggle --release-->            toggle  (stays; held >= SHORT_TAP_MS: idle, stop)
       toggle --press-->              idle    (stop)
     """
 
-    # press+release shorter than this counts as a tap. Real taps in the log
-    # (2026-10-01) ran 46–340 ms, several at 313–340 ms, right on the old
-    # 350 ms limit; 450 leaves room without catching short holds.
-    SHORT_TAP_MS = 450
-    DOUBLE_TAP_GAP_MS = 600    # second tap must press within this window
+    # Tap length and double-tap window: one place for both backends.
+    SHORT_TAP_MS = hotkey_timing.SHORT_TAP_MS
+    DOUBLE_TAP_GAP_MS = hotkey_timing.DOUBLE_TAP_GAP_MS
 
     def __init__(self, key: HoldKey, on_press: Callable[[], None], on_release: Callable[[], None],
                  is_active: Callable[[], bool] | None = None,
@@ -179,14 +178,14 @@ class HoldOrToggle:
         return self._mode == "hold" and self._down
 
     def _on_press(self, key) -> None:
-        # Diag: log every press until the user has triggered ours at least
-        # once, so we can confirm pynput is seeing events + what physical
-        # key the user is pressing. Disable via OPENFLOW_LOG_ALL_KEYS=0.
-        if not getattr(self, "_match_seen", False) and os.environ.get("OPENFLOW_LOG_ALL_KEYS", "1") != "0":
-            print(f"[hotkey][trace] saw press: {key!r}  (configured key={self.key!r})", flush=True)
+        # Diag: say once that the listener sees key events at all. Never
+        # which key: logging every key typed until the hold key showed up
+        # put ~20k keycodes in openflow.log (a keylogger, in effect).
+        if not getattr(self, "_events_seen", False):
+            self._events_seen = True
+            print(f"[hotkey] listener is receiving key events (hold key={self.key!r})", flush=True)
         if not self._matches(key) or self._down:
             return
-        self._match_seen = True
         self._down = True
         now = self._now_ms()
 
@@ -209,6 +208,7 @@ class HoldOrToggle:
         if self._last_tap_release_ms and gap < self.DOUBLE_TAP_GAP_MS:
             print(f"[hotkey] press: DOUBLE-TAP detected (gap={gap:.0f}ms) -> toggle start", flush=True)
             self._mode = "toggle"  # set first: hands_free is read during the callback
+            self._press_ms = now   # a held second press ends like a hold (_on_release)
             try:
                 self.on_press_cb()
             except Exception as e:
@@ -232,7 +232,17 @@ class HoldOrToggle:
         now = self._now_ms()
 
         if self._mode == "toggle":
-            # Holding after the double-tap is fine; do nothing.
+            # The release of the press that started hands-free: a quick one
+            # leaves it running; one held like a hold stops it like a hold.
+            held = now - self._press_ms
+            if held >= self.SHORT_TAP_MS:
+                print(f"[hotkey] release: double-tap's second press held {held:.0f}ms "
+                      "-> stop like a hold", flush=True)
+                try:
+                    self.on_release_cb()
+                except Exception as e:
+                    print(f"[hotkey] release handler error: {e}", flush=True)
+                self._mode = "idle"
             return
 
         if self._mode == "hold":

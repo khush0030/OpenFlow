@@ -67,6 +67,7 @@ def _install_file_logger() -> None:
 # Installed by main() (the daemon's start-up), never at import: a one-off
 # `import daemon` (tests, dev tools) must not write to ~/.openflow.
 
+import collections
 import json
 import subprocess
 
@@ -78,14 +79,15 @@ from audio import NO_INPUT_RMS, Recorder, RecorderConfig, heard_nothing, loudest
 from transcribe import Transcriber, TranscribeOptions
 # Use NSEvent-backed listener by default (works correctly under rumps NSApp).
 # Set OPENFLOW_HOTKEYS=pynput to fall back to the legacy CGEventTap impl.
-if os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput":
+_PYNPUT = os.environ.get("OPENFLOW_HOTKEYS", "nsevent") == "pynput"
+if _PYNPUT:
     from hotkeys import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "esc"       # pynput's name for the key
 else:
     from hotkeys_nsevent import HoldToTalk, HotkeySet, is_valid_chord, is_valid_hold_key
     _ESCAPE_CHORD = "escape"
 from paste import (paste, get_active_app, capture_front_app, capture_paste_target,
-                   focused_editable, set_clipboard, undo_last_paste)
+                   field_snapshot, focused_editable, set_clipboard, undo_last_paste)
 from ai import AIProcessor, AIConfig
 from llm import make_cleanup_provider
 import groq_stt
@@ -135,9 +137,20 @@ _LANG_CYCLE: list[LanguageMode] = [
 # two thirds of real taps (log, 2026-10-01: 105–313 ms, median ~190). A longer
 # tap's tick is cut off when the hands-free cue plays (sounds._SUPERSEDES).
 HOLD_CUE_DELAY_S = 0.2
+# A key event's own timestamp is used for latency timing only if it is at
+# most this old when handled (else the clocks disagree: handler time). Was
+# 5 s, which hid exactly the stalls worth seeing.
+EVENT_TIME_MAX_AGE_S = 60.0
 # A tap's mic stays open this much past the double-tap window, so a second
 # press whose handler runs a little late still reuses it (audio.cancel).
 TAP_LINGER_SLACK_S = 0.15
+
+
+# Hands-free safety stop: a double-tap session (or the edit hotkey's take)
+# still recording after this long is stopped through the normal ✓ path, so
+# its text is transcribed and pasted. An accidental toggle used to record
+# until noticed (longest take in the log: 158.7 s).
+HANDS_FREE_MAX_S = 6 * 60.0
 
 
 # Widget pump cadence (spec 2026-10-05-footprint). The mic level only
@@ -249,8 +262,9 @@ class RunContext:
     edit_mode: bool = False
     selection: str = ""            # edit-mode selection the run applies to
     # Latency bookkeeping for the live run only (Undo/Retry clear it):
-    keyup_at: float | None = None  # time.monotonic() when recording stopped
-    record_s: float | None = None  # key-up -> audio in hand (recorder.stop)
+    keyup_at: float | None = None  # time.monotonic() of the key-up (its event time)
+    record_s: float | None = None  # stop handler -> audio in hand (recorder.stop)
+    keyup_queue_s: float | None = None  # key-up event -> its stop handler ran
     stream: object = None          # the take's StreamingSession, if streamed
     # Names on screen at key-down (screen_context.py); in memory only.
     screen_terms: tuple[str, ...] = ()
@@ -260,6 +274,122 @@ class RunContext:
     # lands, and its history row once a failure was recorded there.
     audio_path: str | None = None
     history_id: int | None = None
+    # The take's audio being written (a _SaveJob) while it is transcribed.
+    saving: object = None
+
+
+class _SaveJob:
+    """Writes a take's audio (TakeStore.save: WAV + fsync) on its own thread,
+    so the STT race starts at once instead of after the disk write."""
+
+    def __init__(self, store, audio, sample_rate: int) -> None:
+        self._path: str | None = None
+        self._thread = threading.Thread(target=self._run, args=(store, audio, sample_rate),
+                                        name="take-save", daemon=True)
+        self._thread.start()
+
+    def _run(self, store, audio, sample_rate: int) -> None:
+        self._path = store.save(audio, sample_rate)
+
+    def wait(self, timeout: float | None = None) -> str | None:
+        """The saved path (None: not saved, or still writing at the timeout)."""
+        self._thread.join(timeout)
+        return None if self._thread.is_alive() else self._path
+
+
+class _PastePrefetch:
+    """The paste's AX reads, done while the take is being transcribed: is
+    the key-down element a text field (focused_editable), and the field's
+    text before Cmd+V (paste verification). Both depend only on the paste
+    target captured at key-down, so they needn't wait for the transcript."""
+
+    def __init__(self, target, check_editable: bool) -> None:
+        self.target = target
+        self.editable = None
+        self.editable_known = False
+        self.before = None
+        self.before_known = False
+        self._check_editable = check_editable
+        self._done = threading.Event()
+        threading.Thread(target=self._run, name="paste-prefetch", daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            # Only the element captured at key-down: with none, focused_editable
+            # reads the focus of the moment, which must be read at paste time.
+            if self._check_editable and getattr(self.target, "ax_element", None) is not None:
+                self.editable = focused_editable(self.target)
+                self.editable_known = True
+            self.before = field_snapshot(self.target)
+            self.before_known = True
+        except Exception as e:
+            print(f"[daemon] paste prefetch skipped: {e}", flush=True)
+        finally:
+            self._done.set()
+
+    def ready(self, timeout: float) -> "_PastePrefetch | None":
+        return self if self._done.wait(timeout) else None
+
+
+# A prefetch not finished by paste time is waited on this long, then ignored
+# (the paste reads for itself, as before).
+PREFETCH_WAIT_S = 0.1
+
+
+# The worker waits at most this long for a take's audio to reach the disk
+# before discarding it. A write still running past it finishes later and
+# leaves its file behind, which the next start lists as a failed take: the
+# words are never lost, only kept longer than needed.
+SAVE_WAIT_S = 10.0
+
+
+class _WidgetSender:
+    """Writes to the widget socket on one thread, in order. _send_widget
+    runs inside the FlowController lock (and on the key thread); a widget
+    process that stops reading made every state change wait out the
+    socket's 1 s send timeout there, holding the lock that the key thread,
+    the pump and the widget's own clicks all need. Callers now only queue.
+    A level message replaces a level still waiting, so a stalled widget
+    can't build up a backlog of stale meter readings."""
+
+    def __init__(self, server) -> None:
+        self._server = server
+        self._q: "collections.deque[dict]" = collections.deque()
+        self._cv = threading.Condition()
+        self._busy = False
+        threading.Thread(target=self._run, name="widget-send", daemon=True).start()
+
+    def send(self, msg: dict) -> None:
+        with self._cv:
+            if msg.get("type") == "level" and self._q and self._q[-1].get("type") == "level":
+                self._q[-1] = msg
+            else:
+                self._q.append(msg)
+            self._cv.notify_all()
+
+    def flush(self, timeout: float) -> bool:
+        """Wait until everything queued has been written (quit, tests)."""
+        with self._cv:
+            return self._cv.wait_for(lambda: not self._q and not self._busy, timeout)
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                self._cv.wait_for(lambda: bool(self._q))
+                msg = self._q.popleft()
+                self._busy = True
+            try:
+                self._server.send(msg)
+            except Exception as e:   # never let the sender thread die
+                print(f"[daemon] widget send failed: {e}", flush=True)
+            finally:
+                with self._cv:
+                    self._busy = False
+                    self._cv.notify_all()
+
+
+# Quitting waits at most this long for the widget's last messages ("exit").
+WIDGET_FLUSH_S = 1.0
 
 
 class _WidgetWatchdog:
@@ -406,6 +536,7 @@ class Daemon:
               f"({self.ai.provider.model})", flush=True)
         self._warm_enabled = True     # see _warm_up
         self._screen_enabled = True   # see _start_screen_capture
+        self._prefetch_enabled = True  # see _prefetch_paste
         self.dictionary = Dictionary.load()
         self._dict_mtime = _file_mtime(cfg_mod.DICT_PATH)
         self._autolearner = AutoLearner(cfg_mod.SUGGESTIONS_PATH, cfg_mod.DICT_PATH,
@@ -772,14 +903,16 @@ class Daemon:
         # Key-down timing from the key event itself when the hotkey gave it
         # (the handler can run late, behind the main thread's other work).
         t_key = t0
-        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < 5.0:
+        if pressed_at_ms is not None and 0 <= t0 - pressed_at_ms / 1000.0 < EVENT_TIME_MAX_AGE_S:
             t_key = pressed_at_ms / 1000.0
         # Feedback first: the widget (and cue) answer the key now, not after
         # the mic open below (~0.15 s), which used to leave a press looking
         # ignored.
         self.state.recording = RecordingState.RECORDING
         self.state.notify()
-        self._flow.recording_started(hands_free=hands_free)
+        with self._flow.lock:   # a lone tap's delayed collapse checks the take id
+            self._take_id = getattr(self, "_take_id", 0) + 1
+            self._flow.recording_started(hands_free=hands_free)
         # Then the mic, before every other key-down read: the paste target
         # (AX), the screen names and the STT stream all finish while the
         # user talks; the stream gets the blocks it missed (attach).
@@ -800,6 +933,7 @@ class Daemon:
             self._flow.no_audio(None, None)
             return
         t_mic = time.monotonic()
+        self._recording_since = t_mic      # the hands-free cap counts from here
         remembered = capture_paste_target()
         self._keydown_target = remembered   # this take's own read (on_edit_mode)
         if remembered is not None:
@@ -817,7 +951,12 @@ class Daemon:
             how = f"reused the tap's stream, kept {1000 * (t_open - t_key):.0f}ms"
             mic_ms = 0.0
         else:
+            # queued: key event -> this handler; ui: widget + cue hand-off
+            # (state, flow, widget socket) before the mic; open: PortAudio.
+            # The three add up to the total (the 20 s stall of 2026-10-11 sat
+            # entirely in the unlabelled "ui" step).
             how = (f"queued {1000 * (t0 - t_key):.0f}ms, "
+                   f"ui {1000 * (t_open - t0):.0f}ms, "
                    f"open {1000 * (t_mic - t_open):.0f}ms")
             mic_ms = 1000 * (t_mic - t_key)
         print(f"[daemon] mic open {mic_ms:.0f}ms after key-down ({how}; "
@@ -839,15 +978,34 @@ class Daemon:
         # it again. Otherwise (a chord) it closes now. No tail wait: this
         # audio is discarded either way.
         hold = getattr(self, "_hold", None)
-        linger = 0.0
+        linger = window = 0.0
         if getattr(hold, "double_tap_armed", False):
-            linger = hold.double_tap_window_s() + TAP_LINGER_SLACK_S
+            window = hold.double_tap_window_s()
+            linger = window + TAP_LINGER_SLACK_S
         self.recorder.cancel(linger_s=linger)
         self._drop_stream()
         self._screen = None
         self.state.recording = RecordingState.IDLE
         self.state.notify()
+        if window > 0:
+            # Keep the recording pill up through the double-tap window, as
+            # the mic lingers: collapsing it here and re-growing it ~80 ms
+            # later at the second press stuttered every hands-free start.
+            # A lone tap's pill goes idle when the window ends.
+            self._send_widget({"type": "level", "rms": 0.0})
+            take_id = getattr(self, "_take_id", 0)
+            _after(window, lambda: self._collapse_lone_tap(take_id))
+            return
         self._flow.idle_if_recording()
+
+    def _collapse_lone_tap(self, take_id: int) -> None:
+        """The double-tap window ended without a second press: the tap's pill
+        goes idle, unless a new take (the second press, a widget click) has
+        started since; checked under the flow lock that start takes too."""
+        with self._flow.lock:
+            if getattr(self, "_take_id", 0) != take_id or self.recorder.is_recording:
+                return
+            self._flow.idle_if_recording()
 
     def _open_stream(self) -> None:
         """Key-down: stream this take to Sarvam while the user talks
@@ -957,6 +1115,7 @@ class Daemon:
             log_exception("daemon.widget", "widget socket unavailable — running without the flow widget", e)
             self._widget = None
             return
+        self._widget_out = _WidgetSender(self._widget)
         threading.Thread(target=self._widget_pump, name="widget-pump", daemon=True).start()
 
     def _send_widget(self, msg: dict) -> None:
@@ -966,8 +1125,14 @@ class Daemon:
             new = msg.get("state", "idle")
             # Starts carry the flag; stops / cancels end the session before.
             hands_free = bool(msg.get("hands_free")) or getattr(self, "_last_hands_free", False)
-            cue = sounds.cue_for_transition(getattr(self, "_last_flow_state", "idle"), new,
-                                            hands_free=hands_free)
+            prev = getattr(self, "_last_flow_state", "idle")
+            cue = sounds.cue_for_transition(prev, new, hands_free=hands_free)
+            if (cue is None and new == "recording" and prev in ("recording", "silent")
+                    and msg.get("hands_free") and not getattr(self, "_last_hands_free", False)):
+                # A double-tap's second press: the tap's pill stayed up
+                # through the window (_on_hold_cancel), so recording ->
+                # recording is the hands-free start.
+                cue = "handsfree_start"
             self._last_flow_state = new
             self._last_hands_free = bool(msg.get("hands_free"))
             self._wake_pump()     # its cadence follows the state
@@ -976,8 +1141,15 @@ class Daemon:
             elif cue:
                 sounds.play(cue)
         server = getattr(self, "_widget", None)
-        if server is not None:
-            server.send(msg)
+        if server is None:
+            return
+        out = getattr(self, "_widget_out", None)
+        if out is None:
+            server.send(msg)     # no sender thread (test daemons): write now
+            return
+        out.send(msg)
+        if msg.get("type") == "exit":
+            out.flush(WIDGET_FLUSH_S)   # quitting: let it reach the widget
 
     def _hold_cue(self) -> None:
         """The deferred hold start tick: only if that hold is still going."""
@@ -1064,7 +1236,7 @@ class Daemon:
         mode and against the same paste target / selection."""
         if isinstance(ctx, RunContext):
             # The user waited on the card: key-up time no longer means anything.
-            ctx = replace(ctx, keyup_at=None, record_s=None, stream=None)
+            ctx = replace(ctx, keyup_at=None, record_s=None, keyup_queue_s=None, stream=None)
         self._start_worker(audio, ctx, run)
 
     def _save_widget_setting(self, key: str, value: str) -> None:
@@ -1267,6 +1439,7 @@ class Daemon:
                     rms = self.recorder.current_rms
                     self._send_widget({"type": "level", "rms": rms})
                     self._flow.level(rms)
+                    self._check_hands_free_cap(now)
                 if now - last_tick >= 0.25:
                     last_tick = now
                     self._flow.tick()
@@ -1299,22 +1472,45 @@ class Daemon:
                 print(f"[daemon] widget pump error: {e}", flush=True)
                 self._stop_evt.wait(PUMP_LEVEL_S)
 
-    def on_record_stop(self) -> None:
+    def _on_hold_release(self) -> None:
+        """The hold key stopped the take: time it from the key event."""
+        self.on_record_stop(event_ms=getattr(self._hold, "last_event_ms", None))
+
+    def _check_hands_free_cap(self, now: float) -> None:
+        """Stop a hands-free take that has run HANDS_FREE_MAX_S, the way the
+        widget's ✓ does (transcribe + paste). Once per take."""
+        since = getattr(self, "_recording_since", None)
+        if since is None or now - since < HANDS_FREE_MAX_S or not self._flow.hands_free:
+            return
+        take_id = getattr(self, "_take_id", 0)
+        if getattr(self, "_capped_take", None) == take_id:
+            return
+        self._capped_take = take_id
+        print(f"[daemon] hands-free take reached {HANDS_FREE_MAX_S / 60:.0f} min — "
+              "stopping it (it will be transcribed and pasted)", flush=True)
+        self._flow.handle_action({"action": "confirm"})
+
+    def on_record_stop(self, event_ms: float | None = None) -> None:
         # Under the flow lock, like every widget action: a key-up and a ✕ /
         # Esc arriving together can't interleave, so the cancel either stops
         # the recording itself or finds the run PROCESSING and discards it.
         with self._flow.lock:
-            self._record_stop()
+            self._record_stop(event_ms)
 
-    def _record_stop(self) -> None:
+    def _record_stop(self, event_ms: float | None = None) -> None:
         if not self.recorder.is_recording:
             return
         # The edit hotkey's take (if this is one) stops listening here,
         # whatever ended it; its end-pointer sees that and quits.
         take, self._edit_take = getattr(self, "_edit_take", None), None
-        keyup_at = time.monotonic()
+        handler_at = time.monotonic()
+        # Key-up time from the key event when the hotkey gave it: the stop
+        # can run behind other key work, and that wait is part of the lag.
+        keyup_at = handler_at
+        if event_ms is not None and 0 <= handler_at - event_ms / 1000.0 < EVENT_TIME_MAX_AGE_S:
+            keyup_at = event_ms / 1000.0
         audio = self.recorder.stop()
-        record_s = time.monotonic() - keyup_at
+        record_s = time.monotonic() - handler_at
         stream = self._take_stream()
         if audio.size == 0:
             if stream is not None:
@@ -1332,7 +1528,8 @@ class Daemon:
         ctx = RunContext(target=self._paste_target, edit_mode=edit_mode,
                          selection=getattr(self, "_edit_selection", "") if edit_mode else "",
                          command=getattr(self, "_command", None) if edit_mode else None,
-                         keyup_at=keyup_at, record_s=record_s, stream=stream,
+                         keyup_at=keyup_at, record_s=record_s,
+                         keyup_queue_s=handler_at - keyup_at, stream=stream,
                          screen_terms=self._screen_terms())
         if self._cancel_pending:
             # ✕ / Esc: keep the audio for 5 s so Undo can bring it back.
@@ -1371,6 +1568,11 @@ class Daemon:
             self.state.notify()
             self._flow.no_audio(audio, ctx)
             return
+        # The take will be transcribed: have Sarvam finalize now, so its
+        # ~0.25 s overlaps the hand-off below instead of following it.
+        end_stream = getattr(stream, "end", None)
+        if end_stream is not None:
+            end_stream()
         self._edit_pending = False
         if take is not None:
             take.phase = "working"            # the overlay: listening -> working
@@ -1721,19 +1923,47 @@ class Daemon:
         except Exception as e:
             log_exception("daemon.takes", "tidying saved takes failed", e)
 
-    def _save_take(self, audio, ctx: RunContext) -> RunContext:
-        """Key-up: the take's audio on disk before anything can fail.
+    def _needs_save(self, audio, ctx: RunContext):
+        """The take store, if this take's audio still has to be written.
         Edit / command takes stay in memory: they only replay on the widget."""
         store = getattr(self, "_takes", None)
         if store is None or ctx.edit_mode or getattr(audio, "size", 0) == 0:
+            return None
+        if ctx.saving is not None or (ctx.audio_path and os.path.exists(ctx.audio_path)):
+            return None
+        return store
+
+    def _begin_save(self, audio, ctx: RunContext) -> RunContext:
+        """Key-up: start writing the take's audio (never lose a word) next
+        to the transcription, not before it. The audio stays in memory for
+        the run; _saved() waits for the file before anything relies on it,
+        and _take_landed() before the audio is discarded."""
+        store = self._needs_save(audio, ctx)
+        if store is None:
             return ctx
-        if ctx.audio_path and os.path.exists(ctx.audio_path):
+        return replace(ctx, saving=_SaveJob(store, audio, int(self.cfg["audio"]["sample_rate"])))
+
+    def _saved(self, ctx: RunContext) -> RunContext:
+        """ctx once its audio write (if any) has finished."""
+        job = ctx.saving
+        if job is None:
+            return ctx
+        path = job.wait(SAVE_WAIT_S)
+        return replace(ctx, saving=None, audio_path=path or ctx.audio_path)
+
+    def _save_take(self, audio, ctx: RunContext) -> RunContext:
+        """The take's audio on disk now (a failure keeps it for Retry)."""
+        ctx = self._saved(ctx)
+        store = self._needs_save(audio, ctx)
+        if store is None:
             return ctx
         path = store.save(audio, int(self.cfg["audio"]["sample_rate"]))
         return replace(ctx, audio_path=path) if path else ctx
 
     def _take_landed(self, ctx: RunContext) -> None:
-        """The take's text was pasted or shown: drop its audio."""
+        """The take's text was pasted or shown: drop its audio, once the
+        write that kept it safe meanwhile has finished."""
+        ctx = self._saved(ctx)
         store = getattr(self, "_takes", None)
         if store is not None and ctx.audio_path:
             store.discard(ctx.audio_path)
@@ -1782,6 +2012,20 @@ class Daemon:
                 auto.kick()
         self._flow.failed(audio, ctx, run=run, reason=reason) or self._stale(run)
 
+    def _prefetch_paste(self, ctx: RunContext, run: int):
+        """Start the paste's AX reads now, next to STT (_PastePrefetch).
+        Only a daemon built by __init__ prefetches; test daemons read at
+        paste time as before unless a test turns it on."""
+        if ctx.target is None or not getattr(self, "_prefetch_enabled", False) \
+                or self._flow.is_cancelled(run):
+            return None
+        try:
+            return _PastePrefetch(ctx.target,
+                                  check_editable=not ctx.edit_mode or ctx.command is not None)
+        except Exception as e:
+            print(f"[daemon] paste prefetch skipped: {e}", flush=True)
+            return None
+
     def _discarded(self, run: int, ctx: RunContext, where: str) -> bool:
         """True (and logs) if the user cancelled this run: its text must
         not be pasted, copied or saved."""
@@ -1795,7 +2039,7 @@ class Daemon:
         ctx = ctx or RunContext()
         target = ctx.target
         if not self._flow.is_cancelled(run):
-            ctx = self._save_take(audio, ctx)    # never lose a word (takes.py)
+            ctx = self._begin_save(audio, ctx)   # never lose a word (takes.py)
         if not self._busy.acquire(timeout=self._BUSY_WAIT_S):
             # The previous dictation never finished: keep this audio and
             # offer Retry rather than dropping it.
@@ -1804,6 +2048,7 @@ class Daemon:
             self._take_failed(audio, ctx, run)
             return
         self._busy_since = time.monotonic()   # hang_watch: a wedged run gets its stacks dumped
+        prefetch = self._prefetch_paste(ctx, run)
         self.state.recording = RecordingState.PROCESSING
         self.state.notify()
         # Stage timings (seconds) for the log line and the history row.
@@ -1890,20 +2135,29 @@ class Daemon:
                 return
 
             self.state.last_pasted = final
-            if (not ctx.edit_mode or ctx.command is not None) \
-                    and focused_editable(target) is False:
+            pre = prefetch.ready(PREFETCH_WAIT_S) if prefetch is not None else None
+            check_editable = not ctx.edit_mode or ctx.command is not None
+            if check_editable:
+                editable = (pre.editable if pre is not None and pre.editable_known
+                            else focused_editable(target))
+            if check_editable and editable is False:
                 set_clipboard(final)   # even if the card can't be shown
                 print("[daemon] no text box focused — showing card", flush=True)
                 self._flow.show_card(final, run=run) or self._stale(run)
             else:
                 self._stop_paste_watch()
-                paste_status = paste(final, target=target)
+                # The look for the text in the field after Cmd+V runs on a
+                # side thread: the done cue and the next take don't wait it.
+                kw = {"confirm_in_background": True}
+                if pre is not None and pre.before_known:
+                    kw["before"] = pre.before
+                paste_status = paste(final, target=target, **kw)
                 self.state.last_paste_at = time.time()
                 print(f"[daemon] paste {paste_status}", flush=True)
                 if paste_status == "pasted":
-                    self._watch_paste(final, target)
                     sounds.play("paste")
                     self._flow.done(run=run) or self._stale(run)
+                    self._watch_paste(final, target)
                 else:
                     # It could not have landed: never lose the text — it's
                     # on the clipboard and in the card (spec §8).
@@ -1914,7 +2168,11 @@ class Daemon:
             timings["total"] = t3 - start
             # Log only (not a history column): key-up handling between the
             # recorder stopping and this worker starting on the transcript.
-            handoff = (f" handoff={t0 - start - ctx.record_s:.2f}s"
+            # keyup_queue: the key-up event waited this long for its handler
+            # (in total, not in handoff, which stays comparable to old logs).
+            queued = ctx.keyup_queue_s or 0.0
+            handoff = (f" handoff={t0 - start - ctx.record_s - queued:.2f}s"
+                       f" keyup_queue={queued:.2f}s"
                        if ctx.keyup_at is not None and ctx.record_s is not None else "")
             print("[daemon] timing " + " ".join(
                 f"{k}={v:.2f}s" for k, v in timings.items()) + handoff
@@ -2140,7 +2398,7 @@ class Daemon:
     def _build_hold(self, hold_key: str) -> HoldToTalk:
         # is_active: the widget (✓ / ✕) or Esc can stop a double-tap toggle
         # session; the key must then treat its next press as a fresh hold.
-        return HoldToTalk(hold_key, self._on_hold_press, self.on_record_stop,
+        return HoldToTalk(hold_key, self._on_hold_press, self._on_hold_release,
                           is_active=lambda: self.recorder.is_recording,
                           on_cancel=self._on_hold_cancel)
 
@@ -2166,6 +2424,10 @@ class Daemon:
         `kill -USR1 <pid>` for an on-demand dump."""
         hang_watch.install_faulthandler()
         probes = [hang_watch.Probe("pipeline worker", self._pipeline_stalled_for)]
+        key_worker = getattr(sys.modules.get("hotkeys_nsevent"), "KEY_WORKER", None)
+        if key_worker is not None and not _PYNPUT:
+            # Key presses run there, in order: one stuck job holds every later key.
+            probes.append(hang_watch.Probe("hotkey worker", key_worker.busy_for))
         if main_loop:
             try:
                 from PyObjCTools import AppHelper  # type: ignore
@@ -2178,17 +2440,20 @@ class Daemon:
         hold_key = self.cfg["hotkeys"]["record_hold"]
         self._hold = self._build_hold(hold_key)
         self._hold.start()
-        # macOS TIS (Text Input Sources) API is not thread-safe during init.
-        # Two pynput listeners starting concurrently both call
-        # TISCopyCurrentKeyboardInputSource and SIGABRT. Stagger them so the
-        # first listener finishes its TIS init before the second begins.
-        time.sleep(0.8)
+        # pynput only: macOS TIS (Text Input Sources) is not thread-safe
+        # during init; two pynput listeners starting together both call
+        # TISCopyCurrentKeyboardInputSource and SIGABRT, so stagger them.
+        # NSEvent monitors install on the main run loop: no wait (these
+        # sleeps held dictation back ~1.2 s after every login).
+        if _PYNPUT:
+            time.sleep(0.8)
 
         chords = self._chord_bindings(self.cfg["hotkeys"])
         if chords:
             self._chords = HotkeySet(chords)
             self._chords.start()
-            time.sleep(0.4)  # let second listener settle too
+            if _PYNPUT:
+                time.sleep(0.4)  # let second listener settle too
 
         # Flow widget: open the socket, then the pump spawns the widget
         # process and keeps it alive.

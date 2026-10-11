@@ -155,9 +155,10 @@ def test_double_tap_is_not_held_up_by_a_hung_output_device(env, hung_output, mon
         h._handler(down(100.210))       # DOUBLE-TAP -> handsfree_start cue
 
     assert on_main(keys) < 1.0
+    assert hn.KEY_WORKER.drain(2.0), "the key thread is stuck on the hung cue"
     assert h.hands_free and d._flow.state == "recording"
     assert started(hung_output), "the cue still plays, off the key's thread"
-    assert all(thread != "fake-main" for _, thread in hung_output)
+    assert all(thread not in ("fake-main", "hotkey-worker") for _, thread in hung_output)
 
 
 def test_cue_does_not_hold_the_flow_lock(env, hung_output, monkeypatch):
@@ -184,6 +185,7 @@ def test_key_up_cues_and_a_burst_of_presses_never_block(env, hung_output, monkey
             h._handler(up(12.1 + i))
 
     assert on_main(keys) < 1.0
+    assert hn.KEY_WORKER.drain(2.0), "the key thread is stuck on a hung cue"
 
 
 def test_cues_queued_behind_a_hung_one_are_dropped_not_replayed_late(hung_output):

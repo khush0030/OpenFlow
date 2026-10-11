@@ -64,7 +64,7 @@ def env(monkeypatch):
                         lambda comp, msg="", exc=None: logged.append((comp, msg, exc)))
     monkeypatch.setattr(dm, "get_active_app", lambda: "Notes")
 
-    def fake_paste(text, target=None):
+    def fake_paste(text, target=None, **kw):
         calls.append(("paste", text, target))
         return "pasted"
     monkeypatch.setattr(dm, "paste", fake_paste)
@@ -168,7 +168,7 @@ def test_paste_text_prefers_a_foreign_frontmost_app(env, monkeypatch):
 
 
 def test_paste_text_reports_clipboard_only(env, monkeypatch):
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: "clipboard")
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: "clipboard")
     assert make_daemon()._ctl_paste_text("hi") == {"status": "clipboard"}
 
 

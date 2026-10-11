@@ -14,6 +14,7 @@ be read over AX — our text still sits right before the caret.
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -448,6 +449,17 @@ CONFIRM_TIMEOUT_S = 0.3
 CONFIRM_POLL_S = 0.05
 # Stop looking once the value is still unchanged after this many polls.
 UNCHANGED_SETTLE_POLLS = 2
+# Before Cmd+V, only after we had to wait for a held modifier to come up or
+# bring the target app to the front: let the app see the key-up / finish
+# activating. It used to be unconditional (a generic settle from the first
+# AX-insert paste, 40dea9b, not an Electron fix); with the keys already up
+# and the app already in front there is nothing to settle.
+PASTE_SETTLE_S = 0.04
+# The modifier wait counts as "waited" past this (it returns at once when
+# the keys are already up).
+_WAITED_S = 0.005
+# paste(before=...) default: read the field just before Cmd+V.
+NOT_READ = object()
 
 
 def _read_field(pid: int) -> Optional["FieldText"]:
@@ -524,7 +536,25 @@ def _confirm_paste(pid: int, before: Optional["FieldText"], text: str) -> Option
     return why
 
 
-def paste(text: str, target: PasteTarget | None = None) -> str:
+def field_snapshot(target: PasteTarget | None) -> Optional["FieldText"]:
+    """The target's focused field as paste() reads it before Cmd+V. Taken
+    early (while the take is still being transcribed) and passed back as
+    paste(before=...), it takes the AX read off the paste's critical path."""
+    pid = target.pid if target is not None else (_front_pid() or 0)
+    return _read_field(pid)
+
+
+def _report_confirm(pid: int, before: Optional["FieldText"], text: str) -> None:
+    try:
+        why = _confirm_paste(pid, before, text)
+    except Exception as e:
+        why = f"check failed: {e}"
+    print("[paste] sent Cmd+V — pasted "
+          + ("(verified)" if why is None else f"(unverified: {why})"), flush=True)
+
+
+def paste(text: str, target: PasteTarget | None = None, *, before: Any = NOT_READ,
+          confirm_in_background: bool = False) -> str:
     """Land `text` at the caret in `target` via clipboard + Cmd+V.
 
     Cmd+V first: Electron / Chromium apps (VS Code, Chrome, Slack) accept an
@@ -538,7 +568,12 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
     "clipboard": we know it could not have landed (no Accessibility, the
     target app isn't in front, Cmd+V couldn't be sent). "failed": the
     clipboard couldn't be written. Except for "failed" the text is left
-    on the clipboard."""
+    on the clipboard.
+
+    before: the field as read earlier (field_snapshot), instead of reading
+    it now. confirm_in_background: return right after Cmd+V and look for
+    the text on a side thread (it only decides the log line), so the
+    caller's done cue and next take don't wait the up-to-0.3 s check."""
     global _LAST_CLIPBOARD, _LAST_PASTE
     _LAST_PASTE = None
     if not text:
@@ -555,6 +590,7 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
         print("[paste] Accessibility not granted — text left on clipboard (press ⌘V)", flush=True)
         return "clipboard"
 
+    activated = target is not None and _front_is_not(target.pid)
     if target is not None and not _bring_to_front(target):
         return "clipboard"
 
@@ -562,15 +598,18 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
     # to start the next one while this one finishes): an app sees Cmd+⌥V
     # and pastes nothing. Give it a moment to come up; the event source
     # (_event_source) keeps a key still held out of Cmd+V either way.
-    if _wait_modifiers_released(PASTE_MODIFIER_WAIT_S) is False:
+    t_wait = time.monotonic()
+    released = _wait_modifiers_released(PASTE_MODIFIER_WAIT_S)
+    if released is False:
         print("[paste] modifier keys still held — sending Cmd+V anyway", flush=True)
-    else:
-        time.sleep(0.04)
+    elif activated or released is None or time.monotonic() - t_wait > _WAITED_S:
+        time.sleep(PASTE_SETTLE_S)
     if target is not None and _front_is_not(target.pid):
         print(f"[paste] {target.name} lost the front while waiting — not pasting", flush=True)
         return "clipboard"
     pid = target.pid if target is not None else (_front_pid() or 0)
-    before = _read_field(pid)
+    if before is NOT_READ:
+        before = _read_field(pid)
     sent = _cgevent_paste()
     if not sent:
         print("[paste] CGEvent failed; falling back to osascript", flush=True)
@@ -582,9 +621,11 @@ def paste(text: str, target: PasteTarget | None = None) -> str:
                                   app=target.name if target is not None else "",
                                   at=time.monotonic(), clip_before=_LAST_CLIPBOARD,
                                   clip_change=clip_change)
-        why = _confirm_paste(pid, before, text)
-        print("[paste] sent Cmd+V — pasted "
-              + ("(verified)" if why is None else f"(unverified: {why})"), flush=True)
+        if confirm_in_background:
+            threading.Thread(target=_report_confirm, args=(pid, before, text),
+                             name="paste-confirm", daemon=True).start()
+        else:
+            _report_confirm(pid, before, text)
         return "pasted"
     ax_el = target.ax_element if target is not None else None
     if _ax_insert(text, ax_el):

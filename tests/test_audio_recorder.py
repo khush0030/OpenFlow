@@ -144,3 +144,53 @@ def test_next_start_waits_for_the_previous_close(rec):
 
 def test_stop_when_not_recording_is_empty(rec):
     assert rec.stop().size == 0
+
+
+# -- 16 ms blocks: shorter key-up tail, same meter and stream behaviour ---------
+
+def test_mic_opens_with_16ms_blocks(rec):
+    rec.start()
+    assert FakeStream.instances[0].kw["blocksize"] == 256
+    assert rec.cfg.blocksize / rec.cfg.sample_rate == 0.016
+
+
+def test_level_meter_still_averages_about_64ms(rec):
+    # One quiet 16 ms block must not drop the waveform / "can't hear you"
+    # level to zero: it is averaged over LEVEL_WINDOW_S like the old 64 ms block.
+    rec.start()
+    s = FakeStream.instances[0]
+    for _ in range(4):
+        s.block(0.2, n=256)
+    assert rec.current_rms == pytest.approx(0.2, abs=1e-6)
+    s.block(0.0, n=256)
+    assert rec.current_rms == pytest.approx(0.2 * (3 / 4) ** 0.5, rel=1e-3)
+    for _ in range(4):
+        s.block(0.0, n=256)
+    assert rec.current_rms == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_new_take_starts_its_meter_from_scratch(rec):
+    rec.start()
+    s = FakeStream.instances[0]
+    for _ in range(4):
+        s.block(0.5, n=256)
+    rec.cancel()
+    rec.start()
+    s2 = FakeStream.instances[-1]
+    s2.block(0.1, n=256)
+    assert rec.current_rms == pytest.approx(0.1, abs=1e-6)
+
+
+def test_lingering_stream_keeps_about_a_second_of_small_blocks(rec):
+    rec.start()
+    s = FakeStream.instances[0]
+    rec.cancel(linger_s=5)
+    for _ in range(200):                       # 3.2 s of 16 ms blocks
+        s.block(0.1, n=256)
+    kept = sum(len(b) for b in rec._park_buf)
+    assert kept == pytest.approx(audio.PARK_KEEP_S * 16000, rel=0.05)
+    assert rec.resume(keep_s=0.512)             # 32 blocks
+    s.block(0.2, n=256)
+    threading.Timer(0.01, s.block, args=(0.3, 256)).start()
+    out = rec.stop()
+    assert out.size == 32 * 256 + 2 * 256      # 0.512 s before the press + the take
