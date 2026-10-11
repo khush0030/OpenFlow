@@ -119,6 +119,7 @@ class StreamingSession:
         self._error: StreamError | None = None
         self._ended = threading.Event()        # session.end seen, or failed
         self._closed = False                    # finish/abort called
+        self._ending = False                    # end() queued flush + end
         self._sent = 0                          # audio blocks sent
         self._thread: threading.Thread | None = None
 
@@ -135,8 +136,8 @@ class StreamingSession:
 
     def feed(self, block: np.ndarray) -> None:
         """A mic block (float32). Called from the audio callback: no I/O."""
-        if self._closed or self._ended.is_set():
-            return                      # finished, or failed: batch will run
+        if self._closed or self._ending or self._ended.is_set():
+            return                      # ending, finished or failed
         if not self._open:
             x = np.asarray(block, dtype=np.float32).reshape(-1)
             rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
@@ -153,8 +154,21 @@ class StreamingSession:
             self._held_n = 0
         self._q.put(block)
 
+    def end(self) -> None:
+        """Key-up, as soon as the recorder has the last block: ask Sarvam to
+        finalize now (flush + end), so its ~0.25 s finalize runs while the
+        key-up hand-off does its local work; finish() then only waits.
+        Blocks fed after this are not sent. Never raises, never blocks; a
+        no-op if the stream already failed or never opened its gate (finish
+        reports that as before)."""
+        if self._closed or self._ending or self._error is not None or not self._open:
+            return
+        self._ending = True
+        self._q.put(_END)
+
     def finish(self, timeout: float = FINISH_TIMEOUT_S) -> STTResult:
-        """Key-up: finalize and wait for the transcript. Raises StreamError."""
+        """Key-up: finalize (unless end() already did) and wait for the
+        transcript. Raises StreamError."""
         if self._closed:
             raise StreamError("stream already closed")
         self._closed = True
@@ -163,7 +177,9 @@ class StreamingSession:
         if not self._open:
             self.abort()
             raise StreamError("nothing above the silence threshold was streamed")
-        self._q.put(_END)
+        if not self._ending:
+            self._ending = True
+            self._q.put(_END)
         if not self._ended.wait(timeout):
             self.abort()
             raise StreamError(f"no final transcript {timeout:.1f}s after key-up")

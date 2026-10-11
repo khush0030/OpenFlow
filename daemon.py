@@ -1379,6 +1379,11 @@ class Daemon:
             self.state.notify()
             self._flow.no_audio(audio, ctx)
             return
+        # The take will be transcribed: have Sarvam finalize now, so its
+        # ~0.25 s overlaps the hand-off below instead of following it.
+        end_stream = getattr(stream, "end", None)
+        if end_stream is not None:
+            end_stream()
         self._edit_pending = False
         if take is not None:
             take.phase = "working"            # the overlay: listening -> working

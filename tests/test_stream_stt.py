@@ -263,6 +263,85 @@ def test_abort_closes_and_ignores_later_feeds():
     assert "end" not in [m["event"] for m in ws.sent]
 
 
+# -- end(): finalize at key-up, before the worker asks for the result ----------
+
+def _wait_for(pred, timeout=1.0):
+    end = time.monotonic() + timeout
+    while not pred() and time.monotonic() < end:
+        time.sleep(0.005)
+    return pred()
+
+
+def test_end_flushes_at_once_and_finish_only_waits():
+    # Sarvam's ~0.25 s finalize starts at key-up, not when the worker
+    # finally calls finish() after the hand-off.
+    ws = FakeWS(finals=("Ship it.",))
+    s = session(ws)
+    for _ in range(3):
+        s.feed(LOUD)
+    s.end()
+    assert _wait_for(lambda: [m["event"] for m in ws.sent][-2:] == ["flush", "end"]), \
+        "flush + end must go out before finish() is called"
+    assert _wait_for(s._ended.is_set), "the finalize ran during the hand-off"
+    assert s.finish().transcript == "Ship it."
+    events = [m["event"] for m in ws.sent]
+    assert events.count("end") == 1 and events.count("flush") == 1
+    assert ws.audio_samples() == 3 * BLOCK
+
+
+def test_blocks_after_end_are_not_sent():
+    ws = FakeWS()
+    s = session(ws)
+    s.feed(LOUD)
+    s.end()
+    s.feed(LOUD)                     # a late callback: not this take's audio
+    s.finish()
+    assert ws.audio_samples() == BLOCK
+
+
+def test_end_twice_and_end_after_finish_are_harmless():
+    ws = FakeWS()
+    s = session(ws)
+    s.feed(LOUD)
+    s.end()
+    s.end()
+    s.finish()
+    s.end()
+    assert [m["event"] for m in ws.sent].count("end") == 1
+
+
+def test_end_on_a_take_that_never_got_loud_changes_nothing():
+    ws = FakeWS()
+    s = session(ws)
+    s.feed(QUIET)
+    s.end()
+    with pytest.raises(ss.StreamError, match="nothing above the silence threshold"):
+        s.finish()
+    assert "end" not in [m["event"] for m in ws.sent]
+
+
+def test_end_then_abort_closes_cleanly():
+    ws = FakeWS(on_end=lambda ws: [])        # Sarvam never answers
+    s = session(ws)
+    s.feed(LOUD)
+    s.end()
+    s.abort()
+    assert _wait_for(lambda: ws.closed)
+    with pytest.raises(ss.StreamError):
+        s.finish()
+
+
+def test_end_after_a_failed_connect_is_a_no_op():
+    def refuse(url, headers, timeout):
+        raise ConnectionError("offline")
+    s = session(connect=refuse)
+    s.feed(LOUD)
+    assert _wait_for(s._ended.is_set)
+    s.end()
+    with pytest.raises(ss.StreamError, match="connect failed"):
+        s.finish()
+
+
 def test_realtime_language_maps_unknown_to_auto():
     assert ss.realtime_language(None) == "auto"
     assert ss.realtime_language("unknown") == "auto"
