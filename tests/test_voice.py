@@ -220,3 +220,78 @@ def test_analyze_thresholds_and_future_rows():
 def test_analyze_empty():
     v = voice.analyze([], NOW, UTC)
     assert v.dictations == 0 and v.wpm == 0.0 and v.phrases == [] and v.sentence_len == 0.0
+
+
+# ── top_phrases: linear subsume == the old pairwise subsume ────────────────
+
+def _top_phrases_pairwise(rows, n=8, min_count=voice.MIN_PHRASE_COUNT, sizes=(2, 3, 4)):
+    """The original O(P²) implementation, kept as the reference."""
+    import re
+    from collections import Counter
+    counts = Counter()
+    for r in rows:
+        for sent in voice._SENT_SPLIT.split(r.raw or ""):
+            for part in re.split(r"[,;:()\"—–]", sent):
+                ws = voice.words(part)
+                for k in sizes:
+                    for i in range(len(ws) - k + 1):
+                        gram = ws[i:i + k]
+                        if all(w in voice.STOPWORDS for w in gram):
+                            continue
+                        if gram[0] in voice._EDGE or gram[-1] in voice._EDGE or \
+                                (k == 2 and gram[-1] in ("to", "of")):
+                            continue
+                        counts[" ".join(gram)] += 1
+    common = {p: c for p, c in counts.items() if c >= min_count}
+    keep = {}
+    for p, c in common.items():
+        if any(len(q) > len(p) and f" {p} " in f" {q} " and cq >= voice.SUBSUME * c
+               for q, cq in common.items()):
+            continue
+        keep[p] = c
+    return sorted(keep.items(), key=lambda kv: (-kv[1], -len(kv[0].split()), kv[0]))[:n]
+
+
+def _generated_rows(n_rows, seed, vocab_size=120, length=(4, 30)):
+    """Zipf-ish word soup with stopwords, punctuation and repeated phrases,
+    so plenty of 2–4 word phrases overlap and pass min_count."""
+    import random
+    rnd = random.Random(seed)
+    stop = sorted(voice.STOPWORDS)[:40]
+    content = [f"w{i}" for i in range(vocab_size)]
+    pool = content + stop
+    weights = [1 / (i + 1) for i in range(len(content))] + [0.5] * len(stop)
+    stock = ["in terms of", "make sure", "we should make sure", "at the end of the day",
+             "kind of", "the design team", "ship it today"]
+    rows = []
+    for _ in range(n_rows):
+        parts = []
+        for _ in range(rnd.randint(*length)):
+            r = rnd.random()
+            if r < 0.08:
+                parts.append(rnd.choice(stock))
+            elif r < 0.12:
+                parts.append(rnd.choice([".", ",", "!", ";"]))
+            else:
+                parts.append(rnd.choices(pool, weights)[0])
+        rows.append(E(0, " ".join(parts).replace(" .", ".").replace(" ,", ",")))
+    return rows
+
+
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("sizes,min_count", [((2, 3, 4), 3), ((1, 2, 3), 2), ((2, 3, 4, 5), 4)])
+def test_top_phrases_matches_pairwise_reference(seed, sizes, min_count):
+    rows = _generated_rows(250, seed)
+    got = voice.top_phrases(rows, n=10_000, min_count=min_count, sizes=sizes)
+    want = _top_phrases_pairwise(rows, n=10_000, min_count=min_count, sizes=sizes)
+    assert len(want) > 20          # the data really exercises subsumption
+    assert got == want
+
+
+def test_top_phrases_scales_linearly_at_4x_history():
+    """4× today's ~500 rows took 38 s with the pairwise subsume."""
+    import time
+    rows = _generated_rows(500, seed=1, vocab_size=400) * 4
+    t = time.perf_counter()
+    voice.top_phrases(rows)
+    assert time.perf_counter() - t < 2.0
