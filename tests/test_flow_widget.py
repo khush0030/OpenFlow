@@ -582,8 +582,8 @@ def test_overlay_windows_have_no_native_shadow():
 def test_hover_works_while_another_app_is_active(fa, monkeypatch):
     # Qt sends no Enter/Move to an inactive app's windows; the relay does.
     fa._on_message({"type": "state", "state": "idle", "text": ""})
-    fa.widget._anim.stop()
-    fa.widget.setGeometry(fw.window_geometry(fa.widget.target_rect))
+    fa.widget.finish_motion()
+    assert fa.widget.geometry() == fw.window_geometry(fa.widget.target_rect)
     monkeypatch.setattr(fa._hover, "_buttons_down", lambda: False)
     fa._hover.update(QPointF(fa.widget.frameGeometry().center()))
     assert fa.widget.view == "hover"
@@ -598,8 +598,8 @@ def test_idle_handle_is_flat_no_shadow_or_rim(fa):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     eff = fa.widget.graphicsEffect()
     assert eff is None or not eff.isEnabled()
-    fa.widget._anim.stop()
-    fa.widget.setGeometry(fw.window_geometry(fa.widget.target_rect))
+    fa.widget.finish_motion()
+    assert fa.widget.geometry() == fw.window_geometry(fa.widget.target_rect)
     img = fa.widget.grab().toImage()
     # no near-white rim pixels anywhere on the bar
     whites = [(x, y) for x in range(img.width()) for y in range(img.height())
@@ -738,11 +738,9 @@ def test_hover_mic_is_solid(fa, hot):
     fa._on_message({"type": "state", "state": "idle", "text": ""})
     fa.set_hover(True)
     w = fa.widget
-    w._anim.stop()
-    w._reveal.stop()
-    w.reveal = 1.0
+    w.finish_motion()
     w._hot = "dictate" if hot else None
-    w.setGeometry(fw.window_geometry(w.target_rect))
+    assert w.geometry() == fw.window_geometry(w.target_rect)
     img = w.grab().toImage()
     k = 20 * fw.S / 24  # the 24-unit glyph at full size
     c = fw.shape_rect(w).center()
@@ -798,10 +796,8 @@ HANDS_FREE = {"type": "state", "state": "recording", "text": "", "hands_free": T
 
 def _accent_pixels_outside_pill(fa) -> int:
     w = fa.widget
-    w._anim.stop()
-    w._reveal.stop()
-    w.reveal = 1.0
-    w.setGeometry(fw.window_geometry(w.target_rect))
+    w.finish_motion()
+    assert w.geometry() == fw.window_geometry(w.target_rect)
     img = w.grab().toImage()
     pill = fw.shape_rect(w)
     n = 0
@@ -1014,3 +1010,124 @@ def test_queued_card_names_an_earlier_dictation(fa):
     assert copy.CARD_NOT_PASTED_HINT not in labels   # the clipboard may hold a newer take
     fa.popup.copy_button.click()
     assert fa.client.sent[-1] == {"action": "copy"}
+
+
+# ── motion system (polish 2026-10-11: cancel and transitions looked janky) ──
+def _at(w, ms: int) -> None:
+    """Freeze the widget's motion at `ms` into it."""
+    w._anim.pause()
+    w._anim.setCurrentTime(ms)
+
+
+def _shown(fa, state, **kw):
+    fa._on_message({"type": "state", "state": state, "text": "", **kw})
+    fa.widget.finish_motion()
+
+
+def test_cancel_starts_from_the_recording_pill_not_a_red_block(fa):
+    # The cancel used to repaint the full-size recording pill as the red bar
+    # on its first frame, then shrink it: a red flash.
+    _shown(fa, "recording")
+    w = fa.widget
+    fa._on_message({"type": "state", "state": "cancelled", "text": ""})
+    _at(w, 0)
+    look = w._look_now()
+    assert look[:4] == pytest.approx(PAPER.surface)
+    assert w._content["controls"] == pytest.approx(1.0)  # buttons fade, not vanish
+    _at(w, fw.COLLAPSE_MS // 2)
+    assert 0.0 <= w._content["controls"] < 0.2
+    assert look[0] < w._look_now()[0] or w._look_now()[1] < look[1]  # blending to red
+    w._anim.setCurrentTime(fw.COLLAPSE_MS)
+    assert w._look_now()[:4] == pytest.approx(PAPER.accent)
+    assert w.geometry() == fw.window_geometry(w.target_rect)
+    assert isinstance(fa.popup, fw.Toast)  # Undo stays
+
+
+def test_morph_in_place_never_resizes_the_window_mid_flight(fa):
+    _shown(fa, "idle")
+    w = fa.widget
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    geos = set()
+    for ms in range(0, fw.MORPH_MS, 20):
+        _at(w, ms)
+        geos.add((w.geometry().x(), w.geometry().y(), w.geometry().width(),
+                  w.geometry().height()))
+    assert len(geos) == 1
+    w._anim.setCurrentTime(fw.MORPH_MS)
+    assert w.geometry() == fw.window_geometry(w.target_rect)
+    assert w.shape_global() == w._shape_for(w.target_rect)
+
+
+def test_repeated_state_does_not_restart_the_morph(fa):
+    _shown(fa, "idle")
+    w = fa.widget
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    _at(w, 100)
+    fa._on_message({"type": "state", "state": "recording", "text": ""})
+    assert w._anim.currentTime() == 100
+
+
+def test_interrupted_morph_bends_from_where_it_is(fa):
+    # Double-tap: recording → idle → recording within ~80 ms. The pill must
+    # turn around from its current size and opacity, not jump or regrow from 0.
+    _shown(fa, "recording")
+    w = fa.widget
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    _at(w, 40)
+    shape, controls = w.shape_global(), w._content["controls"]
+    assert 0.0 < controls < 1.0
+    fa._on_message({"type": "state", "state": "recording", "text": "", "hands_free": True})
+    _at(w, 0)
+    assert w.shape_global() == shape
+    assert w._content["controls"] == pytest.approx(controls)
+    w._anim.setCurrentTime(fw.MORPH_MS)
+    assert w.reveal == 1.0 and w._content["ring"] == 1.0
+    assert w.shape_global() == w._shape_for(w.target_rect)
+
+
+def test_shadow_fades_with_the_collapse_and_is_off_at_rest(fa):
+    _shown(fa, "recording")
+    w = fa.widget
+    eff = w.graphicsEffect()
+    full = eff.color().alpha()
+    fa._on_message({"type": "state", "state": "idle", "text": ""})
+    _at(w, fw.COLLAPSE_MS // 3)
+    assert eff.isEnabled() and 0 < eff.color().alpha() < full
+    w._anim.setCurrentTime(fw.COLLAPSE_MS)
+    assert not eff.isEnabled()
+
+
+def test_hover_out_keeps_a_pill_shape_while_shrinking(fa):
+    # The hover pill used to square off into a 31 × 48 red block (4 pt
+    # corners) the moment it collapsed.
+    _shown(fa, "idle")
+    fa.set_hover(True)
+    fa.widget.finish_motion()
+    fa.set_hover(False)
+    w = fa.widget
+    _at(w, 0)
+    img = w.grab().toImage()
+    r = w._shape
+    corner = img.pixelColor(int(r.left()) + 1, int(r.top()) + 1)
+    assert corner.alpha() < 40  # rounded: the corner pixel is outside the shape
+
+
+def test_replacing_a_popup_unchanged_keeps_its_entrance_playing(fa):
+    fa._on_message({"type": "state", "state": "silent", "text": ""})
+    toast = fa.popup
+    fa.relayout()  # e.g. the daemon repeating the state
+    assert fa.popup is toast and fw._running(toast._motion)
+
+
+def test_a_popup_replacing_another_waits_for_it_to_fade(fa):
+    from PyQt6.QtTest import QTest
+    fa._on_message({"type": "state", "state": "silent", "text": ""})
+    assert _settles(lambda: fa.popup.windowOpacity() == 1.0)
+    fa._on_message({"type": "state", "state": "recording", "text": "", "hands_free": True})
+    assert isinstance(fa.popup, fw.Tooltip)
+    assert fa.popup.enter_delay_ms >= fw.SWAP_DELAY_MS
+
+
+def test_motion_constants_are_one_system():
+    assert fw.COLLAPSE_MS < fw.MORPH_MS and fw.POPUP_OUT_MS < fw.POPUP_IN_MS
+    assert fw.ease(0) == 0 and fw.ease(1) == 1 and fw.ease(0.5) > 0.5  # out-curve
