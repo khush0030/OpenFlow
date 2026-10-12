@@ -170,3 +170,51 @@ def test_old_window_subcommands_open_hub_pages(monkeypatch, argv, page):
 def test_old_window_modules_are_gone(module):
     import importlib.util
     assert importlib.util.find_spec(module) is None
+
+
+# -- a running hub gets the page over hub.sock (no new process) ------------------
+
+@pytest.mark.parametrize("label,page", [("Open OpenFlow", "home"), ("History…", "history"),
+                                        ("Settings…", "settings"), ("Dictionary…", "dictionary")])
+def test_running_hub_is_told_the_page_instead_of_spawning(menu_tray, spawned, monkeypatch, label, page):
+    sent = []
+    monkeypatch.setattr(tray, "notify_hub", lambda msg, *a, **k: sent.append(msg) or True)
+    menu_tray.menu[label].callback(None)
+    assert sent == [{"show": page}]
+    assert spawned == []
+
+
+def test_no_hub_listening_falls_back_to_spawning(spawned, monkeypatch):
+    sent = []
+    monkeypatch.setattr(tray, "notify_hub", lambda msg, *a, **k: sent.append(msg) or False)
+    tray.open_hub("history")
+    assert sent == [{"show": "history"}]
+    assert spawned == [("ui.hub", "history")]
+
+
+def test_open_hub_sends_a_show_line_over_the_socket(spawned, monkeypatch):
+    import json
+    import socket
+    import tempfile
+    import threading
+    path = Path(tempfile.mkdtemp(prefix="of")) / "h.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(1)
+    got = []
+
+    def accept():
+        conn, _ = srv.accept()
+        with conn:
+            got.append(conn.makefile().readline())
+    t = threading.Thread(target=accept)
+    t.start()
+    monkeypatch.setattr(tray, "HUB_SOCK", path)
+    tray.open_hub("insights")
+    t.join(2)
+    srv.close()
+    assert json.loads(got[0]) == {"show": "insights"}
+    assert spawned == []
+    path.unlink()
+    tray.open_hub("insights")                     # no hub socket any more
+    assert spawned == [("ui.hub", "insights")]

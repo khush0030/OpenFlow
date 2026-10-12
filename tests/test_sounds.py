@@ -60,18 +60,21 @@ def fake(monkeypatch):
 
 def test_play_uses_configured_volume(fake):
     sounds.play("start")
+    sounds.wait_idle(2.0)
     assert fake.plays == 1 and fake.volume == pytest.approx(0.35)
 
 
 def test_disabled_sounds_never_play(fake):
     sounds.configure(enabled=False, volume=0.35)
     sounds.play("start")
+    sounds.wait_idle(2.0)
     assert fake.plays == 0
 
 
 def test_volume_is_clamped(fake):
     sounds.configure(enabled=True, volume=7)
     sounds.play("stop")
+    sounds.wait_idle(2.0)
     assert fake.volume == 1.0
 
 
@@ -81,6 +84,7 @@ def test_play_never_raises_on_a_broken_sound(monkeypatch):
             raise RuntimeError("device gone")
     monkeypatch.setattr(sounds, "_load", lambda cue: Boom())
     sounds.play("error")  # must not raise
+    assert sounds.wait_idle(2.0)
 
 
 @pytest.mark.parametrize("cue", sounds.CUES)
@@ -116,6 +120,7 @@ def test_hands_free_start_cuts_off_a_hold_tick_still_playing(monkeypatch):
     monkeypatch.setattr(sounds, "_load", lambda cue: knock)
     sounds.configure(enabled=True, volume=0.35)
     sounds.play("handsfree_start")
+    sounds.wait_idle(2.0)
     assert stopped == ["start"] and knock.plays == 1
 
 
@@ -126,6 +131,7 @@ def test_other_cues_leave_the_hold_tick_alone(monkeypatch):
     monkeypatch.setitem(sounds._cache, "start", tick)
     monkeypatch.setattr(sounds, "_load", lambda cue: other)
     sounds.play("stop")
+    sounds.wait_idle(2.0)
     assert stopped == []
 
 

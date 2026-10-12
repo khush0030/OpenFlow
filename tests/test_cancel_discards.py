@@ -213,7 +213,7 @@ def test_cancel_once_pasting_is_too_late_and_shows_nothing_false(env, monkeypatc
     showing 'cancelled' over text that did land."""
     d = make_daemon()
 
-    def paste_then_cancel(text, target=None):
+    def paste_then_cancel(text, target=None, **kw):
         env["calls"].append(("paste", text))
         d._flow.handle_action({"action": "cancel"})
         return "pasted"

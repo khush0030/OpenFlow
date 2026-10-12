@@ -343,3 +343,11 @@ def test_dock_presence_honours_show_in_dock():
     kit.calls.clear()
     dock.apply()  # hidden window: never brings the icon back
     assert kit.calls == [("accessory",)]
+
+
+def test_hidden_hub_lingers_ten_minutes_by_default():
+    assert hub.QUIT_AFTER_HIDDEN_MS == 10 * 60 * 1000
+    dock = hub.DockPresence(FakeAppKit(), quit=lambda: None)
+    dock.hidden()
+    assert dock.quit_timer.isActive() and dock.quit_timer.interval() == hub.QUIT_AFTER_HIDDEN_MS
+    dock.quit_timer.stop()

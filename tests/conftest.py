@@ -25,12 +25,37 @@ import sounds
 import stream_stt
 
 
+# Session-wide too, not only per test: a cue fired by a timer a test leaked
+# (the hold-cue _after, 0.2 s) can reach the cue thread between one test's
+# teardown and the next one's setup, when the real _load is back. It then
+# played through the speakers, and on a sleeping output device blocked the
+# cue thread ~10 s, so test_cue_never_blocks failed in full runs only.
+sounds._load = lambda cue: None
+# Same for cue routing: between tests a leaked cue must not read the real
+# default output and start an afplay probe of it.
+import output_devices
+output_devices.outputs = lambda: (None, None)
+sounds._probe = lambda uid: True
+
+
 @pytest.fixture(autouse=True)
 def _never_play_real_sounds(monkeypatch):
     # The daemon plays cues on every widget state change; without this every
     # test run knocks and ticks through the user's speakers while they work.
     # Tests that exercise playback patch _load with their own fake.
     monkeypatch.setattr(sounds, "_load", lambda cue: None)
+
+
+@pytest.fixture(autouse=True)
+def _never_probe_real_outputs(monkeypatch):
+    # Cue routing reads the default output from CoreAudio and probes it
+    # with afplay; tests that exercise routing pass their own fakes.
+    import output_devices
+    monkeypatch.setattr(output_devices, "outputs", lambda: (None, None))
+
+    def refuse(uid):
+        raise AssertionError("tests never probe a real output device")
+    monkeypatch.setattr(sounds, "_probe", refuse)
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +80,32 @@ def _never_talk_to_the_real_window(monkeypatch):
 def _never_touch_real_launch_agents(monkeypatch, tmp_path):
     # Settings > General reads (and its toggle writes) the LaunchAgent plist.
     monkeypatch.setattr(login_item, "LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
+
+
+@pytest.fixture(autouse=True)
+def _never_supervise_the_real_daemon(monkeypatch, tmp_path_factory):
+    # Supervision reads and writes ~/.openflow (daemon.lock, the user-quit
+    # marker) and starts daemons: point it at a throwaway dir and make any
+    # real launch fail the test. First-run setup counts as done.
+    import supervisor
+    d = tmp_path_factory.mktemp("openflow-supervisor")  # not in tmp_path: tests list it
+    (d / "onboarded.flag").write_text("test")
+    monkeypatch.setattr(supervisor, "USER_QUIT", d / "user-quit")
+    monkeypatch.setattr(supervisor, "LAUNCH_STAMP", d / "launching")
+    monkeypatch.setattr(supervisor, "DAEMON_LOCK", d / "daemon.lock")
+    monkeypatch.setattr(supervisor, "ONBOARD_FLAG", d / "onboarded.flag")
+
+    def refuse(*a, **k):
+        raise AssertionError("tests never launch a real daemon")
+    monkeypatch.setattr(supervisor, "_popen", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_daemon_key_cache(monkeypatch):
+    # keys.current is the running daemon's start-up key read; a test that
+    # builds a real Daemon must not leave it for the doctor tests.
+    import keys
+    monkeypatch.setattr(keys, "current", None)
 
 
 @pytest.fixture(autouse=True)
@@ -103,3 +154,4 @@ def _hub_calls_inline(request, monkeypatch):
         return
     from ui.hub import workers
     monkeypatch.setattr(workers, "run_in_thread", _sync_run)
+    monkeypatch.setattr(workers, "REFRESH_DELAY_MS", 0)

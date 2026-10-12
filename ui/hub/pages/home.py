@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QBoxLayout, QFrame, QHBoxLayout, QLab
 import stats
 from ui import widget_copy
 from ui.hub import style as S
-from ui.hub import workers
+from ui.hub import datastamp, workers
 from ui.hub.context import ControlError, DaemonNotRunning
 from ui.hub.page import Page
 from ui.hub.pages import _charts as C
@@ -324,6 +324,23 @@ def _vline() -> QFrame:
     return f
 
 
+def _compute(path, now: datetime) -> tuple:
+    """Today's rows (newest first), the all-time stats and a load error.
+    Pure data, no Qt: runs on a worker."""
+    err = None
+    try:
+        rows = stats.load(path)
+    except Exception as exc:
+        rows = []
+        err = f"Couldn't read your history at {path} ({exc})."
+    try:
+        st = stats.compute(rows, now=now)
+    except Exception:
+        st = stats.Stats()
+    today = now.date()
+    return [r for r in reversed(rows) if stats.local_date(r.ts) == today], st, err
+
+
 class HomePage(Page):
     key = "home"
 
@@ -332,6 +349,9 @@ class HomePage(Page):
         self.now = now or datetime.now
         self._today: list = []
         self._load_error: str | None = None
+        self._loaded = False             # until the first history load lands
+        self._data_key_shown = None      # history stamp + day the widgets show
+        self._data_key_pending = None    # …and the one a worker is computing
         self._hold_key = "cmd_r"
         self.rows: list[EntryRow] = []
         self.more_link: QLabel | None = None
@@ -538,7 +558,7 @@ class HomePage(Page):
     # ── lifecycle ──
     def shown(self, **kwargs) -> None:
         self._apply_name()
-        self.reload()
+        self._load()
         self.refresh_status()
         self.status_timer.start()
 
@@ -561,20 +581,44 @@ class HomePage(Page):
         super().hideEvent(e)
 
     # ── data ──
-    def reload(self) -> None:
-        self._load_error = None
-        try:
-            rows = stats.load(self.ctx.history_path)
-        except Exception as exc:
-            rows = []
-            self._load_error = f"Couldn't read your history at {self.ctx.history_path} ({exc})."
+    def _data_key(self, now: datetime) -> tuple:
+        return datastamp.history_stamp(self.ctx.history_path), now.date()
+
+    def _load(self) -> None:
+        """Keep showing the last numbers and list; recompute them on a
+        worker only when history.sqlite changed (or the day rolled over)."""
         now = self.now()
-        try:
-            st = stats.compute(rows, now=now)
-        except Exception:
-            st = stats.Stats()
-        today = now.date()
-        self._today = [r for r in reversed(rows) if stats.local_date(r.ts) == today]
+        key = self._data_key(now)
+        if key in (self._data_key_shown, self._data_key_pending):
+            return
+        self._data_key_pending = key
+        path = self.ctx.history_path
+
+        def done(data, error) -> None:
+            if self._data_key_pending != key:
+                return                           # a newer load is on its way
+            self._data_key_pending = None
+            if error is not None:
+                print(f"[hub.home] reload failed: {error!r}", flush=True)
+                return
+            self._apply(data)
+            self._data_key_shown = key
+
+        # First load: nothing to paint yet, start now. Later: paint the
+        # last numbers first (see workers.REFRESH_DELAY_MS).
+        run = workers.run_in_thread if self._data_key_shown is None else workers.refresh_in_thread
+        run(self, lambda: _compute(path, now), done)
+
+    def reload(self) -> None:
+        """Recompute now, on the calling (Qt) thread."""
+        now = self.now()
+        key = self._data_key(now)
+        self._apply(_compute(self.ctx.history_path, now))
+        self._data_key_shown, self._data_key_pending = key, None
+
+    def _apply(self, data: tuple) -> None:
+        self._today, st, self._load_error = data
+        self._loaded = True
         self.words_stat.setText(_stat_html(C.num(st.total_words), "words dictated"))
         self.wpm_stat.setText(_stat_html(C.num(st.words_per_minute), "words per minute"))
         self.streak_stat.setText(_stat_html(f"{st.current_streak}-day", "streak"))
@@ -597,6 +641,8 @@ class HomePage(Page):
         n = len(self._today)
         self.today_label.setText(f"TODAY · {n}" if n else "TODAY")
         entries = self._filtered()
+        if not entries and not self._loaded:
+            return                               # first load still running: stay blank
         if not entries:
             q = self.search.text().strip()
             if self._load_error:

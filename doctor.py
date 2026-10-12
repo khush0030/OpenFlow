@@ -56,6 +56,35 @@ def check_microphone() -> Check:
         return _check("microphone", False, detail, f"Microphone: FAILED — {detail}")
 
 
+def check_sound_output(probe: bool = False) -> Check:
+    """Whether the default output device can start audio. A monitor's
+    HDMI / DisplayPort audio that won't start held every CoreAudio call ~10 s
+    (cues silent, mic opens stalled, 2026-10-11); cues now play on the
+    built-in output instead (sounds._route). With probe, an output the cues
+    haven't tested yet is tested now (silent, up to sounds.PROBE_TIMEOUT_S);
+    otherwise the daemon's last verdict is reported."""
+    try:
+        import sounds
+        st = sounds.probe_default_output() if probe else sounds.output_status()
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        return _check("sound_output", None, detail, f"Sound output: check failed — {detail}")
+    name, ok, fallback = st["name"], st["ok"], st["fallback"]
+    if name is None:
+        return _check("sound_output", None, "unknown", "Sound output: unknown")
+    if ok:
+        return _check("sound_output", True, name, f"Sound output: {name} — ok")
+    if ok is None:
+        return _check("sound_output", None, f"{name}: not tested yet",
+                      f"Sound output: {name} — not tested yet")
+    where = (f"cues play on {fallback} instead" if fallback
+             else "cues are skipped (no built-in output to use)")
+    return _check("sound_output", False, f"{name} fails to start audio",
+                  f"Sound output: {name} FAILS to start audio — {where}. Choose another "
+                  "output in System Settings → Sound → Output (or wake / reconnect "
+                  "the device).")
+
+
 def check_files() -> list[Check]:
     import config
     out = []
@@ -81,7 +110,57 @@ def check_sarvam_key() -> Check:
     return _check("sarvam_key", has_env or has_keyring, detail, f"Sarvam key: {detail}")
 
 
+# What each fallback key backs, for the doctor lines.
+_FALLBACK_ROLE = {
+    "groq": ("speech and cleanup fallback ready", "no speech fallback if Sarvam fails"),
+    "anthropic": ("cleanup fallback ready", "no Claude cleanup fallback"),
+}
+
+
+def check_fallback_keys(cfg: dict | None = None, results: dict | None = None) -> list[Check]:
+    """The Groq and Anthropic keys as OpenFlow itself reads them. Served by
+    the daemon, this uses what it read at start-up (keys.current), so the
+    answer is the bundle's own, Keychain access list included. Missing is
+    fine (ok=None: optional); a key the Keychain refused is a problem."""
+    import keys
+    try:
+        if results is None:
+            cache = keys.current
+            if cache is not None and cache.ready:
+                results = cache.results()
+            else:
+                if cfg is None:
+                    import config
+                    cfg = config.load()
+                results = keys.check_all(cfg)
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        return [_check("fallback_keys", None, detail, f"Fallback keys: check failed — {detail}")]
+    out = []
+    for name, (ready, missing) in _FALLBACK_ROLE.items():
+        r = results.get(name)
+        if r is None:
+            continue
+        label = keys.LABELS[name]
+        check = f"{name}_key"
+        if r.found:
+            out.append(_check(check, True, f"found ({r.source})",
+                              f"{label} key: ok ({r.source}) — {ready}"))
+        elif r.denied:
+            reason = keys.keychain_reason(r.keychain_error)
+            out.append(_check(
+                check, False, f"keychain refused: {reason}",
+                f"{label} key: BLOCKED — the Keychain refused to give it to OpenFlow "
+                f"({reason}). Open Keychain Access, find \"openflow\" › {r.keyring_user} "
+                f"and allow OpenFlow, or save it again (`openflow key set {name}`)."))
+        else:
+            out.append(_check(check, None, "not set",
+                              f"{label} key: not set — {missing} "
+                              f"(optional; `openflow key set {name}`)"))
+    return out
+
+
 def run_checks() -> list[Check]:
     """All non-interactive doctor checks, in CLI order."""
     return [check_accessibility(), check_input_monitoring(), check_microphone(),
-            *check_files(), check_sarvam_key()]
+            check_sound_output(), *check_files(), check_sarvam_key(), *check_fallback_keys()]

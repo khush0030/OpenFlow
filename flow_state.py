@@ -35,6 +35,9 @@ OFFLINE = "offline"
 # CARD reason: the text of an earlier take that lost the widget to a newer
 # one, shown once the widget is free. Copy only; never pastes itself.
 QUEUED = "queued"
+# CARD reason: a saved take transcribed later by itself (retry_queue); the
+# text is already on the clipboard. Copy only; never pastes itself.
+RECOVERED = "recovered"
 
 SILENCE_AFTER_S = 2.0
 UNDO_WINDOW_S = 5.0
@@ -263,6 +266,19 @@ class FlowController:
             self._card_expires_at = self._clock() + CARD_WINDOW_S
             self._set(CARD, text, reason=reason)
             return True
+
+    def recovered(self, text: str) -> None:
+        """A saved take transcribed after all (retry_queue): show it on a
+        Copy card now if the widget is free, else once it is. Never
+        interrupts a take in progress."""
+        with self._lock:
+            now = self._clock()
+            if self.state == IDLE and not self._queue:
+                self._card_expires_at = now + CARD_WINDOW_S
+                self._set(CARD, text, reason=RECOVERED)
+                return
+            self._queue.append(_Queued(now + QUEUE_WINDOW_S, text=text, reason=RECOVERED))
+            del self._queue[:-QUEUE_MAX]
 
     def cancelled(self, audio: Any, target: Any) -> None:
         with self._lock:

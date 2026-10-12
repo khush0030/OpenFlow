@@ -64,7 +64,7 @@ def env(monkeypatch):
                         lambda comp, msg="", exc=None: logged.append((comp, msg, exc)))
     monkeypatch.setattr(dm, "get_active_app", lambda: "Notes")
 
-    def fake_paste(text, target=None):
+    def fake_paste(text, target=None, **kw):
         calls.append(("paste", text, target))
         return "pasted"
     monkeypatch.setattr(dm, "paste", fake_paste)
@@ -168,7 +168,7 @@ def test_paste_text_prefers_a_foreign_frontmost_app(env, monkeypatch):
 
 
 def test_paste_text_reports_clipboard_only(env, monkeypatch):
-    monkeypatch.setattr(dm, "paste", lambda text, target=None: "clipboard")
+    monkeypatch.setattr(dm, "paste", lambda text, target=None, **kw: "clipboard")
     assert make_daemon()._ctl_paste_text("hi") == {"status": "clipboard"}
 
 
@@ -275,7 +275,7 @@ def test_check_returns_doctor_results(env, monkeypatch):
 
 def test_handler_table_names_every_command(env):
     assert set(make_daemon()._control_handlers()) == {
-        "status", "set_tone", "set_language", "paste_text", "rerun", "retranscribe", "play_cues", "check",
+        "status", "ping", "set_tone", "set_language", "paste_text", "rerun", "retranscribe", "play_cues", "check",
         "dictionary_suggestions", "accept_suggestion", "dismiss_suggestion"}
 
 

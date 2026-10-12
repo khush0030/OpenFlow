@@ -5,6 +5,14 @@ scripts/install_macos.sh does. enable()/disable() only write or remove the
 file, which launchd reads at the next login; load()/unload() talk to
 launchctl and run only when a caller asks for them (loading a RunAtLoad
 agent starts OpenFlow right away).
+
+Next to it, a guard agent (GUARD_LABEL) runs `openflow supervise` every
+GUARD_INTERVAL_S: if OpenFlow died or stopped answering, and the user didn't
+quit it, it starts it again (supervisor.supervise_once). The login agent
+itself can't supervise: it runs `open -a`, which exits at once, so launchd
+has nothing to keep alive. The guard is written and removed with the login
+agent; refresh_guard() (at daemon start) adds it for users who turned
+Open at login on before it existed.
 """
 from __future__ import annotations
 
@@ -23,8 +31,16 @@ _HOME_LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 LAUNCH_AGENTS_DIR = _HOME_LAUNCH_AGENTS   # tests redirect this (conftest)
 
 
+GUARD_LABEL = f"{LABEL}.guard"
+GUARD_INTERVAL_S = 60
+
+
 def default_plist_path() -> Path:
     return LAUNCH_AGENTS_DIR / f"{LABEL}.plist"
+
+
+def guard_plist_path() -> Path:
+    return LAUNCH_AGENTS_DIR / f"{GUARD_LABEL}.plist"
 
 
 def _default_log_dir() -> Path:
@@ -60,6 +76,34 @@ def program_arguments() -> list[str]:
     return [sys.executable, str(_REPO_ROOT / "openflow.py")]
 
 
+def guard_program_arguments() -> list[str]:
+    """`openflow supervise` from the same place program_arguments() starts
+    OpenFlow. Run directly, not through `open`: it only checks and exits,
+    and starts OpenFlow itself through LaunchServices when needed."""
+    if getattr(sys, "frozen", False):
+        return [str(Path(sys.executable).resolve()), "supervise"]
+    if use_installed_app():
+        return [str(INSTALLED_APP / "Contents" / "MacOS" / "openflow"), "supervise"]
+    return [sys.executable, str(_REPO_ROOT / "openflow.py"), "supervise"]
+
+
+def build_guard_plist(program: list[str], log_dir: Path) -> dict:
+    data = {
+        "Label": GUARD_LABEL,
+        "ProgramArguments": list(program),
+        # Not at load: the login agent starts OpenFlow then.
+        "RunAtLoad": False,
+        "StartInterval": GUARD_INTERVAL_S,
+        "LimitLoadToSessionType": "Aqua",
+        "ProcessType": "Background",
+        "StandardOutPath": str(log_dir / "launchd.guard.log"),
+        "StandardErrorPath": str(log_dir / "launchd.guard.log"),
+    }
+    if not getattr(sys, "frozen", False) and program and program[0] == sys.executable:
+        data["WorkingDirectory"] = str(_REPO_ROOT)
+    return data
+
+
 def build_plist(program: list[str], log_dir: Path) -> dict:
     data = {
         "Label": LABEL,
@@ -74,11 +118,22 @@ def build_plist(program: list[str], log_dir: Path) -> dict:
     return data
 
 
+def _guard_path_for(path: Path) -> Path:
+    return path.parent / f"{GUARD_LABEL}.plist"
+
+
 def enable(path: Path | None = None, program: list[str] | None = None,
            log_dir: Path | None = None) -> Path:
-    """Write the LaunchAgent plist atomically. Returns its path."""
+    """Write the LaunchAgent plist, and the guard's next to it, atomically.
+    Returns the login agent's path."""
     path = Path(path or default_plist_path())
-    data = build_plist(program or program_arguments(), Path(log_dir or _default_log_dir()))
+    log_dir = Path(log_dir or _default_log_dir())
+    _write_plist(path, build_plist(program or program_arguments(), log_dir))
+    _write_plist(_guard_path_for(path), build_guard_plist(guard_program_arguments(), log_dir))
+    return path
+
+
+def _write_plist(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{LABEL}.", suffix=".tmp", dir=path.parent)
     try:
@@ -94,17 +149,72 @@ def enable(path: Path | None = None, program: list[str] | None = None,
         except FileNotFoundError:
             pass
         raise
-    return path
 
 
 def disable(path: Path | None = None) -> bool:
-    """Remove the plist. True if there was one. (An agent launchd already
-    loaded stays loaded until logout; it isn't KeepAlive, so that's harmless.)"""
+    """Remove the plist and the guard's. True if there was one. (An agent
+    launchd already loaded stays loaded until logout; the login agent isn't
+    KeepAlive, and a loaded guard does nothing once its plist is gone, see
+    guard_installed.)"""
+    path = Path(path or default_plist_path())
     try:
-        Path(path or default_plist_path()).unlink()
+        _guard_path_for(path).unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        path.unlink()
         return True
     except FileNotFoundError:
         return False
+
+
+def guard_installed(path: Path | None = None) -> bool:
+    """Is the guard's plist in place? `openflow supervise` checks this, so a
+    guard launchd still has loaded after Open at login was turned off stops
+    acting at once instead of at logout."""
+    return Path(path or guard_plist_path()).exists()
+
+
+def _read_plist(path: Path) -> dict | None:
+    try:
+        with open(path, "rb") as f:
+            data = plistlib.load(f)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def refresh_guard(runner: Callable = subprocess.run, uid: int | None = None,
+                  log_dir: Path | None = None) -> bool:
+    """Daemon start: with Open at login on, make sure the guard plist is
+    current and loaded (it doesn't run at load, so loading it starts
+    nothing). True when it is in place. Off: leaves everything alone."""
+    if not is_enabled():
+        return False
+    path = guard_plist_path()
+    want = build_guard_plist(guard_program_arguments(), Path(log_dir or _default_log_dir()))
+    changed = _read_plist(path) != want
+    if changed:
+        _write_plist(path, want)
+    uid = os.getuid() if uid is None else uid
+    loaded = _launchctl_ok(["print", f"gui/{uid}/{GUARD_LABEL}"], runner)
+    if loaded and not changed:
+        return True
+    if loaded:
+        _launchctl(["bootout", f"gui/{uid}/{GUARD_LABEL}"], runner, "bootout guard")
+    ok = _launchctl(["bootstrap", f"gui/{uid}", str(path)], runner, "bootstrap guard")
+    if ok:
+        print(f"[login_item] guard {'updated' if changed else 'loaded'}", flush=True)
+    return ok
+
+
+def _launchctl_ok(args: list[str], runner: Callable) -> bool:
+    """Quiet launchctl query: True on exit 0."""
+    try:
+        r = runner([_LAUNCHCTL, *args], capture_output=True, text=True)
+    except Exception:
+        return False
+    return r.returncode == 0
 
 
 def is_enabled(path: Path | None = None) -> bool:

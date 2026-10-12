@@ -67,6 +67,34 @@ def trim_silence(
     return audio[start:end]
 
 
+# What STT makes up for a take with next to no speech in it (openflow.log,
+# 2026-10: Sarvam on room noise; "you" / "thank you" are Whisper's). Kept
+# small and normalised (_normalise): only ever matched against the whole
+# transcript of a low-energy take, never against part of real text.
+PHANTOM_TRANSCRIPTS = frozenset({
+    "okay", "ok", "so", "ill", "bye", "you", "thank you", "thanks", "applications",
+})
+
+
+def _normalise(text: str) -> str:
+    t = (text or "").lower().replace("’", "'").replace("'", "")
+    t = "".join(c if c.isalnum() or c.isspace() else " " for c in t)
+    return " ".join(t.split())
+
+
+def is_phantom(text: str, screen_terms=()) -> bool:
+    """`text` is the whole transcript of a low-energy take: True when it is
+    nothing but a stock made-up phrase, or just one of the names on screen
+    that were sent as keyterms (Saaras echoes those on silence: "Desktop.",
+    "Labels Final."). Real dictation is never one of these on its own."""
+    t = _normalise(text)
+    if not t:
+        return False
+    if t in PHANTOM_TRANSCRIPTS:
+        return True
+    return any(t == _normalise(term) for term in screen_terms or ())
+
+
 def audio_to_wav_bytes(audio: np.ndarray, sample_rate: int = 16000) -> bytes:
     pcm = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
     pcm_i16 = (pcm * 32767).astype(np.int16)

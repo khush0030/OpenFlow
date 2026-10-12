@@ -69,6 +69,13 @@ def fakes(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "load_env", lambda: None)
     monkeypatch.setenv("SARVAM_API_KEY", "sk-test")
     monkeypatch.setattr(sys, "executable", "/py")
+    # Fallback keys: never the real Keychain or ~/.openflow/.env.
+    import keys
+    state["fallback"] = {}   # name -> (key, source, keychain error)
+    monkeypatch.setattr(keys, "check_all", lambda cfg, find=None: {
+        name: keys.lookup(name, env, user,
+                          find=lambda e, u, n=name: state["fallback"].get(n, (None, None, None)))
+        for name, (env, user) in keys.fallback_refs(cfg).items()})
     return state
 
 
@@ -82,6 +89,7 @@ def test_cli_output_is_unchanged(fakes, capsys, tmp_path):
         "AXIsProcessTrusted: True\n"
         "Input Monitoring: granted\n"
         "Microphone: ok\n"
+        "Sound output: unknown\n"
         "\nListening for any key events for 5s. Press right Option a few times…\n"
         "Captured 1 events:\n"
         "  press Key.alt_r\n"
@@ -89,6 +97,10 @@ def test_cli_output_is_unchanged(fakes, capsys, tmp_path):
         f"Dict:   {tmp_path / 'dictionary.json'} (exists=False)\n"
         f"Hist:   {tmp_path / 'history.db'} (exists=False)\n"
         "Sarvam key: env=yes keychain=no\n"
+        "Groq key: not set — no speech fallback if Sarvam fails "
+        "(optional; `openflow key set groq`)\n"
+        "Anthropic key: not set — no Claude cleanup fallback "
+        "(optional; `openflow key set anthropic`)\n"
     )
 
 
@@ -108,8 +120,9 @@ def test_run_checks_returns_structured_results(fakes, tmp_path):
     import doctor
     checks = doctor.run_checks()
     by = {c["name"]: c for c in checks}
-    assert list(by) == ["accessibility", "input_monitoring", "microphone", "config",
-                        "dictionary", "history", "sarvam_key"]
+    assert list(by) == ["accessibility", "input_monitoring", "microphone", "sound_output",
+                        "config",
+                        "dictionary", "history", "sarvam_key", "groq_key", "anthropic_key"]
     assert by["input_monitoring"]["ok"] is True
     assert by["accessibility"]["ok"] is True
     assert by["microphone"] == {"name": "microphone", "ok": True, "detail": "ok",
@@ -153,3 +166,86 @@ def test_input_monitoring_check_never_raises(fakes, monkeypatch):
                         lambda: (_ for _ in ()).throw(RuntimeError("iokit")))
     c = doctor.check_input_monitoring()
     assert c["ok"] is None and "RuntimeError: iokit" in c["line"]
+
+
+# -- Fallback keys as OpenFlow reads them (audit 2026-10-11 §3.8) -------------
+
+def test_fallback_key_found(fakes):
+    import doctor
+    fakes["fallback"]["groq"] = ("gsk", "keychain", None)
+    by = {c["name"]: c for c in doctor.check_fallback_keys()}
+    assert by["groq_key"]["ok"] is True
+    assert by["groq_key"]["line"] == ("Groq key: ok (keychain) — "
+                                      "speech and cleanup fallback ready")
+    assert by["anthropic_key"]["ok"] is None          # optional, just not set
+
+
+def test_fallback_key_denied_by_the_keychain_says_so(fakes):
+    import doctor
+    fakes["fallback"]["groq"] = (None, None,
+                                 "Can't get password from keychain: (-128, 'Keychain Access Denied')")
+    c = {c["name"]: c for c in doctor.check_fallback_keys()}["groq_key"]
+    assert c["ok"] is False
+    assert "BLOCKED" in c["line"] and "access denied, -128" in c["line"]
+    assert "groq_api_key" in c["line"] and "openflow key set groq" in c["line"]
+    assert "not set" not in c["line"]
+
+
+def test_doctor_uses_the_daemons_start_up_read(fakes, monkeypatch):
+    import doctor
+    import keys
+    fakes["fallback"]["anthropic"] = ("k", ".env", None)
+    cache = keys.KeyCache()
+    cache.resolve({})
+    monkeypatch.setattr(keys, "current", cache)
+    monkeypatch.setattr(keys, "check_all", lambda *a, **k: pytest.fail("no second Keychain read"))
+    by = {c["name"]: c for c in doctor.check_fallback_keys()}
+    assert by["anthropic_key"]["ok"] is True and by["groq_key"]["ok"] is None
+
+
+# -- the default output device (2026-10-11: a Dell's HDMI audio never started) --
+
+def _outputs(monkeypatch, verdict, fallback=True, probed=None):
+    import output_devices
+    import sounds
+    from output_devices import Output
+    dell = Output("DELL-UID", "DELL S2725QS", builtin=False)
+    spk = Output("BuiltInSpeakerDevice", "MacBook Air Speakers", builtin=True)
+    monkeypatch.setattr(output_devices, "outputs", lambda: (dell, spk if fallback else None))
+    monkeypatch.setattr(sounds, "_out_uid", dell.uid if verdict is not None else None)
+    monkeypatch.setattr(sounds, "_out_ok", verdict)
+    if probed is not None:
+        monkeypatch.setattr(sounds, "_probe", lambda uid: probed)
+
+
+def test_sound_output_that_fails_says_so_and_what_to_do(monkeypatch):
+    import doctor
+    _outputs(monkeypatch, False)
+    c = doctor.check_sound_output()
+    assert c["ok"] is False
+    assert c["line"] == ("Sound output: DELL S2725QS FAILS to start audio — cues play on "
+                         "MacBook Air Speakers instead. Choose another output in System "
+                         "Settings → Sound → Output (or wake / reconnect the device).")
+
+
+def test_sound_output_that_works(monkeypatch):
+    import doctor
+    _outputs(monkeypatch, True)
+    assert doctor.check_sound_output()["line"] == "Sound output: DELL S2725QS — ok"
+
+
+def test_sound_output_not_tested_is_probed_only_when_asked(monkeypatch):
+    import doctor
+    _outputs(monkeypatch, None, fallback=False, probed=False)
+    assert doctor.check_sound_output()["ok"] is None          # the daemon: no probe
+    c = doctor.check_sound_output(probe=True)                 # the CLI: tests it
+    assert c["ok"] is False and "cues are skipped" in c["line"]
+
+
+def test_sound_output_check_never_raises(monkeypatch):
+    import doctor
+    import sounds
+    monkeypatch.setattr(sounds, "output_status",
+                        lambda: (_ for _ in ()).throw(RuntimeError("hal gone")))
+    c = doctor.check_sound_output()
+    assert c["ok"] is None and "hal gone" in c["line"]

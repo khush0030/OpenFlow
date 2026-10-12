@@ -21,12 +21,16 @@ class FakeStream:
         self.opts = opts
         self.fed = []
         self.aborted = False
+        self.log: list[str] = []
 
     def feed(self, block):
         self.fed.append(block)
 
     def abort(self):
         self.aborted = True
+
+    def end(self):
+        self.log.append("end")
 
 
 class StreamingTranscriber(FakeTranscriber):
@@ -46,6 +50,8 @@ class StreamingTranscriber(FakeTranscriber):
 
     def transcribe(self, audio, opts, stream=None):
         self.calls.append(stream)
+        if stream is not None:
+            stream.log.append("transcribe")
         return super().transcribe(audio, opts)
 
     def set_streaming(self, value):
@@ -150,3 +156,34 @@ def test_streaming_setting_applies_live(d):
     assert d.transcriber.policy == [False]
     d._apply_config(fresh)                        # unchanged: not re-applied
     assert d.transcriber.policy == [False]
+
+
+def test_key_up_ends_the_stream_before_the_hand_off(d, monkeypatch):
+    # Sarvam's finalize starts at key-up, overlapping the save, the worker
+    # start and the rest of the hand-off.
+    seen = []
+    real_processing = d._flow.processing
+    monkeypatch.setattr(d._flow, "processing",
+                        lambda audio, ctx: (seen.append(list(ctx.stream.log)),
+                                            real_processing(audio, ctx))[1])
+    d.on_record_start()
+    (s,) = d.transcriber.opened
+    d.on_record_stop()
+    assert seen == [["end"]], "end() must run before the widget / worker hand-off"
+    assert s.log == ["end", "transcribe"]
+    assert not s.aborted
+
+
+@pytest.mark.parametrize("why", ["cancel", "silent", "too short"])
+def test_takes_that_wont_be_transcribed_are_aborted_not_ended(d, why):
+    if why == "silent":
+        d.recorder.audio = np.zeros(32000, dtype=np.float32)
+    if why == "too short":
+        d.recorder.audio = np.full(1600, 0.05, dtype=np.float32)
+    d.on_record_start()
+    (s,) = d.transcriber.opened
+    if why == "cancel":
+        d._cancel_recording()
+    else:
+        d.on_record_stop()
+    assert s.aborted and "end" not in s.log

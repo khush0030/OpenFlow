@@ -206,6 +206,13 @@ def up(ts): return Ev(hn._NSEventTypeFlagsChanged, ALT_L, 0, ts)
 def other_key(ts): return Ev(hn._NSEventTypeKeyDown, 0, DOWN, ts)
 
 
+def feed(h, ev):
+    """Deliver an NSEvent as the monitor does, then wait for the key thread
+    (hotkeys_nsevent.KeyWorker) to have handled it."""
+    h._handler(ev)
+    assert hn.KEY_WORKER.drain(2.0), "key thread stuck"
+
+
 @pytest.fixture
 def keyed(env, monkeypatch, rec):
     monkeypatch.setattr(hn, "print", lambda *a, **k: None, raising=False)
@@ -222,34 +229,36 @@ def keyed(env, monkeypatch, rec):
 def test_double_tap_reuses_the_taps_mic(keyed):
     d = keyed
     now = time.monotonic()
-    d._hold._handler(down(now - 0.20))
-    d._hold._handler(up(now - 0.10))               # a tap: the take is dropped...
+    feed(d._hold, down(now - 0.20))
+    feed(d._hold, up(now - 0.10))               # a tap: the take is dropped...
     assert d.recorder.lingering and not d.recorder.is_recording
-    assert d._flow.state == IDLE
-    d._hold._handler(down(now - 0.05))             # ...and the second press reuses it
+    assert d._flow.state == RECORDING             # ...but the pill stays up (no stutter)
+    feed(d._hold, down(now - 0.05))             # ...and the second press reuses it
     assert d._hold.hands_free and d.recorder.is_recording
     assert d._flow.state == RECORDING
     assert len(FakeStream.instances) == 1          # one PortAudio open for the double-tap
 
 
-def test_lone_tap_closes_the_mic_after_the_window(keyed, monkeypatch):
+def test_lone_tap_closes_the_mic_and_the_pill_after_the_window(keyed, monkeypatch):
     monkeypatch.setattr(dm, "TAP_LINGER_SLACK_S", 0.0)
+    monkeypatch.setattr(dm, "_after", lambda delay, fn: threading.Timer(delay, fn).start())
     d = keyed
     now = time.monotonic()
-    # Released 0.55 s ago: 50 ms of the 600 ms window left.
-    d._hold._handler(down(now - 0.65))
-    d._hold._handler(up(now - 0.55))
-    assert d.recorder.lingering
+    # Released 0.30 s ago: 50 ms of the 350 ms window left.
+    feed(d._hold, down(now - 0.40))
+    feed(d._hold, up(now - 0.30))
+    assert d.recorder.lingering and d._flow.state == RECORDING
     time.sleep(0.2)
     _closer_done(d.recorder)
     assert not d.recorder.lingering and open_streams() == []
+    assert d._flow.state == IDLE
 
 
 def test_chord_closes_the_mic_at_once(keyed):
     d = keyed
     now = time.monotonic()
-    d._hold._handler(down(now - 0.1))
-    d._hold._handler(other_key(now - 0.05))        # the key used as a modifier
+    feed(d._hold, down(now - 0.1))
+    feed(d._hold, other_key(now - 0.05))        # the key used as a modifier
     _closer_done(d.recorder)
     assert not d.recorder.lingering and open_streams() == []
 
@@ -258,10 +267,10 @@ def test_hold_release_leaves_no_stream_open(keyed):
     d = keyed
     d._start_worker = lambda *a: None
     now = time.monotonic()
-    d._hold._handler(down(now - 1.0))
+    feed(d._hold, down(now - 1.0))
     s = FakeStream.instances[0]
     s.block(0.2)
     threading.Timer(0.01, s.block, args=(0.2,)).start()
-    d._hold._handler(up(now))
+    feed(d._hold, up(now))
     _closer_done(d.recorder)
     assert open_streams() == [] and not d.recorder.lingering

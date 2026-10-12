@@ -360,12 +360,19 @@ def top_phrases(rows: Iterable, n: int = 8, min_count: int = MIN_PHRASE_COUNT,
                             continue
                         counts[" ".join(gram)] += 1
     common = {p: c for p, c in counts.items() if c >= min_count}
-    keep = {}
-    for p, c in common.items():
-        if any(len(q) > len(p) and f" {p} " in f" {q} " and cq >= SUBSUME * c
-               for q, cq in common.items()):
-            continue
-        keep[p] = c
+    # Subsume in O(P·k²): each common phrase marks the shorter common
+    # phrases inside it (its proper contiguous sub-runs of words) instead
+    # of testing every pair, which froze Insights as history grew.
+    dropped: set[str] = set()
+    for q, cq in common.items():
+        qw = q.split(" ")
+        for k in range(1, len(qw)):
+            for i in range(len(qw) - k + 1):
+                p = " ".join(qw[i:i + k])
+                c = common.get(p)
+                if c is not None and cq >= SUBSUME * c:
+                    dropped.add(p)
+    keep = {p: c for p, c in common.items() if p not in dropped}
     return sorted(keep.items(), key=lambda kv: (-kv[1], -len(kv[0].split()), kv[0]))[:n]
 
 

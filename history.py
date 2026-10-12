@@ -40,7 +40,9 @@ class Entry:
     cleanup_provider: str | None = None
     # Never lose a word (Phase 4): NULL = pasted as before; 'failed' = not
     # transcribed yet, its audio kept at audio_path; 'retried' = transcribed
-    # later from the saved audio (widget Retry / History "Transcribe again").
+    # later from the saved audio (widget Retry / History "Transcribe again");
+    # 'discarded:no_speech' = no speech heard, nothing pasted, audio kept so
+    # History can still transcribe it (never retried by itself).
     status: str | None = None
     audio_path: str | None = None
 
@@ -77,6 +79,11 @@ _FAILOVER_COLS = ("stt_path", "cleanup_provider")
 _TAKE_COLS = ("status", "audio_path")
 STATUS_FAILED = "failed"
 STATUS_RETRIED = "retried"
+# A take judged to hold no speech (daemon: heard_speech / is_phantom). Not
+# a failure in Reliability ("discard…" reads as thrown away) and not in
+# failed_takes(), so AutoRetry leaves it alone; History offers it again.
+STATUS_NO_SPEECH = "discarded:no_speech"
+UNTRANSCRIBED = (STATUS_FAILED, STATUS_NO_SPEECH)
 # Same order as Entry's fields: rows are unpacked positionally.
 _COLS += ", " + ", ".join(_FAILOVER_COLS + _TAKE_COLS)
 
@@ -174,6 +181,15 @@ class History:
                 "UPDATE dictations SET raw = ?, final = ?, status = ?, audio_path = NULL "
                 "WHERE id = ?", (raw, final, status, int(entry_id)))
             return cur.rowcount > 0
+
+    def failed_takes(self, since: float = 0.0) -> list[Entry]:
+        """Saved takes still waiting for a transcript (status 'failed', audio
+        kept), recorded at or after `since`, oldest first."""
+        with self._conn() as c:
+            rows = c.execute(
+                f"SELECT {_COLS} FROM dictations WHERE status = ? AND audio_path IS NOT NULL "
+                "AND ts >= ? ORDER BY ts ASC, id ASC", (STATUS_FAILED, since)).fetchall()
+        return [Entry(*r) for r in rows]
 
     def audio_paths(self) -> set[str]:
         """Saved-take paths that history rows point at."""

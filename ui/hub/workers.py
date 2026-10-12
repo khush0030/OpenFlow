@@ -11,9 +11,14 @@ import threading
 from typing import Callable, Optional
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 OnDone = Callable[[object, Optional[BaseException]], None]
+
+# A page refreshing numbers it already shows waits this long before starting
+# the worker, so the page paints its cached values first: a Python worker
+# running alongside the paint holds the GIL and makes the show ~6x slower.
+REFRESH_DELAY_MS = 60
 
 
 class _Relay(QObject):
@@ -61,3 +66,20 @@ def run_in_thread(parent: QObject | None, fn: Callable[[], object], on_done: OnD
         relay.done.emit(result, error)
 
     threading.Thread(target=work, name="hub-worker", daemon=True).start()
+
+
+def refresh_in_thread(parent: QObject, fn: Callable[[], object], on_done: OnDone) -> None:
+    """run_in_thread after REFRESH_DELAY_MS (now, when it is 0). For
+    recomputing what a page already shows; cancelled if `parent` dies first."""
+    if REFRESH_DELAY_MS <= 0:
+        run_in_thread(parent, fn, on_done)
+        return
+    timer = QTimer(parent)               # a child: dies (and never fires) with the page
+    timer.setSingleShot(True)
+
+    def fire() -> None:
+        timer.deleteLater()
+        run_in_thread(parent, fn, on_done)
+
+    timer.timeout.connect(fire)
+    timer.start(REFRESH_DELAY_MS)

@@ -13,6 +13,7 @@ Usage:
   python -m openflow config path
   python -m openflow key set groq|anthropic   # fast cleanup LLM key → Keychain
   python -m openflow hub [page]      # open the main window (home, history, …)
+  python -m openflow supervise       # (LaunchAgent guard) restart OpenFlow if it died or hung
 """
 from __future__ import annotations
 
@@ -29,41 +30,94 @@ from config import CONFIG_DIR, CONFIG_PATH, DICT_PATH, HISTORY_PATH
 DAEMON_LOCK = CONFIG_DIR / "daemon.lock"
 
 
-def acquire_daemon_lock(path) -> int | None:
+def acquire_daemon_lock(path, wait_s: float = 0.0) -> int | None:
     """Exclusive non-blocking flock on `path`; the fd, or None when another
-    process holds it. The OS drops the lock if the process dies."""
+    process holds it (still, after retrying for `wait_s`). The OS drops the
+    lock if the process dies."""
     import errno
     import fcntl
+    import time
     from pathlib import Path
 
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        os.close(fd)
-        if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+    deadline = time.monotonic() + wait_s
+    while True:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except OSError as exc:
+            os.close(fd)
+            if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                raise
+        if time.monotonic() >= deadline:
             return None
-        raise
-    return fd
+        time.sleep(0.1)
 
 
 def release_daemon_lock(fd: int) -> None:
     os.close(fd)  # closing drops the flock
 
 
+# A supervisor's probe may hold the lock for an instant (supervisor.lock_held).
+LOCK_RETRY_S = 0.3
+# After killing a hung daemon, how long to wait for its lock to free up.
+TAKEOVER_WAIT_S = 3.0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
-    fd = acquire_daemon_lock(DAEMON_LOCK)
+    import supervisor
+    fd = acquire_daemon_lock(DAEMON_LOCK, wait_s=LOCK_RETRY_S)
     if fd is None:
-        # A daemon is already running: this launch is the user opening the
-        # app (Dock, Finder, Spotlight), so show the main window instead.
-        print("[cli] OpenFlow is already running; opening the main window.", flush=True)
-        return _open_hub("home")
+        hung = supervisor.hung_daemon(daemon=lambda: supervisor.running_daemon(DAEMON_LOCK))
+        if hung is None:
+            # A daemon is already running: this launch is the user opening
+            # the app (Dock, Finder, Spotlight), so show the main window.
+            print("[cli] OpenFlow is already running; opening the main window.", flush=True)
+            return _open_hub("home")
+        # It holds the lock but doesn't answer: the window couldn't reach
+        # it either. Replace it.
+        print(f"[cli] OpenFlow (pid {hung.pid}) isn't responding; restarting it.", flush=True)
+        supervisor.terminate(hung.pid)
+        fd = acquire_daemon_lock(DAEMON_LOCK, wait_s=TAKEOVER_WAIT_S)
+        if fd is None:
+            print("[cli] the old OpenFlow is still holding on; opening the main window.",
+                  flush=True)
+            return _open_hub("home")
+    try:
+        supervisor.write_lock_info(fd)
+    except OSError as e:
+        print(f"[cli] could not record the daemon pid: {e}", flush=True)
+    # Started on purpose (login, Dock, a supervisor): supervision is back on.
+    supervisor.clear_user_quit()
+    _refresh_login_guard()
     try:
         from daemon import main
         main()
     finally:
         release_daemon_lock(fd)
+    return 0
+
+
+def _refresh_login_guard() -> None:
+    """Bring the LaunchAgent guard up to date for users who turned on
+    Open at login before it existed (login_item.refresh_guard)."""
+    try:
+        import login_item
+        login_item.refresh_guard()
+    except Exception as e:
+        print(f"[cli] login guard refresh failed: {e}", flush=True)
+
+
+def _cmd_supervise(args: argparse.Namespace) -> int:
+    """LaunchAgent guard: one check, then exit (launchd runs it again)."""
+    import login_item
+    import supervisor
+    if not login_item.guard_installed():
+        return 0   # Open at login was turned off; launchd drops us at logout
+    outcome = supervisor.supervise_once()
+    if outcome != "running":
+        print(f"[supervise] {outcome}", flush=True)
     return 0
 
 
@@ -238,6 +292,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     print(doctor.check_accessibility()["line"])
     print(doctor.check_input_monitoring()["line"])
     print(doctor.check_microphone()["line"])
+    print(doctor.check_sound_output(probe=True)["line"])
 
     # pynput listener — start and watch for 5 seconds
     print("\nListening for any key events for 5s. Press right Option a few times…")
@@ -276,6 +331,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     for c in doctor.check_files():
         print(c["line"])
     print(doctor.check_sarvam_key()["line"])
+    for c in doctor.check_fallback_keys():
+        print(c["line"])
 
     return 0
 
@@ -295,6 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd")
 
     sub.add_parser("run", help="run the daemon (default)").set_defaults(func=_cmd_run)
+    sub.add_parser("supervise", help="(internal) LaunchAgent guard: restart OpenFlow "
+                   "if it died or stopped answering").set_defaults(func=_cmd_supervise)
 
     d = sub.add_parser("dict", help="manage custom dictionary")
     dsub = d.add_subparsers(dest="dcmd", required=True)

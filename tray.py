@@ -103,7 +103,13 @@ class OpenFlowTray(rumps.App):
 
     def _before_quit(self) -> None:
         """Any quit (Dock, ⌘Q, menu): stop the daemon and close the widget,
-        overlay and OpenFlow window with it."""
+        overlay and OpenFlow window with it. Recorded first, so nothing
+        (the widget, the LaunchAgent guard) brings OpenFlow back."""
+        try:
+            import supervisor
+            supervisor.mark_user_quit()
+        except Exception as e:
+            print(f"[tray] could not record the quit: {e}", flush=True)
         try:
             self.daemon.shutdown()
             quit_ui = getattr(self.daemon, "close_ui", None)
@@ -153,19 +159,19 @@ class OpenFlowTray(rumps.App):
         finally:
             rumps.quit_application()
 
-    # ── subprocess-spawned UI surfaces ───────────────────────
-    # Each opens a page of the main window (`openflow hub <page>`).
+    # ── the main window (its own process) ────────────────────
+    # Each opens a page of the main window: see open_hub.
     def _open_home(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.hub", "home")
+        open_hub("home")
 
     def _open_dictionary(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.hub", "dictionary")
+        open_hub("dictionary")
 
     def _open_history(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.hub", "history")
+        open_hub("history")
 
     def _open_settings(self, _sender) -> None:
-        _spawn_ui_subprocess("ui.hub", "settings")
+        open_hub("settings")
 
     # ── state subscription ───────────────────────────────────
     def _on_state_change(self, state: DaemonState) -> None:
@@ -308,7 +314,8 @@ def _install_main_menu(app) -> None:
 
 def notify_hub(msg: dict, sock_path: Path | None = None, timeout: float = 0.5) -> bool:
     """Send one JSON line to a running OpenFlow window (hub.sock):
-    {"quit": true} or {"raise": true}. False when no window is open."""
+    {"quit": true}, {"raise": true} or {"show": page}. False when no
+    window process is listening."""
     import json
     import socket
     try:
@@ -319,6 +326,15 @@ def notify_hub(msg: dict, sock_path: Path | None = None, timeout: float = 0.5) -
         return True
     except OSError:
         return False
+
+
+def open_hub(page: str) -> None:
+    """Show `page` in the main window. A running hub (shown or hidden) gets
+    {"show": page} over hub.sock, which is instant; only when none answers
+    is a new one launched (`open -n -a OpenFlow.app --args hub <page>`,
+    ~0.7–1.2 s even when it just hands the page to a running hub)."""
+    if not notify_hub({"show": page}):
+        _spawn_ui_subprocess("ui.hub", page)
 
 
 def _on_reopen() -> None:

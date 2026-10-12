@@ -16,7 +16,12 @@ class RecorderConfig:
     sample_rate: int = 16000
     channels: int = 1
     device: str | int | None = None
-    blocksize: int = 1024
+    # 16 ms blocks (was 1024 = 64 ms): key-up waits for the block covering
+    # the key-up moment (TAIL_WAIT_S), so a smaller block ends the take and
+    # hands the stream its last audio up to ~50 ms sooner. The level meter
+    # still averages ~64 ms (LEVEL_WINDOW_S) and the stream still sends
+    # ~64 ms messages (stream_stt.SEND_MIN_SAMPLES).
+    blocksize: int = 256
 
 
 def _rescan_devices() -> None:
@@ -30,15 +35,23 @@ def _rescan_devices() -> None:
 
 
 # Key-up waits at most this long for the mic block that covers the key-up
-# moment (a block is blocksize / sample_rate = 64 ms). A stalled device just
+# moment (a block is blocksize / sample_rate = 16 ms). A stalled device just
 # returns what it has.
 TAIL_WAIT_S = 0.25
 # start() waits at most this long for the previous take's stream to close.
 CLOSE_WAIT_S = 2.0
 # A cancelled take whose stream lingers (cancel(linger_s=...)) keeps at most
-# this many of its newest blocks (~1 s), so a restart can start the new take
-# at its key-down even when the handler ran late.
-PARK_KEEP_BLOCKS = 16
+# its newest ~1 s of blocks, so a restart can start the new take at its
+# key-down even when the handler ran late.
+PARK_KEEP_S = 1.0
+# current_rms (widget waveform, "can't hear you", edit end-pointing) is the
+# RMS over about this much audio, whatever the block size: the same 64 ms
+# the meter saw with 1024-sample blocks, so it doesn't get jumpier.
+LEVEL_WINDOW_S = 0.064
+
+
+def _blocks_for(seconds: float, blocksize: int, sample_rate: int) -> int:
+    return max(1, int(round(seconds * sample_rate / max(1, blocksize))))
 _PARKED = "parked"          # take marker of a lingering stream's callbacks
 
 
@@ -74,6 +87,9 @@ class Recorder:
         # when the timer fires; start() adopts it instead of opening anew.
         self._parked: tuple | None = None
         self._park_buf: deque | None = None
+        # Mean squares of the newest blocks, for current_rms (LEVEL_WINDOW_S).
+        self._levels: deque = deque(maxlen=_blocks_for(
+            LEVEL_WINDOW_S, self.cfg.blocksize, self.cfg.sample_rate))
 
     def _callback(self, indata: np.ndarray, frames: int, time, status,  # noqa: ARG002
                   take: int | None = None) -> None:
@@ -103,7 +119,9 @@ class Recorder:
                 self._tail.set()
                 return
         try:
-            self._rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+            levels = self._levels
+            levels.append(float(np.mean(np.square(block, dtype=np.float32))))
+            self._rms = float(np.sqrt(sum(levels) / len(levels)))
         except Exception:
             self._rms = 0.0
 
@@ -240,12 +258,14 @@ class Recorder:
             self._stream = None
             self._recording = False
             self._rms = 0.0
+            self._levels.clear()
             with self._cb_lock:
                 self._take += 1
                 self._stopping = False
                 self._q = queue.Queue()
                 if linger_s > 0:
-                    self._park_buf = deque(maxlen=PARK_KEEP_BLOCKS)
+                    self._park_buf = deque(maxlen=_blocks_for(
+                        PARK_KEEP_S, self.cfg.blocksize, self.cfg.sample_rate))
                     cell[0] = _PARKED
             if linger_s > 0:
                 timer = threading.Timer(linger_s, self._expire_parked, args=(stream,))
@@ -283,6 +303,7 @@ class Recorder:
             self._stream = None
             self._recording = False
             self._rms = 0.0
+            self._levels.clear()
             with self._cb_lock:
                 self._stopping = True
                 tail = self._tail
@@ -338,6 +359,78 @@ def loudest_rms(audio: np.ndarray, sample_rate: int = 16000,
 def heard_nothing(audio: np.ndarray, sample_rate: int = 16000,
                   threshold: float = NO_INPUT_RMS) -> bool:
     return loudest_rms(audio, sample_rate) < threshold
+
+
+# Was anything *said*? heard_nothing() only catches a dead mic: a live mic in
+# a quiet room sits at ~0.0015-0.0025 RMS (measured on a saved take,
+# 2026-10-11), right on NO_INPUT_RMS, so an empty or accidental take passes
+# it. Uploaded, that room noise comes back as a made-up word ("Okay.",
+# "Applications.", "I'll."): 21 of 21 such takes in openflow.log, none real.
+#
+# Speech is judged on the whole take in 20 ms frames of RMS, the same
+# measure as the live gate (stream_stt, [audio] silence_threshold = 0.01)
+# and trim_silence, so the numbers mean the same thing everywhere:
+# - a frame is (possibly soft) speech at SOFT_SPEECH_FACTOR x the silence
+#   threshold (0.006 by default: ~3x the room's floor, 40% under the live
+#   gate, so a quiet voice the stream never sent still counts);
+# - and it has to hold for MIN_SPEECH_RUN_S without a break: a syllable
+#   does, a click, a bump or a breath of noise doesn't.
+SPEECH_FRAME_S = 0.02
+SOFT_SPEECH_FACTOR = 0.6
+MIN_SPEECH_RUN_S = 0.06
+# Below this much audio at the full silence threshold a take is
+# low-energy: a lone stock word from it is likely made up
+# (transcribe.is_phantom). A spoken "okay" at a normal level has ~0.3-0.5 s.
+LOW_ENERGY_SPEECH_S = 0.25
+
+
+def frame_rms(audio: np.ndarray, sample_rate: int = 16000,
+              frame_s: float = SPEECH_FRAME_S) -> np.ndarray:
+    """RMS of each whole `frame_s` frame of the take."""
+    x = np.asarray(audio, dtype=np.float32).reshape(-1)
+    n = max(1, int(sample_rate * frame_s))
+    count = x.size // n
+    if count == 0:
+        return np.zeros(0, dtype=np.float64)
+    frames = x[: count * n].reshape(count, n).astype(np.float64)
+    return np.sqrt(np.mean(frames * frames, axis=1))
+
+
+def _longest_run(flags: np.ndarray) -> int:
+    best = run = 0
+    for f in flags:
+        run = run + 1 if f else 0
+        best = max(best, run)
+    return best
+
+
+def heard_speech(audio: np.ndarray, sample_rate: int = 16000,
+                 silence_threshold: float = 0.01) -> bool:
+    """True if some stretch of the take is loud enough, for long enough, to
+    be speech (see above). A threshold of 0 turns the check off."""
+    threshold = silence_threshold * SOFT_SPEECH_FACTOR
+    if threshold <= 0:
+        return np.size(audio) > 0
+    loud = frame_rms(audio, sample_rate) >= threshold
+    if not loud.any():
+        return False
+    need = max(1, int(round(MIN_SPEECH_RUN_S / SPEECH_FRAME_S)))
+    return _longest_run(loud) >= need
+
+
+def speech_seconds(audio: np.ndarray, sample_rate: int = 16000,
+                   threshold: float = 0.01) -> float:
+    """Seconds of the take at or above `threshold` (20 ms frames)."""
+    return float(np.count_nonzero(frame_rms(audio, sample_rate) >= threshold)) * SPEECH_FRAME_S
+
+
+def low_energy(audio: np.ndarray, sample_rate: int = 16000,
+               silence_threshold: float = 0.01) -> bool:
+    """Less than LOW_ENERGY_SPEECH_S of the take reached the silence
+    threshold: next to no speech at a normal level, however long it ran."""
+    if silence_threshold <= 0:
+        return False
+    return speech_seconds(audio, sample_rate, silence_threshold) < LOW_ENERGY_SPEECH_S
 
 
 def save_wav(path: str, audio: np.ndarray, sample_rate: int = 16000) -> None:
